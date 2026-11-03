@@ -86,7 +86,7 @@
       const model = editor?.getModel();
       if (!model || !viewer?.pdfDocument || key && !diffHighlight || !items?.length && !key) return;
       const data = review.locator.reviewLists.get(items);
-      const entries = data?.entries || items.map(item => item.pdfSource || review.locator.sourceEntry(review.locator.editorSourceIndex(model), item.sourceStart, item.sourceEnd, true));
+      const entries = data?.entries || items.map(item => item.pdfSource || review.locator.editorSourceIndex(model).entry(item.sourceStart, item.sourceEnd, true));
       const pointer = { editor, model, version: model.getVersionId?.(), pdf: viewer?.pdfDocument, entries, key };
       if (key) defaultPointer = pointer;
       else reviewPointer = pointer;
@@ -255,11 +255,12 @@
       }) : [];
       if (!marked && !ranges.some(range => model.getOffsetAt(range.getEndPosition()) > model.getOffsetAt(range.getStartPosition()))) { select([]); if (viewer) queueWarm(); return; }
       review.locator.editorSourceIndex(model);
-      if (viewer && review.locator.index.preparation?.pdf !== viewer.pdfDocument) queueWarm();
+      if (viewer && review.locator.index.prepared?.pdf !== viewer.pdfDocument) queueWarm();
       const entries = ranges.map(range => {
         const start = model.getOffsetAt(range.getStartPosition()), end = model.getOffsetAt(range.getEndPosition());
-        const a = window.PdfSelectionDiff.lowerBound(review.locator.index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(review.locator.index.starts, end);
-        return review.locator.sourceEntry(review.locator.index, a, b, marked, end > start ? undefined : "");
+        const index = review.locator.index, a = window.PdfSelectionDiff.lowerBound(index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(index.starts, end);
+        return { index, start: a, end: b, marked, text: end > start ? index.raw.slice(a, b) : "",
+          before: index.raw.slice(Math.max(0, a - 160), a), after: index.raw.slice(b, b + 160) };
       });
       select(entries, true);
 
@@ -494,7 +495,7 @@
     const model = editor?.getModel();
     if (!model || !editor.setSelection) return;
     activeEditor = editor;
-    const index = review.locator.editorSourceIndex(model), { hit, difference } = locateSource(index, chunks);
+    const index = review.locator.editorSourceIndex(model), { hit, difference } = index.locateSource(chunks, viewer?.pdfDocument);
     select([]);
     for (const chunk of chunks) {
       const result = nativeBoxes(chunk.div, [], [{ range: { start: chunk.start, end: chunk.end }, difference }]);
@@ -533,7 +534,7 @@
     const number = Number(div.dataset.pageNumber) || viewer?.currentPageNumber;
     const view = viewer?.getPageView(number - 1);
     const pdf = viewer?.pdfDocument;
-    const fontAt = review.locator.layerFonts(view, layer, () => {
+    const fontAt = review.layerFonts(view, layer, () => {
       if (stopped || !selectionHighlight || viewer?.pdfDocument !== pdf) return;
       clearLayer(div); queueWarm(number);
       if (!document.getSelection()?.isCollapsed) selectFromPdf();
@@ -550,7 +551,7 @@
       if (element === layer) element = node.parentElement;
       measurement.selectNodeContents(node);
       const item = fontAt.items?.get(element);
-      const box = item ? { bottom: -review.locator.textItemBaseline(item), height: item.height,
+      const box = item ? { bottom: -review.textItemBaseline(item), height: item.height,
         left: item.transform[4], right: item.transform[4] + item.width } : measurement.getBoundingClientRect();
       nodes.push({ node, element, box });
     }
@@ -571,7 +572,7 @@
       if (contexts.length || reviewPointer) schedule();
     });
     observer.observe(layer, { subtree: true, childList: true, characterData: true, attributes: true });
-    const index = new window.PdfSelectionDiff.PdfSourceIndex(review.locator, { layer, raw, parts, observer, pdf, width: div.clientWidth, height: div.clientHeight });
+    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, observer, pdf, width: div.clientWidth, height: div.clientHeight });
     layers.set(div, index);
     return index;
   }
@@ -580,44 +581,53 @@
     const documentIndex = review.locator.getDocumentIndex(pdf, scope);
     const visible = review.locator.environment.getVisiblePages?.() || [], pageIndexes = visible.map(page => page.index);
     for (const source of new Set(entries.map(entry => entry.index).filter(Boolean)))
-      source?.diff(pageIndexes, pdf);
+      source?.prepare(pageIndexes, pdf);
     entries = entries.flatMap(entry => {
       if (!visibleOnly && !entry.marked) return [entry];
-      const connections = entry.index?.connectionPairs([...pageIndexes, documentIndex]);
-      if (!connections?.length || connections.some(([range]) => range.start <= entry.start && range.end >= entry.end)) return [entry];
-      const ranges = [...connections.map(([range]) => range),
-        ...(entry.index.preparation?.differences || entry.index.differences).items
+      const connections = entry.index?.pairs([...pageIndexes, documentIndex]);
+      if (!connections?.length || connections.some(range => range.start <= entry.start && range.end >= entry.end)) return [entry];
+      const ranges = [...connections,
+        ...(entry.index.prepared?.differences || entry.index.getDifferences()).items
           .filter(item => item.missing).map(item => ({ start: item.sourceStart, end: item.sourceEnd }))]
         .map(range => [Math.max(entry.start, range.start), Math.min(entry.end, range.end)]).filter(([start, end]) => end > start);
-      return ranges.length ? ranges.map(([start, end]) => review.locator.sourceEntry(entry.index, start, end, entry.marked)) : [entry];
+      return ranges.length ? ranges.map(([start, end]) => entry.index.entry(start, end, entry.marked)) : [entry];
     });
     const locations = entries.map(entry => {
+      const absent = review.locator.textEnabled && entry.index
+        && (entry.index.prepared?.differences || entry.index.getDifferences()).items
+        .find(item => item.missing && (entry.start === entry.end ? entry.marked && entry.start >= item.sourceStart && entry.start <= item.sourceEnd
+          : entry.start < item.sourceEnd && entry.end > item.sourceStart));
+      if (absent) {
+        const source = { index: entry.index, start: entry.start < entry.end ? Math.max(entry.start, absent.sourceStart) : absent.sourceStart,
+          end: entry.start < entry.end ? Math.min(entry.end, absent.sourceEnd) : absent.sourceEnd };
+        const difference = { html: entry.index.raw.slice(source.start, source.end), pdf: '', missing: absent.missing };
+        const mapped = documentIndex && entry.index.missingRange(documentIndex, absent.sourceStart, absent.sourceEnd);
+        const targets = mapped ? documentIndex.pages.flatMap(page => {
+          if (mapped.start < page.start || mapped.end > page.end || mapped.endBias && mapped.start === page.start) return [];
+          const range = { ...mapped, start: mapped.start - page.start, end: mapped.end - page.start };
+          return [{ pageNumber: page.number, range,
+            item: page.parts.find(part => part.end >= mapped.start)?.item,
+            start: source.start, end: source.end, marked: true, text: documentIndex.raw.slice(mapped.start, mapped.end), source, difference }];
+        }) : visible.flatMap(({ number, index }) => {
+          const range = index?.raw.trim() && entry.index.missingRange(index, absent.sourceStart, absent.sourceEnd);
+          return range ? [{ pageNumber: number, range,
+            start: source.start, end: source.end, marked: true, text: '', source, difference }] : [];
+        });
+        return { entry, targets, queries: [], notice: { ...difference, source } };
+      }
       let index = documentIndex, hit = null, number;
       for (const page of visible) {
-        hit = page.index && entry.index && entry.index.connectedRange(page.index, entry.start, entry.end, false, undefined, true);
+        hit = page.index && entry.index?.range(page.index, entry.start, entry.end, false, undefined, true);
         if (!hit) continue;
         ({ index, number } = page);
         break;
       }
-      if (!hit && index) hit = (entry.index && entry.index.connectedRange(index, entry.start, entry.end, false, undefined, true))
-        || (!visibleOnly && index.locate(entry, entry.index && index.pageScopes.get(entry.index)?.scope));
-      const missing = review.locator.textEnabled && entry.index
-        && (entry.index.preparation?.differences || entry.index.differences).items
-        .find(item => item.missing && (entry.start === entry.end ? entry.marked && entry.start >= item.sourceStart && entry.start <= item.sourceEnd
-          : entry.start < item.sourceEnd && entry.end > item.sourceStart));
-      if (missing) {
-        const source = { index: entry.index, start: entry.start < entry.end ? Math.max(entry.start, missing.sourceStart) : missing.sourceStart,
-          end: entry.start < entry.end ? Math.min(entry.end, missing.sourceEnd) : missing.sourceEnd };
-        const difference = { html: entry.index.raw.slice(source.start, source.end), pdf: '', missing: true };
-        const targets = visible.flatMap(({ number, index }) => {
-          const range = index?.raw.trim() && entry.index.missingRange(index, missing.sourceStart, missing.sourceEnd, entry.start, entry.end);
-          return range ? [{ pageNumber: number, range,
-            start: source.start, end: source.end, marked: true, text: '', source, difference }] : [];
-        });
-        return { entry, targets, notice: { ...difference, source } };
-      }
+      if (!hit && index) hit = entry.index
+        ? visibleOnly ? entry.index.range(index, entry.start, entry.end, false, undefined, true)
+          : entry.index.locate(index, entry, false, index.connections.get(entry.index)?.scope, true)
+        : !visibleOnly && index.search(entry);
       if (!hit) return { entry, targets: [], queries: entry.index ? [] : [entry.text] };
-      const connection = hit.connection || (entry.index && entry.index.rememberConnection(entry.start, entry.end, index, hit));
+      const connection = hit.connection;
       const counterpart = index.raw.slice(hit.start, hit.end);
       const difference = hit.approximate || entry.text !== counterpart ? { html: entry.text, pdf: counterpart } : null;
       const pages = index.pages || [{ number, start: 0, end: index.raw.length, parts: index.parts }];
@@ -625,11 +635,11 @@
         : hit.start < page.end && hit.end > page.start).map(page => {
         const start = Math.max(hit.start, page.start), end = Math.min(hit.end, page.end);
         const target = { pageNumber: page.number, item: page.parts.find(part => part.end > start)?.item,
-          difference,
+          difference, layer: index.layer, range: index.layer && { start, end },
           marked: entry.marked, text: index.raw.slice(start, end), before: index.raw.slice(Math.max(page.start, start - 160), start),
           after: index.raw.slice(end, Math.min(page.end, end + 160)) };
         if (target.difference && entry.index) target.source = { index: entry.index, start: entry.start, end: entry.end };
-        const sourceRange = entry.marked || entry.start === entry.end ? entry : entry.index && entry.index.connectedRange(index, start, end, true, connection);
+        const sourceRange = entry.marked || entry.start === entry.end ? entry : entry.index?.range(index, start, end, true, connection);
         if (sourceRange || hit.start === hit.end) Object.assign(target, { index: entry.index,
           start: sourceRange?.start ?? entry.start, end: sourceRange?.end ?? entry.end });
         return target;
@@ -641,66 +651,21 @@
     if (visibleOnly || documentIndex || locations.every(location => location.targets.length)) return locations;
     return review.locator.indexDocument(pdf, scope).then(index => index ? findLocations(pdf, entries) : locations);
   }
-  function locateSource(index, chunks) {
-    const first = chunks[0], last = chunks.at(-1);
-    index?.diff(chunks.map(chunk => chunk.index), viewer?.pdfDocument);
-    const entry = {
-      text: chunks.map(({ index, start, end }) => index.raw.slice(start, end)).join("\n"),
-      before: first.index.raw.slice(Math.max(0, first.start - 160), first.start),
-      after: last.index.raw.slice(last.end, last.end + 160)
-    };
-    let hit = chunks.length === 1 && index.connectedRange(first.index, first.start, first.end, true);
-    if (!hit) {
-      const left = index.pageScopes.get(first.index)?.scope, right = index.pageScopes.get(last.index)?.scope;
-      const scope = left === right ? left : left && right && left.start <= right.start ? { start: left.start, end: right.end } : null;
-      hit = index.locate(entry, scope);
-    }
-    const html = hit && index.raw.slice(hit.start, hit.end);
-    const differs = hit && window.PdfSelectionDiff.significantText(html, index, hit.start) !== window.PdfSelectionDiff.significantText(entry.text);
-    const difference = !hit ? { message: "No reliable HTML match" } : differs ? { html, pdf: entry.text } : null;
-    if (chunks.length === 1 && hit && !hit.connection)
-      index.rememberConnection(hit.start, hit.end, first.index, { start: first.start, end: first.end });
-    return { hit, difference };
-  }
-  function locateLayer(index, queries, targets = []) {
-    const { raw } = index;
-    const hits = new Map();
-    const append = matches => {
-      for (const hit of matches) {
-        const key = `${hit.start}:${hit.end}`;
-        if (!hits.has(key) || hit.difference?.missing) hits.set(key, hit);
-      }
-    };
-    let focusHit = null;
-    for (const target of targets) {
-      const connection = target.index && target.index.connectedRange(index, target.start, target.end, false, undefined, true);
-      // Painting adds source/difference metadata; keep the cached target range serializable.
-      const hit = target.range ? { ...target.range } : connection || index.locate(target);
-      if (hit) {
-        if (target.index && !connection) target.index.rememberConnection(target.start, target.end, index, hit);
-        hit.difference = target.difference || (hit.approximate ? { html: target.text, pdf: raw.slice(hit.start, hit.end) } : null);
-        hit.source = target.source || target.index && { index: target.index, start: target.start, end: target.end };
-        if (!focusHit) focusHit = hit;
-      }
-      // Unconfirmed default differences must not highlight unrelated occurrences.
-      append(hit ? [hit] : target.marked || target.index ? [] : index.matches([target.text]));
-    }
-    append(index.matches(queries));
-    return { hits: [...hits.values()], focusHit };
-  }
+
   function nativeBoxes(div, queries, targets = []) {
     const index = layerIndex(div);
     if (!index) return { boxes: [], count: 0, pending: true };
     const key = JSON.stringify([queries, targets.map(target =>
       [target.text, target.before, target.after, target.difference, target.range, target.start, target.end, target.marked])]);
     const source = targets.find(target => target.source)?.source.index || contexts[0]?.index;
+    const connections = source?.connections.get(index)?.ranges;
     let cached = pageResults.get(index);
-    if (!cached || cached.source !== source) {
-      cached = { source, results: new Map() };
+    if (!cached || cached.source !== source || cached.connections !== connections) {
+      cached = { source, connections, results: new Map() };
       pageResults.set(index, cached);
     }
     if (cached.results.has(key)) return cached.results.get(key);
-    const { hits, focusHit } = locateLayer(index, queries, targets);
+    const { hits, focusHit } = index.locateLayer(queries, targets);
     const result = review.highlights.measureHighlights(div, index, hits, focusHit);
     // Reuse the confirmed PDF item when its counterpart has no measurable text.
     if (!result.notices.length) result.notices = targets.filter(target => target.marked && target.source && target.difference).map(target => {
@@ -733,10 +698,9 @@
       const result = nativeBoxes(div, [], targets.filter(target => target.pageNumber === number));
       // Painting a marker must not publish selection events that could reopen
       // the popup on its previous side during a window switch; clicks publish it.
-      // A text layer can be temporarily unavailable while PDF.js updates it.
-      // Keep the last mapped pointer until its replacement can be measured.
-      if (result.boxes.length) {
-        const painted = review.highlights.paintHighlight(div, result.boxes, options.color, true);
+      if (result.pending) continue;
+      const painted = review.highlights.paintHighlight(div, result.boxes, options.color, true);
+      if (painted) {
         painted.notices = result.notices;
         painted.node.classList.toggle('mew-pdf-default-highlight', !reviewPointer);
         painted.node.classList.toggle('mew-review-preview',
@@ -810,8 +774,7 @@
             left: horizontal ? Math.min((left - rect.left) / sx - 24, Math.max(0, (box.right - right) / sx)) : 0
           });
         }
-      } else if (!scrolled && (!visiblePages().includes(target.pageNumber)
-        || target.item && !view?.div?.querySelector(".textLayer")?.textContent)) {
+      } else if (!scrolled) {
         scrolled = true;
         const item = target.item;
         instance.scrollPageIntoView({ pageNumber: target.pageNumber,
