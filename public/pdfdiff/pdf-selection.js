@@ -601,7 +601,7 @@
       }
       if (!hit && index) hit = (entry.index && entry.index.connectedRange(index, entry.start, entry.end, false, undefined, true))
         || (!visibleOnly && index.locate(entry, entry.index && index.pageScopes.get(entry.index)?.scope));
-      const missing = (!hit || entry.marked && entry.start === entry.end) && review.locator.textEnabled && entry.index
+      const missing = review.locator.textEnabled && entry.index
         && (entry.index.preparation?.differences || entry.index.differences).items
         .find(item => item.missing && (entry.start === entry.end ? entry.marked && entry.start >= item.sourceStart && entry.start <= item.sourceEnd
           : entry.start < item.sourceEnd && entry.end > item.sourceStart));
@@ -611,7 +611,7 @@
         const difference = { html: entry.index.raw.slice(source.start, source.end), pdf: '', missing: true };
         const targets = visible.flatMap(({ number, index }) => {
           const range = index?.raw.trim() && entry.index.missingRange(index, missing.sourceStart, missing.sourceEnd, entry.start, entry.end);
-          return range && range.end > range.start ? [{ pageNumber: number, range,
+          return range ? [{ pageNumber: number, range,
             start: source.start, end: source.end, marked: true, text: '', source, difference }] : [];
         });
         return { entry, targets, notice: { ...difference, source } };
@@ -674,7 +674,8 @@
     let focusHit = null;
     for (const target of targets) {
       const connection = target.index && target.index.connectedRange(index, target.start, target.end, false, undefined, true);
-      const hit = target.range || connection || index.locate(target);
+      // Painting adds source/difference metadata; keep the cached target range serializable.
+      const hit = target.range ? { ...target.range } : connection || index.locate(target);
       if (hit) {
         if (target.index && !connection) target.index.rememberConnection(target.start, target.end, index, hit);
         hit.difference = target.difference || (hit.approximate ? { html: target.text, pdf: raw.slice(hit.start, hit.end) } : null);
@@ -783,7 +784,7 @@
     }
     const locations = locationSearch.locations;
     publishSources();
-    publishDifferences(null, null, locations?.flatMap(location => location.notice && !location.targets.length ? [location.notice] : []) || [], true);
+    publishDifferences(null, null, locations?.flatMap(location => location.notice && (location.notice.missing || !location.targets.length) ? [location.notice] : []) || [], true);
     const exact = locations?.flatMap(location => location.targets) || [];
     const queries = locations?.flatMap(location => location.targets.length ? [] : location.queries || [location.entry.text]) || [];
     if (!positioned && exact.length) {

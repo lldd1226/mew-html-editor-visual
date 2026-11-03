@@ -301,7 +301,10 @@ class PdfSourceIndex {
     for (const range of connection ? diff.ranges : []) {
       const [a, b, from, to, part] = range;
       const [html, pdf] = part.significant, start = connection.start + a, pdfStart = connection.targetStart + from, pdfEnd = connection.targetStart + to;
-      if (refreshText && part.changed && (/\d/.test(part.html) ? significantText(part.html, this, start) : html) !== pdf) diff.textRanges.push(range);
+      // A footnote omitted by OCR is tolerated; a number inserted elsewhere is a relocation.
+      const comparable = /\d/.test(part.html) ? significantText(part.html, this, start) : html;
+      if (refreshText && part.changed && (comparable !== pdf || comparable !== html && diff.ranges.some(([, , , , other]) =>
+        other.changed && !other.significant[0] && other.significant[1] === html))) diff.textRanges.push(range);
       if (!(diff.distance <= 128) && part.changed && html !== pdf && Math.max(html.length, pdf.length) > 128) diff.reliable = false;
       let compared = runs.slice(lowerBound(runs, pdfStart + Number(from < to), font => font.end),
         lowerBound(runs, pdfEnd + Number(from === to), font => font.start));
@@ -331,10 +334,20 @@ class PdfSourceIndex {
   missingRange(target, start, end, selectionStart = start, selectionEnd = end) {
     const ordered = (this.connections.get(target) || []).toSorted((a, b) => a.start - b.start);
     const before = ordered.findLast(c => c.end <= start), after = ordered.find(c => c.start >= end);
-    if (!before && !after) return null;
-    const a = before ? this.connectedRange(target, selectionStart, before.end)?.start ?? before.targetEnd : 0;
-    const b = after ? this.connectedRange(target, after.start, selectionEnd)?.end ?? after.targetStart : target.raw.length;
-    return b < a ? null : { start: a, end: target.raw.slice(a, b).trim() ? b : a, endBias: !!before };
+    const hit = this.connectedRange(target, start, end, false, undefined, true);
+    if (!before && !after && !hit) return null;
+    const a = hit?.start ?? (before ? this.connectedRange(target, selectionStart, before.end)?.start ?? before.targetEnd : 0);
+    const b = hit?.end ?? (after ? this.connectedRange(target, after.start, selectionEnd)?.end ?? after.targetStart : target.raw.length);
+    const parts = (a === 0 || b === target.raw.length || !target.raw.slice(a, b).trim()) && target.fontRuns(0, target.raw.length, true)
+      .filter(part => target.raw.slice(part.start, part.end).trim());
+    const part = parts && (a && b === target.raw.length ? parts.at(-1) : parts.find(part => part.end > a) || parts.at(-1));
+    if (b >= a && part && ordered.some(connection => this.connectionDiff(target, connection)?.ranges.some(([, , from, to, span]) =>
+      !span.changed && connection.targetStart + from < part.end && connection.targetStart + to > part.start))) {
+      const endBias = a > 0 && b === target.raw.length;
+      const at = endBias ? part.end : part.start;
+      return { start: at, end: at, endBias };
+    }
+    return b < a ? null : { start: part?.start ?? a, end: part?.end ?? (target.raw.slice(a, b).trim() ? b : a), endBias: !!before };
   }
   reviewCandidates(notice = null, fonts = false, edits = true, text = true, targets = notice ? [] : this.preparation?.pages || [],
     connections = targets === this.preparation?.pages ? this.preparation.pairs : this.connectionPairs(targets, true)) {
@@ -342,8 +355,10 @@ class PdfSourceIndex {
     const add = (start, diff, connection = null, missing = false) => {
       if (!diff) return;
       if (!connection) this.connectionDiff(null, null, diff);
+      const mapped = diff.ranges.filter(([, , , , part]) => !part.changed && /\p{L}/u.test(part.pdf));
       for (const [a, b, , , part] of connection ? diff.textRanges : diff.ranges) {
         const from = start + a, end = start + b;
+        const absent = missing || connection && (part.blank[1] || /\p{L}/u.test(part.html) && !/\p{L}/u.test(part.pdf)) && (!mapped.length || b <= mapped[0][0] || a >= mapped.at(-1)[1]);
         // Explicit review selections retain footnote digits suppressed in default comparisons.
         if ((connection || part.changed && significantText(part.html, !notice ? this : null, from) !== significantText(part.pdf))
           && (!connection || connections.find(([other]) => other === connection || other.start <= from && other.end >= end
@@ -352,9 +367,9 @@ class PdfSourceIndex {
           if (items[low]?.sourceStart === from || low && items[low - 1].sourceEnd > from
             || items[low] && items[low].sourceStart < end && items[low].sourceEnd > from) continue;
           items.splice(low, 0, {
-            id: `${from}:${end}`, sourceStart: from, sourceEnd: end, ...(missing ? { missing: true } : {}),
+            id: `${from}:${end}`, sourceStart: from, sourceEnd: end, ...(absent ? { missing: true } : {}),
             comparison: { html: part.html, pdf: part.pdf }, options: [
-              { id: 'pdf', label: '替换', edits: edits && !missing
+              { id: 'pdf', label: '替换', edits: edits && !absent
                 && !(this.starts?.[from] < this.ends?.[from - 1] || this.starts?.[end] < this.ends?.[end - 1])
                 ? this.textEdits(from, end, part.pdf) : [] }
             ]
@@ -470,12 +485,15 @@ class PdfSourceIndex {
   // Reuse text alignment; changed spans require agreement on each PDF style.
   formatDifferences(candidates = [], keys = ['italic', 'bold'], edits = true, connections = this.preparation?.pairs || []) {
     keys = keys === true ? ['italic', 'bold'] : keys || [];
+    const missing = item => candidates.some(value => value.missing && value.sourceStart < item.sourceEnd && value.sourceEnd > item.sourceStart);
+    candidates = candidates.filter(item => !item.font || !missing(item));
     if (keys.length === 2 && candidates.some(item => item.font)) return candidates;
     if (keys.length !== 2) candidates = candidates.filter(item => !item.font);
     if (!this.formats || !keys.length) return candidates;
     const items = new Map();
     for (const [connection, target] of connections)
       for (const item of this.connectionDiff(target, connection)?.fontItems || []) {
+        if (missing(item)) continue;
         const font = { ...item.font }, id = `font:${item.sourceStart}:${item.sourceEnd}`;
         for (const key of ['italic', 'bold']) if (!keys.includes(key)) font[key] = null;
         if (!items.has(id) && keys.some(key => typeof font[key] === 'boolean' && font[key] !== item.htmlFont[key]))
@@ -558,7 +576,7 @@ class PdfSourceIndex {
     for (const item of reverse || []) this.rememberConnection(item.targetStart, item.targetEnd, page, { start: item.start, end: item.end }, {
       diff: { distance: item.distance, parts: item.spans.map(span => ({ html: span.pdf, pdf: span.html, changed: span.changed })) }
     });
-    const connection = reverse?.length ? { start: Math.min(...reverse.map(item => item.targetStart)), end: Math.max(...reverse.map(item => item.targetEnd)) }
+    const connection = reverse?.some(item => item.start === 0 && item.end === page.raw.length) ? { start: Math.min(...reverse.map(item => item.targetStart)), end: Math.max(...reverse.map(item => item.targetEnd)) }
       : (this.connections.get(page) || []).find(item => item.targetStart === 0 && item.targetEnd === page.raw.length)
         || connect && (page.sourcePages?.length || page.layer) && this.rememberConnection(0, this.raw.length, page, { start: 0, end: page.raw.length }, { recover: true });
     const matches = cached?.matches || { 0: connection ? [] : this.matches([page.raw]) };

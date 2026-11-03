@@ -71,7 +71,7 @@
   async function editorPathForPage(volume = state.volume, page = state.page) {
     const key = `${volume}:${page}`;
     if (editorPathCache.has(key)) return editorPathCache.get(key);
-    const link = await api(`/api/reader/link/${encodeURIComponent(volume)}/${page}`);
+    const link = await api(`/api/reader/link/${encodeURIComponent(volume)}/${encodeURIComponent(page)}`);
     editorPathCache.set(key, link.path);
     return link.path;
   }
@@ -167,13 +167,23 @@
     updateHistoryButtons();
   }
 
+  function normalizePage(value) {
+    if (value == null || String(value).trim() === "") return null;
+    const text = String(value).trim(), number = Number(text);
+    return Number.isSafeInteger(number) ? number : text;
+  }
+
+  function pageCandidates(pages, target) {
+    return pages.filter(page => typeof target === "number" ? typeof page === "number" && page <= target : page === target);
+  }
+
   function currentVolume() {
     return state.config?.volumes.find((item) => item.id === state.volume);
   }
 
   function rememberPdfPage(pageLabel) {
-    const page = Number(String(pageLabel ?? "").match(/^(\d+)/)?.[1]);
-    if (!Number.isSafeInteger(page) || page <= 0 || state.volume == null) return null;
+    const page = normalizePage(pageLabel);
+    if (page == null || state.volume == null) return null;
     state.pdfPage = page;
     localStorage.setItem(LAST_VOLUME_KEY, state.volume);
     localStorage.setItem(LAST_PAGE_KEY, String(page));
@@ -269,13 +279,11 @@
   }
 
   async function loadPageOrPrevious(volume, requestedPage) {
-    const candidates = volume.pages
-      .filter((page) => page <= requestedPage)
-      .sort((a, b) => b - a);
+    const candidates = pageCandidates(volume.pages, requestedPage).reverse();
 
     for (const page of candidates) {
       try {
-        const url = `/api/reader/page/${encodeURIComponent(volume.id)}/${page}`;
+        const url = `/api/reader/page/${encodeURIComponent(volume.id)}/${encodeURIComponent(page)}`;
         const key = `${volume.id}:${page}`;
         if (documents.has(key)) {
           const document = documents.get(key);
@@ -307,7 +315,7 @@
     const volume = currentVolume();
     if (!volume) return;
     const index = volume.pages.indexOf(state.page);
-    const chapter = (volume.toc || []).findLast(item => item.page <= state.page);
+    const chapter = (volume.toc || []).findLast(item => typeof state.page === "number" ? typeof normalizePage(item.page) === "number" && normalizePage(item.page) <= state.page : normalizePage(item.page) === state.page);
     ui.renderNavigation({
       filePath: editorPathCache.get(`${state.volume}:${state.page}`) || "",
       chapterTitle: chapter?.title || volume.title,
@@ -333,14 +341,14 @@
     if (state.workspaceMode !== "reader" && !force && !(await core.saveBeforeNavigation(() => state.document.dirty, save))) return false;
     const volume = state.config.volumes.find((item) => item.id === String(targetVolume));
     if (!volume) return false;
-    const requestedPage = Number(targetPage);
-    if (!Number.isFinite(requestedPage)) return false;
+    const requestedPage = normalizePage(targetPage);
+    if (requestedPage == null) return false;
     const revision = ++state.navigationRevision;
     const readerOnly = state.workspaceMode === "reader";
     const previousDocument = state.document;
     const workingCopyRevision = previousDocument.revision;
     try {
-      const candidate = volume.pages.filter((page) => page <= requestedPage).at(-1);
+      const candidate = pageCandidates(volume.pages, requestedPage).at(-1);
       const loaded = readerOnly
         ? candidate == null ? null : { page: candidate, document: new DocumentModel({ editable: false }), editorPath: null }
         : await loadPageOrPrevious(volume, requestedPage);
@@ -526,8 +534,10 @@
   }
 
   let refreshing = false;
+  let refreshPending = false;
   async function refreshLocalFile() {
-    if (state.workspaceMode === "reader" || refreshing || document.hidden || state.page == null || !state.document.editable) return;
+    if (state.workspaceMode === "reader" || state.page == null || !state.document.editable) return;
+    if (refreshing) { refreshPending = true; return; }
     refreshing = true;
     const current = state.document;
     try {
@@ -543,7 +553,10 @@
       } else if (result === "saved") markDirty();
     } catch (error) {
       notify(`本地文件刷新失败：${error.message}`, true);
-    } finally { refreshing = false; }
+    } finally {
+      refreshing = false;
+      if (refreshPending) { refreshPending = false; refreshLocalFile(); }
+    }
   }
 
   function openVisualLink(event, doc) {
@@ -757,7 +770,7 @@
         updateWorkingCopy();
         // Several PDF pages can map to the same HTML file. Keep its working
         // copy instead of starting a redundant asynchronous reload.
-        if (volume.pages.filter(candidate => candidate <= page).at(-1) === state.page) {
+        if (pageCandidates(volume.pages, page).at(-1) === state.page) {
           if (pageChanged) {
             ++state.navigationRevision;
             ++locateRevision;
@@ -799,13 +812,13 @@
       ui.setWorkspaceMode(state.workspaceMode, state.config.editorAvailable);
       if (state.workspaceMode === "reader") openSyncChannel();
       const rememberedVolume = localStorage.getItem(LAST_VOLUME_KEY);
-      const rememberedPage = Number(localStorage.getItem(LAST_PAGE_KEY));
+      const rememberedPage = normalizePage(localStorage.getItem(LAST_PAGE_KEY));
       const initialVolume = initialParams.get("volume") || rememberedVolume;
       const firstVolume = state.config.volumes.find((item) => item.id === initialVolume) || state.config.volumes[0];
       if (!firstVolume) throw new Error("配置中没有找到包含 HTML 页面的卷册");
       ui.renderVolumes(state.config.volumes, firstVolume.id);
-      const initialPage = Number(initialParams.get("page")) ||
-        (firstVolume.id === rememberedVolume && Number.isFinite(rememberedPage) && rememberedPage > 0 ? rememberedPage : firstVolume.pages[0]);
+      const initialPage = normalizePage(initialParams.get("page")) ??
+        (firstVolume.id === rememberedVolume && rememberedPage != null ? rememberedPage : firstVolume.pages[0]);
       await navigate(firstVolume.id, initialPage, true);
       if (state.workspaceMode === "reader" && state.config.editorAvailable) await enterSplitView();
     } catch (error) {
@@ -830,10 +843,9 @@
     renderNavigation();
     const origin = currentPdfPage;
     if (!origin || origin.volume !== state.volume) return;
-    const prefix = String(origin.pageLabel ?? "").match(/^(\d+)/)?.[1];
-    if (!prefix) return;
-    const requested = Number(prefix);
-    const page = currentVolume()?.pages.filter(page => page <= requested).at(-1);
+    const requested = normalizePage(origin.pageLabel);
+    if (requested == null) return;
+    const page = pageCandidates(currentVolume()?.pages || [], requested).at(-1);
     if (page === state.page) return;
     updateWorkingCopy();
     if (state.document.dirty) {
@@ -851,7 +863,7 @@
   const directoryEvents = new EventSource("/api/events");
   directoryEvents.onmessage = event => {
     const change = JSON.parse(event.data);
-    if (change.event === "change" || change.event === "rename") refreshLocalFile();
+    if (change.event === "change" || change.event === "rename" || change.event === "ready") refreshLocalFile();
     if (change.event !== "rename" && change.event !== "ready") return;
     clearTimeout(directoryRefreshTimer);
     directoryRefreshTimer = setTimeout(() => refreshDirectory().catch(error => notify(error.message, true)), 120);

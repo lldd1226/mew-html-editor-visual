@@ -180,8 +180,7 @@ class PdfLocator {
       const changes = selection.missing ? [] : this.comparisonParts(notice).filter(part => part.changed);
       const [change] = changes;
       // Anchor the selected context to confirmed faults in the existing queue.
-      for (const anchor of change && (notice.html.length > change.html.length
-        || /^\s$/u.test(this.index.raw[source.start - 1] || '') && /^\s$/u.test(this.index.raw[source.end] || '')) ? text : []) {
+      for (const anchor of change ? text : []) {
         if (anchor.missing || anchor.comparison.html !== change.html || anchor.comparison.pdf !== change.pdf) continue;
         const start = anchor.sourceStart - change.start, end = start + notice.html.length;
         if (start === selection.sourceStart || start < 0 || this.index.raw.slice(start, end) !== notice.html) continue;
@@ -251,7 +250,7 @@ class PdfLocator {
         ...parts.slice(first, last + 1), ...(suffix ? [{ html: suffix, pdf: suffix, changed: false }] : [])];
       }
     }
-    return rows[key] = ['html', 'pdf'].map(side => ({
+    return rows[key] = (missing && !value.pdf.trim() ? ['html'] : ['html', 'pdf']).map(side => ({
       label: side.toUpperCase(), parts: parts.map(part => {
         const empty = part.changed && !part[side].trim() && !!part[side === 'html' ? 'pdf' : 'html'].trim();
         return { ...part, changed: part.changed && !missing, text: empty ? '' : part[side], source: !compact && value.source
@@ -330,13 +329,25 @@ class PdfLocator {
       for (const target of new Set([...index.targets, ...(this.environment.getTargets?.() || []),
         this.getDocumentIndex(this.pdf, this.environment.getSourcePages?.())].filter(Boolean))) {
         const original = previous.connections.get(target) || [];
-        const retained = original.map(item => {
+        const retain = item => {
           const delta = shift(item);
-          if (delta !== null) return { ...item, start: item.start + delta, end: item.end + delta };
+          if (delta !== null) {
+            const kept = { ...item, start: item.start + delta, end: item.end + delta }, diff = item.editorDiff;
+            if (diff?.context?.[0] === previous.formats && index.formats.slice(kept.start, kept.end).every((style, i) => {
+              const at = item.start + i, old = previous.formats[at];
+              return style.italic === old.italic && style.bold === old.bold && style.name === old.name
+                && style.definition?.opening === old.definition?.opening
+                && (!i || (style === index.formats[kept.start + i - 1]) === (old === previous.formats[at - 1]));
+            })) kept.editorDiff = { ...diff, context: [index.formats, ...diff.context.slice(1)],
+              fontItems: diff.fontItems.map(value => ({ ...value, sourceStart: value.sourceStart + delta,
+                sourceEnd: value.sourceEnd + delta, htmlFont: index.formats[value.sourceStart + delta] })) };
+            return kept;
+          }
           if (item.start > start || item.end < oldEnd || !item.editorDiff || item.editorDiff.reliable === false) return null;
           return index.rememberConnection(item.start, item.end + newEnd - oldEnd, target,
             { start: item.targetStart, end: item.targetEnd }, { previous: item });
-        }).filter(Boolean);
+        };
+        const retained = original.map(retain).filter(Boolean);
         if (retained.length) index.connections.set(target, retained);
         const reverse = (target.connections?.get(previous) || []).flatMap(item => {
           const delta = shift({ start: item.targetStart, end: item.targetEnd });
@@ -346,7 +357,7 @@ class PdfLocator {
         const cached = previous.pageScopes.get(target), delta = shift(cached?.scope);
         if (cached?.scope && delta !== null) index.pageScopes.set(target, {
           ...cached, scope: { ...cached.scope, start: cached.scope.start + delta, end: cached.scope.end + delta },
-          connections: cached.connections?.map(item => ({ ...item, start: item.start + delta, end: item.end + delta }))
+          connections: cached.connections === original ? retained : cached.connections?.map(retain).filter(Boolean)
         });
         else if (retained.length && retained.length === original.length
           && cached?.scope?.start <= start && cached.scope.end >= oldEnd && cached.connections?.every(item => original.includes(item)))
@@ -365,6 +376,7 @@ class PdfLocator {
   reviewAnchor(item, currentIndex = this.index) {
     const source = item?.pdfSource;
     if (!source) return null;
+    let fallback = null;
     let anchors = this.reviewAnchors.get(item);
     if (!anchors) this.reviewAnchors.set(item, anchors = new WeakMap());
     // Read the candidate's confirmed diff, including after its HTML offsets move.
@@ -374,15 +386,18 @@ class PdfLocator {
       const connections = source.index.connections.get(index), currentConnections = currentIndex?.connections.get(index);
       let cached = anchors.get(index);
       if (!cached || cached.connections !== connections || cached.currentIndex !== currentIndex || cached.currentConnections !== currentConnections) {
-        const hit = source.index.connectedRange(index, source.start, source.end, false, undefined, true)
-          || currentIndex && currentIndex !== source.index && currentIndex.connectedRange(index, item.sourceStart, item.sourceEnd, false, undefined, true)
-          || item.missing && source.index.missingRange(index, source.start, source.end);
+        const hit = item.missing && source.index.missingRange(index, source.start, source.end)
+          || source.index.connectedRange(index, source.start, source.end, false, undefined, true)
+          || currentIndex && currentIndex !== source.index && currentIndex.connectedRange(index, item.sourceStart, item.sourceEnd, false, undefined, true);
         cached = { connections, currentIndex, currentConnections, hit };
         anchors.set(index, cached);
       }
+      const layer = index.layer.getBoundingClientRect();
+      if (item.missing && layer.width && layer.height) fallback ||= {
+        left: layer.left, top: layer.top, bottom: layer.top
+      };
       const hit = cached.hit;
       if (!hit) continue;
-      const layer = index.layer.getBoundingClientRect();
       if (cached.bounds) return {
         left: layer.left + cached.bounds.left * layer.width,
         top: layer.top + cached.bounds.top * layer.height, bottom: layer.top + cached.bounds.bottom * layer.height
@@ -390,7 +405,8 @@ class PdfLocator {
       const end = index.raw.slice(hit.start, hit.end).trim() ? hit.start + index.raw.slice(hit.start, hit.end).trimEnd().length : hit.start;
       const bounds = { left: Infinity, top: Infinity, bottom: -Infinity };
       const range = this.document.createRange();
-      for (const part of index.fontRuns(hit.start, end, true)) {
+      const at = end === hit.start && hit.endBias ? Math.max(0, hit.start - 1) : hit.start;
+      for (const part of index.fontRuns(at, end === hit.start ? at : end, true)) {
         if (end > hit.start && !index.raw.slice(Math.max(hit.start, part.start), Math.min(end, part.end)).trim()) continue;
         range.setStart(part.node, Math.max(0, Math.min(part.node.length, hit.start - part.start)));
         range.setEnd(part.node, Math.max(0, Math.min(part.node.length, end - part.start)));
@@ -408,7 +424,7 @@ class PdfLocator {
         return bounds;
       }
     }
-    return null;
+    return fallback;
   }
   readPageText(page) {
     if (!pageTexts.has(page)) pageTexts.set(page, Promise.resolve().then(() => page.getTextContent())
@@ -667,12 +683,6 @@ function pattern(value, index) {
   // Unknown or foreign source context may only match the candidate itself.
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > index.raw.length
     || value.pdfSource && value.pdfSource.index !== index) return value;
-  if (value.selection) {
-    const changes = locator.comparisonParts(value.comparison).filter(part => part.changed);
-    if (changes.length === 1 && value.comparison.html.length === changes[0].html.length
-      && !(/^\s$/u.test(index.raw[start - 1] || '') && /^\s$/u.test(index.raw[end] || ''))) return value;
-    return JSON.stringify(['selection', value.comparison.html, value.comparison.pdf]);
-  }
   let before = start, after = end;
   const word = /^[\p{L}\p{M}\p{N}_'’\-]+$/u;
   while (before > 0 && word.test(index.raw.slice(before - (index.raw.codePointAt(before - 2) > 0xffff ? 2 : 1), before)))
@@ -687,7 +697,8 @@ function pattern(value, index) {
     && [...(prefix + (value.comparison?.pdf ?? value.text ?? '') + suffix)].length < 2) return value;
   const change = value.font ? [value.text, ...['italic', 'bold'].flatMap(key => [value.htmlFont[key], value.font[key]])]
       : [value.comparison?.html, value.comparison?.pdf];
-  return JSON.stringify([!!value.font, change, prefix, suffix]);
+  return JSON.stringify([!!value.font, !!value.selection, change,
+    ...(value.selection && locator.comparisonParts(value.comparison).some(part => !part.changed && part.html.length) ? [] : [prefix, suffix])]);
 }
 function matchingItems(item, context, items) {
   if (!item) return [];

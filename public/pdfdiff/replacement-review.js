@@ -391,7 +391,7 @@
     panel.style.cssText = '';
     target.addContentWidget(widget);
   }
-  function close(dismiss = true, restoreFocus = true, position = null) {
+  function close(dismiss = true, restoreFocus = true) {
     panelMoved = false;
     cancelAnimationFrame(placementFrame); placementFrame = null;
     clearTimeout(manualTimer); manualTimer = null; composing = false;
@@ -405,7 +405,7 @@
     previous?.provider.onClose?.(context);
     if (dismiss && previous && context.editor.getModel() === context.model) {
       const selected = context.editor.getSelection();
-      if (selected && (position || restoreFocus && !selected.isEmpty())) context.editor.setPosition(position || selected.getPosition(), 'replacement-review-close');
+      if (selected && restoreFocus && !selected.isEmpty()) context.editor.setPosition(selected.getPosition(), 'replacement-review-close');
     }
     if (dismiss && previous) opposite(previous)?.host.close(false, false);
     const detail = dismiss && previous && { id: previous.provider.id, editor: context.editor, model: context.model };
@@ -830,7 +830,8 @@
     const position = session?.context.editor.getTargetAtClientPoint(event.clientX, event.clientY)?.position;
     const api = session?.context.editor.getDomNode()?.ownerDocument.defaultView.monaco;
     if (position && session.anchor && api?.Range.containsPosition(session.anchor, position)) return;
-    close(true, false, event.button === 0 && event.composedPath().includes(session?.context.editor.getDomNode()) ? position : null);
+    // Monaco must retain the selection on pointerdown so it can start a text drag.
+    close(true, false);
   }, true);
   new ResizeObserver(queuePlace).observe(panel);
   window.addEventListener('resize', queuePlace);

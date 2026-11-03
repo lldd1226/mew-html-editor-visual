@@ -106,12 +106,38 @@ function handleWorkbenchChord(event) {
   clearTimeout(workbenchChordTimer);
   workbenchChordTimer = setTimeout(() => { workbenchChordPending = false; }, 2000);
 }
-const syncSession = (() => {
+let syncSession = (() => {
   const value = new URLSearchParams(location.search).get('readerSession') || '';
   return /^[\w-]{1,128}$/.test(value) ? value : '';
 })();
 let syncChannel = null;
 let combining = false;
+
+async function viewPdf() {
+  if (!syncSession) {
+    syncSession = crypto.randomUUID();
+    const url = new URL(location.href);
+    url.searchParams.set('readerSession', syncSession);
+    history.replaceState(null, '', url);
+    startReaderSync();
+  }
+  window.name = `mew-editor-${syncSession}`;
+  const name = `mew-reader-${syncSession}`;
+  if (window.opener && !window.opener.closed && window.opener.ReaderUI) window.opener.name = name;
+  const popup = window.open('', name);
+  if (!popup) return notify('浏览器阻止了 PDF 窗口，请允许此站点打开弹出窗口');
+  popup.focus();
+  if (popup.location.href !== 'about:blank') return;
+  const url = new URL('reader.html', location.href);
+  url.searchParams.set('view', 'reader');
+  url.searchParams.set('sync', syncSession);
+  try {
+    const target = await api(`/api/reader/locate?path=${encodeURIComponent(state.path)}`);
+    url.searchParams.set('volume', target.volume);
+    url.searchParams.set('page', target.page);
+  } catch { /* The reader falls back to its remembered page. */ }
+  if (!popup.closed) popup.location.replace(url.href);
+}
 
 async function saveAndCloseForReader(requestId) {
   if (combining) return;
@@ -385,7 +411,10 @@ function scheduleExternalUpdate(path) {
 }
 function connectFileEvents() {
   const handleChange = change => {
-    if (change.event === "ready") return;
+    if (change.event === "ready" || !change.path) {
+      for (const path of state.docs.keys()) scheduleExternalUpdate(path);
+      checkCssUpdate();
+    }
     if (change.path === "mewde.css") checkCssUpdate();
     if (state.docs.has(change.path)) scheduleExternalUpdate(change.path);
     if (change.event === "change" && change.path) return;
@@ -543,6 +572,11 @@ async function initMonaco(api) {
   });
   tagEditor = new tagPanel.TagEditor(source);
   editor = source.editor;
+  editor.addAction({
+    id: 'mew.openPdf', label: '查看PDF',
+    contextMenuGroupId: 'navigation', contextMenuOrder: 1,
+    run: () => viewPdf().catch(error => notify(error.message))
+  });
   editor.onDidChangeCursorPosition(event => {
     ui.setPosition(event.position.lineNumber, event.position.column);
     scheduleSessionBackup();

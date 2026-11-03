@@ -327,7 +327,7 @@
     byId("saveBtn").disabled = !view.editable;
     updatePdfTocNavigation();
     document.querySelectorAll("#tocList a[data-page]").forEach((link) =>
-      link.classList.toggle("active", Number(link.dataset.page) === view.chapterPage));
+      link.classList.toggle("active", String(link.dataset.page) === String(view.chapterPage)));
   }
 
   function renderTools(tags, attrs) {
@@ -725,7 +725,7 @@
     bind("pageForm", "submit", (event) => {
       event.preventDefault();
       const input = byId("pageInput");
-      const page = Number(input.value);
+      const page = input.value;
       input.blur();
       emit("page", page);
     });
@@ -743,7 +743,7 @@
         await pdfLinkService.goToDestination(item.destination);
       } else {
         setToc(false);
-        emit("page", Number(link.dataset.page));
+        emit("page", link.dataset.page);
       }
     });
     bind("darkBtn", "click", () => setTheme(!body.classList.contains("dark")));
@@ -840,8 +840,11 @@
     getPdfViewer: () => pdfViewer,
     getSourceEditor: workbench => listeners.sourceEditor?.(workbench),
     getPdfSourcePages: () => (pdfPageLabels || []).flatMap((label, index) => {
-      const page = Number(String(label).match(/^(\d+)/)?.[1]);
-      return page >= sourcePageRange[0] && page < sourcePageRange[1] ? [index + 1] : [];
+      const text = String(label).trim(), number = Number(text);
+      const page = Number.isSafeInteger(number) ? number : text;
+      return (typeof page === "number" && typeof sourcePageRange[0] === "number"
+        ? page >= sourcePageRange[0] && (typeof sourcePageRange[1] !== "number" || page < sourcePageRange[1])
+        : page === sourcePageRange[0]) ? [index + 1] : [];
     })
   };
 
