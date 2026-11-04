@@ -12,6 +12,7 @@ Run commands from the repository root after `npm ci`.
 | `npm run bench -- tmp/ocr-benchmark.json` | Real OCR mapping benchmark and optional JSON report |
 | `node tests/pdf-review-performance.mjs [report.json]` | Review candidate, fragmented decoration and cached preparation scaling |
 | `node tests/pdf-mapping-profile.mjs [fixture.json] [report.json]` | Real-page mapping profile with method call counts and costs |
+| `node tests/pdf-text-update-benchmark.mjs` | Browser comparison of retained mappings, full text refresh, full mapping refresh and Monaco |
 
 Suite timings and exit codes can also be saved with
 `node tests/run.mjs all --report=tmp/test-results.json`. Create the output directory first.
@@ -19,11 +20,26 @@ The runner discovers files rather than maintaining a second list of test scripts
 Browser files run serially because they use local ports and contain latency assertions.
 Run only one browser runner at a time.
 
+The text-update benchmark loads the real Monaco engine and current mapping code in
+Edge/Chromium, without saving edited HTML. It compares text and formatting edits on
+ME08-350, ME32-323 and ME32-524, plus synthetic eight-copy inputs with distinct word
+suffixes to prevent all pages matching the first copy. Each row uses two warmups
+and the median of seven measurements. Index rebuilding, mapping/diff preparation
+and candidate generation are timed separately; PDF decoding, first preparation,
+popup rendering and the review queue's early return are excluded. `full-text`
+invalidates the combined text/font diff cache on retained connections;
+`full-mapping` drops mapping retention; `monaco` forces detailed comparisons through
+Monaco while keeping validation, character refinement and failure fallback;
+`full-monaco` combines Monaco with dropping mapping retention. Candidate ranges,
+text/font differences and replacement edits are compared to the current engine.
+Set `PDF_BENCH_OUTPUT` to a JSON path to save the report. Run separately from other
+tests. Synthetic scaling results do not represent an actual eight-page PDF.
+
 Browser tests need Playwright and Microsoft Edge on the usual Windows installation
 path, or Playwright's installed Chromium (`npx playwright install chromium`).
 `EDGE_PATH` selects another executable; `PLAYWRIGHT_MODULE` selects another installed
 Playwright module. `PYTHON` selects the Python executable. Backend tests need
-PyMuPDF, FastAPI and Uvicorn; OCR browser fixtures also need Python dependencies
+PyMuPDF, FastAPI, Uvicorn and watchfiles; OCR browser fixtures also need Python dependencies
 used by `pdf_text_backend.py` and `html_pattern_scripts`.
 
 `*.test.mjs` contains unit coverage; `*.browser.test.mjs` contains browser contracts.

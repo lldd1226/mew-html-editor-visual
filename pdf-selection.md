@@ -70,13 +70,15 @@ native character geometry from the requested PDF pages; extracted text must matc
 the stored sequence. This geometry is never persisted. Original PDFs and scans
 remain unchanged. Restart the reader and reload the page after changing schemas.
 
-`pdf-review-provider.js` is the runtime entry. Its `PdfLocator` reads PDF text,
-font metadata, and rendered-layer styles through `readPageText()`,
-`readPageFonts()`, and `layerFonts()`. Page reads and in-flight tasks share
-page-keyed caches across locators. It also manages source/document snapshots,
-review candidates, provider actions, and highlights. It loads
-`pdf-selection-diff.js` for `PdfSourceIndex`, normalization, text/format comparison,
-and edit calculations over prepared data, and `replacement-review.js` for shared
+`pdf-review-provider.js` is the runtime entry. Its ordinary functions `readPageText()`, `readPageFonts()`, and `layerFonts()`
+read PDF text, font metadata, and rendered-layer styles. Page reads and in-flight
+tasks share page-keyed caches across locators. `editor-core.js` owns native-model
+snapshots, versioned HTML text/coordinate indexes, and validated edit commits through
+`DocumentModel` instances, held directly by `editor.document`. Each instance owns
+its snapshot and public `index`; `parse()` builds that index on demand. Validated edit arrays retain their model version for deferred submissions. `PdfLocator` manages per-model/PDF comparisons,
+review candidates, provider actions, and source decorations. It loads
+`pdf-connection.js` for the mapping controller, `pdf-selection-diff.js` for normalization,
+text comparison and matching, and `replacement-review.js` for shared
 highlight/selection tools, popup sessions, navigation, and saving.
 The shared popup loads candidates directly from the registered `locator` instance.
 `PdfLocator.prepareReview(context)` validates and fills PDF/editor/model fields,
@@ -84,7 +86,24 @@ registers or reuses the shared source index through `editorSourceIndex()`, and
 returns it for context checks (or `null` if invalid). Source-bearing
 `reviewItems(context)` requests prepare the review through `indexDocument()`
 and `indexFonts()`, reusing their existing caches when needed.
+Each PDF/page interval is cached as a `PdfConnections` instance. It owns its
+`pdf`, `sourcePages`, `raw`, `pages`, loading `task`, and per-page font work.
+Only completed normalization makes it available to synchronous lookups; cancelled
+or failed reads are removed so later requests can retry. Locator `model`, `pdf`, and `options` are direct
+fields; editor changes update model/PDF state at `editorSourceIndex()`. Options
+are updated in place so existing indexes share them. Rendered page indexes own
+per-candidate anchor caches; the provider uses these while measuring visible pages.
+PDF reading and font preparation stay in the existing provider entrypoints; the
+connection class holds their results and task state without separate forwarding methods. The constructor accepts
+an HTML string or a `DocumentModel` directly, replacing the source-index factory.
 Availability, session checks, source events, and review actions share this method.
+Provider event handlers `onDifference()` and `onReviewClosed()` handle popup
+routing and dismissal separately; `onDifference()` selects a notice and passes its
+request directly to `reviewItems(context)`, without temporary locator state.
+`prepareReview()` receives ordinary contexts only.
+`reviewItems()` explicitly selects the current editor source index before reading
+its differences. `index.getDifferences()` computes and caches only that index
+snapshot; it does not switch the locator or follow a newer editor snapshot.
 `PdfLocator.reviewItems(context)` returns the shared
 `items`, groups, edits, and suggestion plans. The locator owns its current
 `model`, `index`, and PDF; `editorSourceIndex()` updates the shared model/index
@@ -108,27 +127,50 @@ with reader-local caches. Options, environment, document, source/document caches
 review anchors, and the current PDF cache key belong to each instance; locator methods live
 on the prototype. Selection exposes this locator as `PdfSelection.locator`;
 review, including the split editor window, consumes the same locator. Each Monaco
-model/PDF pair owns one current `PdfSourceIndex` snapshot. Each snapshot exposes
-`source`, `raw`, normalized text, offsets, fonts, and connection caches. Mapping
-methods operate on their owning snapshot: `index.connectedRange(target, ...)`,
-`index.rememberConnection(...)`, `index.locate(entry, scope)`, and `index.matches(queries)`.
-Scoped locations already return absolute offsets. Editor, full-PDF, and rendered-page
-indexes use the same class; callers use `lowerBound()` for source-to-raw offsets
-and `fontRuns(start, end, true)` for font coordinate lookups.
-The complete class is exported as `PdfSelectionDiff.PdfSourceIndex` and re-exported
-by the provider. Stateless normalization, matching, coordinate search, and HTML
-font parsing helpers remain ordinary toolbox functions. Font runs, format differences,
-source segments, decorations, and text/font edits are index instance methods;
-callers use `index.textEdits(...)`, `index.fontEdits(...)`, and
-`index.sourceDecorations(...)` directly.
-The reader locator retains model/PDF caches, indexing, and preparation. Its HTML
-entity-decoding template is reused across source snapshots.
-The environment supplies the current PDF, rendered page
-indexes, idle scheduling, and cancellation checks. Selection keeps `findLocations()`,
-`locateSource()`, and `locateLayer()` as private functions using that shared locator.
-`findLocations()` returns PDF
-page targets, `locateSource()` returns a source hit and any difference notice, and
-`locateLayer()` returns character ranges for the rendered text layer.
+model/PDF pair owns one current `PdfConnections` index. Editor, full-PDF and
+rendered-page indexes use this same class without document-model inheritance.
+HTML source/coordinate data comes from the versioned editor-core index; each
+comparison references that snapshot and owns its PDF mapping state. The index exposes `source` (HTML
+text when available), `raw`, `normalized`, source offsets, formats, `connections`,
+`prepared` (file-wide comparison state), `targets` and the anchor-search index.
+`connections` holds one shared record per target index: `ranges` contains live
+mappings, `scope` and `matches` contain page lookup state, and `preparedRanges`
+retains the default mappings while selections update the live ranges. There are
+no separate live-mapping and scope tables. Connections link directly to their
+non-enumerable `target`; `pairs()` returns those existing connection objects.
+
+`prepare()` returns the shared preparation snapshot and compares changed
+connections. `pairs(targets, true)` reuses its prepared pair list for those same
+targets. `getDifferences()` checks PDF font versions and caches the candidates derived
+from those comparisons;
+`candidates()` and `formatDifferences()` consume the same alignment and font
+results. `entry()` constructs source ranges and search context for all callers. `search()` performs
+text lookup; `locate()` first reuses mappings, then searches and confirms a fallback
+hit in either direction. `missingRange()` uses the same coverage to anchor missing
+text. Scoped locations already contain absolute offsets.
+
+`editorSourceIndex()` keeps the model/PDF lifecycle and calls `index.inherit(previous)`
+when creating a replacement index. Each old connection is transformed once and
+that result is reused in live mappings and prepared scopes. Unchanged text/font
+results are retained; edited connections are recomputed. Default prepared mappings
+remain distinct from live selection additions.
+
+Priority candidates shift only HTML offsets and clear `pdfSource` alongside the
+existing editor range/preview caches; `cacheReview()` rebuilds it from the current
+index. Missing anchors reuse inherited connections before queue preparation,
+preserving their PDF coordinates. HTML commands retain the `missing` classification.
+The paired HTML window reuses the reader's locator when binding its provider.
+Both windows share the same document cache, page scope, connections and candidates;
+an editor-local locator must not replace the reader's index after an edit.
+
+Callers use `index.raw`, `index.getDifferences()`, `index.locateSource()`
+and `index.locateLayer()` directly. Text/font edits and source decorations use the
+same index's coordinates and formatting. `lowerBound()` remains a stateless offset
+helper. `comparisonParts()` stays in the diff script; provider row presentation,
+review queues, popup state and measured geometry keep their existing owners.
+Each HTML index builds its entity-decoding template on demand; its
+environment supplies the current PDF, page indexes, idle scheduling and cancellation.
+Selection retains `findLocations()` for visible-page assembly and document loading.
 `pdf-selection.js` captures selections, supplies that environment, and uses its
 results to scroll and publish selection mappings. `pdf-review-provider.js` supplies
 PDF ranges and source decorations to its own `ReviewHighlights` instance.
@@ -160,9 +202,9 @@ fallback delegates font extraction to the OCR reader.
 Font differences are emitted only for unchanged aligned characters.
 Failed text requests can retry; document mappings
 and cancellation remain local to each locator. Monaco loading also shares one
-pending request. Source edits invalidate all mappings for the pair, including
-markup-only edits. Selection, decorations and review prepare mappings from the new
-snapshot. Manual edits and replacements rediscover review candidates instead of
+pending request. Source edits create a new snapshot for the pair; its connections
+inherit safe mappings and invalidate affected text/font results, including format
+changes from markup-only edits. Selection, decorations and review use that snapshot. Manual edits and replacements rediscover review candidates instead of
 only shifting the previous list; unchanged candidates keep their selected choices. Shared text significance and changed-range rules live
 in `pdf-selection-diff.js`; settings persistence and DOM measurement live in
 `pdf-review-provider.js`; popup session state lives in `replacement-review.js`.
