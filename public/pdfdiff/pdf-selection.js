@@ -22,7 +22,6 @@
   const cleanup = [], editors = new WeakSet(), selectionDocuments = new WeakSet();
   let selecting = false, pendingDifference = null;
   const layers = new Map();
-  const pageResults = new WeakMap();
   const preparationPages = new Set();
   const editIdleDelay = 350;
   let preparationTask = null, lastInteraction = 0, lastIndexYield = 0, lastEdit = -Infinity;
@@ -166,10 +165,16 @@
   }
   function clearLayers() { for (const div of layers.keys()) clearLayer(div); }
   function clearLayer(div, records) {
-    if (records && !records.some(({ type, target, addedNodes, removedNodes }) => type === 'childList'
+    // PDF.js toggles the text layer's selection classes between pointerdown and pointerup.
+    // Keep the marker and its notices available for the click's hit test.
+    if (records && !records.some(({ type, target, attributeName, addedNodes, removedNodes }) => type === 'childList'
       ? [...addedNodes, ...removedNodes].some(node => node.textContent)
-      : type === 'characterData' || target !== layers.get(div)?.layer && target.textContent)) return false;
-    layers.get(div)?.observer.disconnect(); return layers.delete(div);
+      : type === 'characterData' || (target !== layers.get(div)?.layer || attributeName !== 'class') && target.textContent)) return false;
+    layers.get(div)?.observer.disconnect();
+    if (!layers.delete(div)) return false;
+    review.highlights.paintHighlight(div, [], options.color);
+    review.highlights.paintHighlight(div, [], options.color, true);
+    return true;
   }
   function currentPointer(pointer) {
     return pointer.pdf === viewer?.pdfDocument && pointer.editor === currentEditor() && pointer.model === pointer.editor.getModel()
@@ -306,8 +311,6 @@
     if (!instance?.getPageView || !instance.eventBus || viewer === instance) return;
     resetPdf();
     viewer = instance;
-    // Match PDF.js's language-neutral measurement canvas; inherited zh-CN changes serif fallback widths.
-    instance.viewer.lang = 'und';
     const manualScroll = () => {
       if (viewer !== instance) return;
       lastInteraction = performance.now();
@@ -328,7 +331,7 @@
           void refreshReviewPointer().catch(error => console.warn('[PDF selection highlight] Pointer unavailable:', error));
         }
         else queueWarm(data?.pageNumber);
-        if (contexts.length || reviewPointer) schedule();
+        if (contexts.length || reviewPointer || defaultPointer) schedule();
       };
       instance.eventBus.on(event, update);
       cleanup.push(() => instance.eventBus.off(event, update));
@@ -414,6 +417,9 @@
   trackSelection(document);
   listen(document, "selectionchange", selectFromPdf);
   listen(window, "resize", schedule);
+  if (document.fonts) listen(document.fonts, 'loadingdone', () => {
+    clearLayers(); queueWarm(); schedule();
+  });
   listen(window, "pagehide", () => api.stop());
   const originalOpen = window.open;
   function open(...args) {
@@ -460,12 +466,15 @@
       const div = event?.target?.closest?.('.page'), painted = div && review.highlights.getHighlight(div, true);
       const page = div?.getBoundingClientRect();
       const x = page && (event.clientX - page.left) / page.width;
+      const y = page && (event.clientY - page.top) / page.height;
+      const distance = box => Math.hypot(Math.max(box.x - x, x - box.x - box.w, 0) * page.width,
+        Math.max(box.y - y, y - box.y - box.h, 0) * page.height);
       const notice = painted?.notices?.filter(({ box }) => box
-        && event.clientX >= page.left + box.x * page.width - 3 && event.clientX <= page.left + (box.x + box.w) * page.width + 3
-        && event.clientY >= page.top + box.y * page.height && event.clientY <= page.top + (box.y + box.h) * page.height)
-        .sort(({ box: a, missing: am }, { box: b, missing: bm }) => Math.max(a.x - x, x - a.x - a.w, 0) - Math.max(b.x - x, x - b.x - b.w, 0)
+        && event.clientX >= page.left + box.x * page.width - (box.caret ? 8 : 3) && event.clientX <= page.left + (box.x + box.w) * page.width + (box.caret ? 8 : 3)
+        && event.clientY >= page.top + box.y * page.height - (box.caret ? 3 : 0) && event.clientY <= page.top + (box.y + box.h) * page.height + (box.caret ? 3 : 0))
+        .sort(({ box: a, missing: am }, { box: b, missing: bm }) => distance(a) - distance(b)
           || Math.abs(x - a.x - a.w / 2) - Math.abs(x - b.x - b.w / 2) || Number(!!bm) - Number(!!am))[0];
-      if (notice) { notifiedSelection = null; publishDifferences(div, painted, [notice], true); }
+      if (notice) { notifiedSelection = null; publishDifferences(div, painted, [notice], true, 'pdf'); }
       else if (event?.type === 'pointerup' && viewer.container.contains(event.target)) {
         api.clearReviewPointer();
         select([]);
@@ -540,7 +549,7 @@
       if (stopped || !selectionHighlight || viewer?.pdfDocument !== pdf) return;
       clearLayer(div); queueWarm(number);
       if (!document.getSelection()?.isCollapsed) selectFromPdf();
-      else if (contexts.length || reviewPointer) schedule();
+      else if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     const spanSet = new Set(fontAt.spans);
     const measurement = document.createRange(), elementFonts = new Map(), nodes = [];
@@ -571,7 +580,7 @@
     const observer = new MutationObserver(records => {
       if (!clearLayer(div, records)) return;
       queueWarm(number);
-      if (contexts.length || reviewPointer) schedule();
+      if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     observer.observe(layer, { subtree: true, childList: true, characterData: true, attributes: true });
     const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, observer, pdf, width: div.clientWidth, height: div.clientHeight });
@@ -657,28 +666,16 @@
   function nativeBoxes(div, queries, targets = []) {
     const index = layerIndex(div);
     if (!index) return { boxes: [], count: 0, pending: true };
-    const key = JSON.stringify([queries, targets.map(target =>
-      [target.text, target.before, target.after, target.difference, target.range, target.start, target.end, target.marked])]);
-    const source = targets.find(target => target.source)?.source.index || contexts[0]?.index;
-    const connections = source?.connections.get(index)?.ranges;
-    let cached = pageResults.get(index);
-    if (!cached || cached.source !== source || cached.connections !== connections) {
-      cached = { source, connections, results: new Map() };
-      pageResults.set(index, cached);
-    }
-    if (cached.results.has(key)) return cached.results.get(key);
     const { hits, focusHit } = index.locateLayer(queries, targets);
     const result = review.highlights.measureHighlights(div, index, hits, focusHit);
     // Reuse the confirmed PDF item when its counterpart has no measurable text.
-    if (!result.notices.length) result.notices = targets.filter(target => target.marked && target.source && target.difference).map(target => {
+    if (!result.notices.length) result.notices = targets.filter(target => target.marked && target.source && target.difference && !target.difference.missing).map(target => {
       const viewport = viewer.getPageView(target.pageNumber - 1)?.viewport, item = target.item;
       const point = item && viewport?.convertToViewportPoint(item.transform[4], item.transform[5]);
       return { ...target.difference, source: target.source, box: point && {
         x: point[0] / viewport.width, y: (point[1] - item.height * viewport.scale) / viewport.height,
         w: 0, h: item.height * viewport.scale / viewport.height } };
     });
-    cached.results.set(key, result);
-    if (cached.results.size > 32) cached.results.delete(cached.results.keys().next().value);
     return result;
   }
   function paint(div, boxes, notices = []) {
@@ -700,7 +697,10 @@
       const result = nativeBoxes(div, [], targets.filter(target => target.pageNumber === number));
       // Painting a marker must not publish selection events that could reopen
       // the popup on its previous side during a window switch; clicks publish it.
-      if (result.pending) continue;
+      if (result.pending) {
+        review.highlights.paintHighlight(div, [], options.color, true);
+        continue;
+      }
       const painted = review.highlights.paintHighlight(div, result.boxes, options.color, true);
       if (painted) {
         painted.notices = result.notices;
@@ -711,7 +711,7 @@
     }
     review.highlights.clearHighlights(true, visible);
   }
-  function publishDifferences(div, painted, notices, pointer = false) {
+  function publishDifferences(div, painted, notices, pointer = false, side) {
     // Publish mapping data only. The review adapter chooses where and how to show it.
     const editor = currentEditor(), model = editor?.getModel(), selected = selectionRevision;
     if (notices.length) setTimeout(function publish() {
@@ -724,7 +724,7 @@
       const anchor = box && { left: page.left + box.x * page.width, top: page.top + box.y * page.height,
         bottom: page.top + (box.y + box.h) * page.height };
       window.dispatchEvent(new CustomEvent('pdf-selection-difference', { detail: {
-        editor, model, pdf: viewer?.pdfDocument, notices, anchor, anchorElement: div, anchorBox: box, interactionId,
+        editor, model, pdf: viewer?.pdfDocument, notices, anchor, anchorElement: div, anchorBox: box, interactionId, side,
         targets: review.locator.environment.getTargets()
       } }));
     }, 0);

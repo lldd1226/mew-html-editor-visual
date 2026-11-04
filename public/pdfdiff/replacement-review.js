@@ -5,58 +5,70 @@
   function create({ document = window.document, classes = {} }) {
     const { selection: selectionClass = 'review-highlight', pointer: pointerClass = 'review-pointer',
       caret: caretClass = 'review-caret' } = classes;
-    const selectionAreas = new Map(), pointerAreas = new Map(), marks = new Map();
+    const selectionAreas = new Map(), pointerAreas = new Map(), marks = new Map(), measurements = new WeakMap();
     return { measureHighlights, paintHighlight, clearHighlights, clearMarks, updateSource, selectionRange,
       getHighlight: (div, pointer = false) => (pointer ? pointerAreas : selectionAreas).get(div),
       dispose() { clearHighlights(); clearHighlights(true); clearMarks(); } };
     function measureHighlights(div, index, hits, focusHit) {
-      // Measure the indexed text nodes in their reading order.
+      const page = div.getBoundingClientRect(), sx = page.width / div.offsetWidth, sy = page.height / div.offsetHeight;
+      const width = div.clientWidth * sx, height = div.clientHeight * sy;
       const boxes = [], notices = [];
-      let range;
+      let focus = null, range;
+      if (!width || !height) return { count: hits.length, focus, boxes, notices };
+      let cache = measurements.get(index);
+      if (!cache || cache.div !== div || cache.width !== width || cache.height !== height) {
+        cache = { div, width, height, ranges: new Map() };
+        measurements.set(index, cache);
+      }
+      const relative = box => ({
+        x: (box.left - page.left - div.clientLeft * sx) / width,
+        y: (box.top - page.top - div.clientTop * sy) / height,
+        w: box.width / width, h: box.height / height, caret: !!box.caret
+      });
       const union = (a, b) => {
         const left = Math.min(a.left, b.left), top = Math.min(a.top, b.top), right = Math.max(a.right, b.right);
         return { left, top, right, width: right - left, height: Math.max(a.top + a.height, b.top + b.height) - top };
       };
-      let focus = null;
       for (const hit of hits) {
-        let noticeBox = null;
         const caret = hit.start === hit.end || !!hit.difference && !index.raw.slice(hit.start, hit.end).trim();
-        const at = caret && hit.endBias ? Math.max(0, hit.start - 1) : hit.start;
-        // Reading order can differ from DOM order; measure the indexed text nodes.
-        for (const part of index.fontRuns(at, caret ? at : hit.end, true)) {
-          range ||= (div.ownerDocument || document).createRange();
-          range.setStart(part.node, Math.max(0, hit.start - part.start));
-          range.setEnd(part.node, Math.max(0, Math.min(part.node.length, (caret ? hit.start : hit.end) - part.start)));
-          if (!caret && !range.toString().trim()) continue;
-          for (let box of caret ? [range.getBoundingClientRect()] : range.getClientRects()) if ((box.width || caret) && box.height) {
-            // Collapsed ranges can have a fractional width in Chromium. Always
-            // draw missing text as a visible caret at the insertion point.
-            if (caret) box = { left: box.left - 2, right: box.left + 2, top: box.top, width: 4, height: box.height, caret: true };
-            const previous = boxes.at(-1);
-            // Range rects can include both a span and its text, or adjoining spans.
-            if (previous && !previous.caret && !box.caret && Math.abs(previous.top - box.top) < .5 && Math.abs(previous.height - box.height) < .5
-              && box.left >= previous.left && box.left <= previous.right + .5) {
-              boxes[boxes.length - 1] = union(previous, box);
-            } else boxes.push(box);
-            noticeBox = noticeBox ? union(noticeBox, box) : box;
-            if (hit === focusHit && !focus) focus = box;
+        const key = `${hit.start}:${hit.end}:${Number(caret)}:${Number(!!hit.endBias)}`;
+        let measured = cache.ranges.get(key);
+        if (!measured) {
+          const areas = [];
+          let noticeBox = null, first = null;
+          const at = caret && hit.endBias ? Math.max(0, hit.start - 1) : hit.start;
+          for (const part of index.fontRuns(at, caret ? at : hit.end, true)) {
+            range ||= (div.ownerDocument || document).createRange();
+            range.setStart(part.node, Math.max(0, Math.min(part.node.length, hit.start - part.start)));
+            range.setEnd(part.node, Math.max(0, Math.min(part.node.length, (caret ? hit.start : hit.end) - part.start)));
+            if (!caret && !range.toString().trim()) continue;
+            for (let box of caret ? [range.getBoundingClientRect()] : range.getClientRects()) if ((box.width || caret) && box.height) {
+              if (caret) box = { left: box.left - 2, right: box.left + 2, top: box.top, width: 4, height: box.height, caret: true };
+              const previous = areas.at(-1);
+              if (previous && !previous.caret && !box.caret && Math.abs(previous.top - box.top) < .5 && Math.abs(previous.height - box.height) < .5
+                && box.left >= previous.left && box.left <= previous.right + .5) areas[areas.length - 1] = union(previous, box);
+              else areas.push(box);
+              noticeBox = noticeBox ? union(noticeBox, box) : box;
+              first ||= box;
+            }
           }
+          measured = { boxes: areas.map(relative), box: noticeBox && relative(noticeBox), focus: first && relative(first) };
+          // Cache geometry only; source offsets, differences and notices belong to the current request.
+          if (noticeBox) cache.ranges.set(key, measured);
+          if (cache.ranges.size > 256) cache.ranges.delete(cache.ranges.keys().next().value);
         }
-        if (noticeBox) notices.push({ box: noticeBox, ...hit.difference, target: { index, start: hit.start, end: hit.end }, source: hit.source });
+        boxes.push(...measured.boxes);
+        if (hit === focusHit && !focus) focus = measured.focus;
+        if (measured.box) notices.push({ ...hit.difference, box: measured.box,
+          target: { index, start: hit.start, end: hit.end }, source: hit.source });
       }
-      const pageBox = div.getBoundingClientRect();
-      const sx = pageBox.width / div.offsetWidth, sy = pageBox.height / div.offsetHeight;
-      const relative = box => ({
-        x: (box.left - pageBox.left - div.clientLeft * sx) / (div.clientWidth * sx),
-        y: (box.top - pageBox.top - div.clientTop * sy) / (div.clientHeight * sy),
-        w: box.width / (div.clientWidth * sx), h: box.height / (div.clientHeight * sy), caret: !!box.caret
-      });
-      return { count: hits.length, focus: focus && relative(focus), boxes: boxes.map(relative), notices: notices.map(notice => ({ ...notice, box: relative(notice.box) })) };
+      return { count: hits.length, focus, boxes, notices };
     }
     function paintHighlight(div, boxes, color, pointer = false) {
       const store = pointer ? pointerAreas : selectionAreas;
       const previous = store.get(div);
-      if (previous?.boxes === boxes && previous.node.isConnected) return previous;
+      if (previous?.node.isConnected && previous.boxes.length === boxes.length
+        && previous.boxes.every((box, i) => box === boxes[i])) return previous;
       if (!boxes.length) {
         previous?.node.remove();
         store.delete(div);
@@ -836,6 +848,7 @@
   }, true);
   new ResizeObserver(queuePlace).observe(panel);
   window.addEventListener('resize', queuePlace);
+  document.fonts?.addEventListener('loadingdone', queuePlace);
   window.addEventListener('storage', event => {
     if ((event.key === previewKey || event.key === null) && valid()) render(true, true);
   });

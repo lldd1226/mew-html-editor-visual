@@ -352,43 +352,19 @@ class PdfLocator {
     if (!source) return null;
     for (const { index } of this.environment.getVisiblePages?.() || []) {
       if (!index?.layer?.isConnected) continue;
-      index.reviewAnchors ||= new WeakMap();
-      const connections = source.index.connections.get(index)?.ranges, currentConnections = currentIndex?.connections.get(index)?.ranges;
-      let cached = index.reviewAnchors.get(item);
-      if (!cached || cached.connections !== connections || cached.currentIndex !== currentIndex || cached.currentConnections !== currentConnections) {
-        const hit = item.missing ? source.index.missingRange(index, source.start, source.end)
-          : source.index.range(index, source.start, source.end, false, undefined, true)
-            || currentIndex && currentIndex !== source.index && currentIndex.range(index, item.sourceStart, item.sourceEnd, false, undefined, true);
-        cached = { connections, currentIndex, currentConnections, hit };
-        index.reviewAnchors.set(item, cached);
-      }
-      const layer = index.layer.getBoundingClientRect(), hit = cached.hit;
+      const hit = item.missing ? source.index.missingRange(index, source.start, source.end)
+        : source.index.range(index, source.start, source.end, false, undefined, true)
+          || currentIndex && currentIndex !== source.index && currentIndex.range(index, item.sourceStart, item.sourceEnd, false, undefined, true);
       if (!hit) continue;
-      if (cached.bounds) return {
-        left: layer.left + cached.bounds.left * layer.width,
-        top: layer.top + cached.bounds.top * layer.height, bottom: layer.top + cached.bounds.bottom * layer.height
+      const div = index.layer.closest('.page') || index.layer;
+      const box = highlights.measureHighlights(div, index, [hit], hit).notices[0]?.box;
+      if (!box) continue;
+      const page = div.getBoundingClientRect(), sx = page.width / div.offsetWidth, sy = page.height / div.offsetHeight;
+      return {
+        left: page.left + div.clientLeft * sx + box.x * div.clientWidth * sx + (box.caret ? 2 : 0),
+        top: page.top + div.clientTop * sy + box.y * div.clientHeight * sy,
+        bottom: page.top + div.clientTop * sy + (box.y + box.h) * div.clientHeight * sy
       };
-      const end = index.raw.slice(hit.start, hit.end).trim() ? hit.start + index.raw.slice(hit.start, hit.end).trimEnd().length : hit.start;
-      const bounds = { left: Infinity, top: Infinity, bottom: -Infinity };
-      const range = this.document.createRange();
-      const at = end === hit.start && hit.endBias ? Math.max(0, hit.start - 1) : hit.start;
-      for (const part of index.fontRuns(at, end === hit.start ? at : end, true)) {
-        if (end > hit.start && !index.raw.slice(Math.max(hit.start, part.start), Math.min(end, part.end)).trim()) continue;
-        range.setStart(part.node, Math.max(0, Math.min(part.node.length, hit.start - part.start)));
-        range.setEnd(part.node, Math.max(0, Math.min(part.node.length, end - part.start)));
-        for (const box of range.getClientRects()) if (box.height && (box.width || end === hit.start)) {
-          bounds.left = Math.min(bounds.left, box.left);
-          bounds.top = Math.min(bounds.top, box.top);
-          bounds.bottom = Math.max(bounds.bottom, box.bottom);
-        }
-      }
-      if (bounds.bottom !== -Infinity) {
-        if (layer.width && layer.height) cached.bounds = {
-          left: (bounds.left - layer.left) / layer.width,
-          top: (bounds.top - layer.top) / layer.height, bottom: (bounds.bottom - layer.top) / layer.height
-        };
-        return bounds;
-      }
     }
     return null;
   }
@@ -549,7 +525,7 @@ function presentation(context, item) {
     left: rect.left + box.x * rect.width, top: rect.top + box.y * rect.height,
     bottom: rect.top + (box.y + box.h) * rect.height
   } : request?.anchor);
-  const anchor = item && side === 'pdf' && locator.reviewAnchor(item) || requested;
+  const anchor = item && side === 'pdf' ? locator.reviewAnchor(item) : requested;
   const destination = side === 'pdf' ? reader : source, pdfViewer = viewer();
   return {
     side, switchable: split, switchLabel: side === 'pdf' ? '查看HTML' : '查看PDF', host: destination.ReplacementReview, window: destination,

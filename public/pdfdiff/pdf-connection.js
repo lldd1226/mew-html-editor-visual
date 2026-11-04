@@ -5,7 +5,6 @@ class PdfConnections {
   prepared = null;
   pairs = [];
   targets = null;
-  reviewAnchors;
   constructor({ environment, documents, document, pdf, options }, values) {
     if (typeof values === 'string') values = new window.MewEditorCore.DocumentModel({ text: values });
     Object.assign(this, { environment, documents, document, pdf, options }, values?.parse?.(document) ?? values);
@@ -485,15 +484,26 @@ class PdfConnections {
     const index = target.layer ? this.prepared?.full : target;
     const page = target.layer && index?.pages.find(page => page.number === Number(target.layer.closest('.page')?.dataset.pageNumber));
     if (!index || target.layer && (!page || index.raw.slice(page.start, page.end) !== target.raw)) return null;
-    let a = 0, matched = false;
-    // Both page and document requests use the same confirmed diff and word rules.
-    const connections = this.connections.get(index)?.preparedRanges || this.connections.get(index)?.ranges || [];
-    for (const connection of connections)
+    let a = 0, before = -1, matched = false;
+    // Use the candidate queue's connection priority, including confirmed rendered-page mappings.
+    const connections = this.pairs.length ? this.pairs
+      : this.connections.get(index)?.preparedRanges || this.connections.get(index)?.ranges || [];
+    for (const connection of connections) {
+      const mapped = connection.target;
+      const mappedPage = mapped !== index && mapped.layer && index.pages?.find(page =>
+        page.number === Number(mapped.layer.closest('.page')?.dataset.pageNumber)
+        && index.raw.slice(page.start, page.end) === mapped.raw);
+      if (mapped !== index && !mappedPage) continue;
       for (const [, to, , right, part] of this.compare(connection)?.ranges || []) {
         if (!part.html.trim() || !part.pdf.trim()) continue;
         matched = true;
-        if (connection.start + to <= start) a = Math.max(a, connection.targetStart + right);
+        const sourceEnd = connection.start + to - (part.html.length - part.html.trimEnd().length);
+        if (sourceEnd <= start && sourceEnd > before) {
+          before = sourceEnd;
+          a = (mappedPage?.start || 0) + connection.targetStart + right - (part.pdf.length - part.pdf.trimEnd().length);
+        }
       }
+    }
     if (!matched) return null;
     const parts = index.fontRuns(0, index.raw.length, true);
     // Missing HTML has no PDF box: use the last paired edge, never unrelated OCR in the gap.
