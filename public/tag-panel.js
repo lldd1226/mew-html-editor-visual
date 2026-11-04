@@ -50,60 +50,16 @@
   const blockTagNames = new Set(["p", "div", "h1", "h2", "h3", "h4", "h5", "h6"]);
   const blockTagIds = new Set(["p", "r", "c", "h1", "h2", "h3", "h4", "h5", "h6", "div"]);
   const inlineTagIds = new Set(["i", "b", "u", "em", "span"])
-  const voidTagNames = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
-  const rawTagNames = new Set(["script", "style", "textarea", "title"]);
-  const tagPattern = /<!--[\s\S]*?-->|<\/?[A-Za-z][\w:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/g;
+  const DocumentModel = (typeof module === "object" && module.exports ? require("./editor-core.js") : window.MewEditorCore)?.DocumentModel;
 
   class TagEditor {
     constructor(editor) {
       this.editor = editor.editor || editor;
-      this.detect(this.editor.getValue());
-    }
-
-    detect(text) {
-      const index = this.editor.document?.index;
-      if (index?.source === text && index.tags) {
-        this.text = text; this.detected = index.tags;
-        return;
-      }
-      if (this.text === text) return;
-      const stack = [], pairs = [], byStart = new Map();
-      let rawName;
-      tagPattern.lastIndex = 0;
-      for (let match; (match = tagPattern.exec(text));) {
-        const token = match[0];
-        if (token.startsWith("<!--")) continue;
-        const name = token.match(/^<\/?([A-Za-z][\w:-]*)/i)[1].toLowerCase();
-        const closing = /^<\//.test(token);
-        if (rawName && !(closing && name === rawName)) continue;
-        if (closing) {
-          const open = stack.at(-1);
-          const crossed = stack.findLastIndex(item => item.name === name);
-          if (open && (open.name === name || crossed < 0)) {
-            stack.pop();
-            pairs.push({ name: open.name, closeName: name, start: open.start, openEnd: open.end,
-              closeStart: match.index, end: tagPattern.lastIndex, open: open.token });
-            if (name === rawName) rawName = undefined;
-          } else if (crossed >= 0) stack.length = crossed;
-        } else if (voidTagNames.has(name) || /\/\s*>$/.test(token)) {
-          pairs.push({ name, start: match.index, openEnd: tagPattern.lastIndex,
-            closeStart: tagPattern.lastIndex, end: tagPattern.lastIndex, open: token });
-        } else {
-          stack.push({ name, start: match.index, end: tagPattern.lastIndex, token });
-          if (rawTagNames.has(name)) rawName = name;
-        }
-      }
-      for (const pair of pairs) {
-        const align = pair.open.match(/\balign\s*=\s*["']?(center|right)\b/i)?.[1]?.toLowerCase();
-        pair.id = pair.name === "p" ? align === "center" ? "c" : align === "right" ? "r" : "p" : pair.name;
-        byStart.set(pair.start, pair);
-      }
-      this.text = text;
-      this.detected = { pairs, byStart };
+      this.document = this.editor.document || new DocumentModel({ text: this.editor.getValue() });
     }
 
     buildTagEdit(start, end, tag) {
-      const text = this.text, { pairs, byStart } = this.detected;
+      const { source: text, tags: { pairs, byStart } } = this.document.parse();
       // Keep the selected line ending outside the edit, including both bytes of CRLF.
       const newline = text.slice(start, end).match(/\r?\n$/)?.[0] || "";
       end -= newline.length;
@@ -171,11 +127,11 @@
     applyTag(item) {
       const editor = this.editor;
       const tag = item.open !== undefined ? item : null;
-      if (!editor.getModel()) return;
-      const text = editor.getValue(), selections = (editor.getSelections() || []).map(selection => ({
+      if (editor.getModel && !editor.getModel()) return;
+      const text = editor.getValue(), selections = editor.selections?.() || (editor.getSelections() || []).map(selection => ({
         start: editor.getModel().getOffsetAt(selection.getStartPosition()), end: editor.getModel().getOffsetAt(selection.getEndPosition())
       }));
-      if (tag) this.detect(text);
+      if (tag) this.document.update(text);
       const source = tag ? "mew.tag" : "mew.attr";
       const operations = selections.map(({ start, end }) => tag ? this.buildTagEdit(start, end, tag) : {
         start, end, text: item.text, selectStart: item.cursorOffset ?? item.text.length,
@@ -189,9 +145,12 @@
       } else {
         const edits = new Map(), targets = [];
         for (const operation of operations) {
-          const pair = tag && this.detected.byStart.get(operation.start);
+          const pair = tag && this.document.parse().tags.byStart.get(operation.start);
           const inner = pair && text.slice(pair.openEnd, pair.closeStart);
-          const opening = tag?.open || "", closing = tag?.close || "";
+          const inline = pair && blockTagNames.has(pair.name) && inlineTagIds.has(tag?.id) &&
+            operation.text === text.slice(pair.start, pair.openEnd) + tag.open + inner + tag.close + text.slice(pair.closeStart, pair.end);
+          const opening = inline ? text.slice(pair.start, pair.openEnd) + tag.open : tag?.open || "";
+          const closing = inline ? tag.close + text.slice(pair.closeStart, pair.end) : tag?.close || "";
           // Split wrapper changes so shared/nested multi-cursor edits preserve the inner text.
           if (pair?.end === operation.end && (operation.text === inner || operation.text === opening + inner + closing)) {
             const remove = operation.text === inner;
@@ -212,6 +171,11 @@
           start: offset(op.start, op) + op.selectStart, end: offset(op.start, op) + op.selectEnd
         } : { start: offset(start), end: offset(end) });
       }
+      if (editor.replaceRanges) return Promise.resolve(editor.replaceRanges(changes, cursors, source)).then(async applied => {
+        if (applied === false) return;
+        await editor.focus();
+        return operations[0];
+      });
       const Selection = editor.getSelection().constructor;
       const range = (start, end) => {
         const a = editor.getModel().getPositionAt(start), b = editor.getModel().getPositionAt(end);
@@ -503,5 +467,238 @@
       }
     };
   }
-  window.MewTagPanel = { mount, tags, attrs, tagMap, tagForKeyEvent, blockTagNames, TagEditor };
+  function renderBar(webview, { scriptUri, floating = false }) {
+    const nonce = String(Date.now());
+    return `<!doctype html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+    <title>MEW Tags</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 6px;
+        color: var(--vscode-foreground);
+        background: var(--vscode-panel-background, var(--vscode-editor-background));
+        font: 12px var(--vscode-font-family);
+        overflow: auto;
+      }
+      .bar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      button {
+        min-width: 30px;
+        height: 24px;
+        padding: 0 7px;
+        border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+        border-radius: 4px;
+        color: var(--vscode-button-foreground);
+        background: var(--vscode-button-background);
+        font: 600 11px var(--vscode-font-family);
+        cursor: pointer;
+      }
+      button:hover { background: var(--vscode-button-hoverBackground); }
+      button.attr {
+        color: var(--vscode-editor-foreground);
+        background: var(--vscode-input-background);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+    </div>
+    <script nonce="${nonce}" src="${escapeHtml(scriptUri)}" data-mew-tag-bar data-floating="${floating}"></script>
+  </body>
+  </html>`;
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, ch => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;"
+    })[ch]);
+  }
+
+  class TagBarViewProvider {
+    constructor(context, host) {
+      this.host = host;
+      this.editors = new WeakMap();
+      this.context = context;
+      this.panels = new Set();
+      this.setFloating(this.findFloating() !== undefined);
+      context.subscriptions.push({ dispose: () => { for (const panel of this.panels) panel.dispose(); } });
+    }
+    start() {
+      const { vscode } = this.host;
+      const { subscriptions } = this.context;
+      subscriptions.push(
+        vscode.window.registerWebviewPanelSerializer("mewReader.floatingBar", this),
+        vscode.window.registerWebviewViewProvider("mewReader.bar", this, { webviewOptions: { retainContextWhenHidden: true } }),
+        vscode.commands.registerCommand("mewReader.showBar", () => this.show()),
+        vscode.commands.registerCommand("mewReader.openFloatingBar", () => this.openFloating()));
+      for (const tag of [...tags, ...attrs]) {
+        subscriptions.push(vscode.commands.registerCommand(`mewReader.insert.${tag.id}`, () => this.insertTag(tag)));
+      }
+    }
+    findFloating() {
+      const { vscode } = this.host;
+      for (const group of vscode.window.tabGroups?.all || []) {
+        const tab = group.tabs.find(tab => ["mewReader.floatingBar", "mainThreadWebview-mewReader.floatingBar"].includes(tab.input?.viewType));
+        if (tab) return { group, tab };
+      }
+    }
+    setFloating(value) {
+      const { vscode } = this.host;
+      return vscode.commands.executeCommand("setContext", "mewReader.floating", value);
+    }
+    async show() {
+      if (this.panels.size || this.findFloating()) return this.openFloating();
+      return this.showDockedView();
+    }
+    configure(webview, floating) {
+      const { vscode, report } = this.host;
+      webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
+      webview.onDidReceiveMessage(message => this.handleMessage(message).catch(report), null, this.context.subscriptions);
+      webview.html = renderBar(webview, { floating, scriptUri: webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "tag-panel.js")).toString() });
+    }
+    resolveWebviewView(view) {
+      this.configure(view.webview, false);
+    }
+    attachPanel(panel) {
+      if (this.panels.has(panel)) return;
+      this.panels.add(panel);
+      this.setFloating(true);
+      panel.title = "MEW 标签插入栏";
+      panel.onDidDispose(() => {
+        this.panels.delete(panel);
+        if (!this.panels.size) this.setFloating(false);
+      }, null, this.context.subscriptions);
+      this.configure(panel.webview, true);
+    }
+    async deserializeWebviewPanel(panel) {
+      this.attachPanel(panel);
+    }
+    async openFloating() {
+      if (this.opening) return this.opening;
+      this.opening = this.revealFloating();
+      try { await this.opening; } finally { this.opening = null; }
+    }
+    async revealFloating() {
+      const { vscode, revealReaderTab } = this.host;
+      const existing = this.panels.values().next().value;
+      if (existing) {
+        existing.reveal(existing.viewColumn, false);
+        await this.host.focusReaderWindow();
+        return;
+      }
+      const restored = this.findFloating();
+      if (restored) {
+        if (await revealReaderTab(restored)) await vscode.commands.executeCommand("workbench.action.enableCompactAuxiliaryWindow");
+        return;
+      }
+      const panel = vscode.window.createWebviewPanel("mewReader.floatingBar", "MEW 标签插入栏",
+        vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+      this.attachPanel(panel);
+      await vscode.commands.executeCommand("workbench.action.moveEditorToNewWindow");
+      await vscode.commands.executeCommand("workbench.action.enableCompactAuxiliaryWindow");
+    }
+    async showDocked() {
+      const { vscode } = this.host;
+      for (const panel of [...this.panels]) panel.dispose();
+      for (const group of vscode.window.tabGroups?.all || []) {
+        const tabs = group.tabs.filter(tab => ["mewReader.floatingBar", "mainThreadWebview-mewReader.floatingBar"].includes(tab.input?.viewType));
+        if (tabs.length) await vscode.window.tabGroups.close(tabs, true);
+      }
+      await this.setFloating(false);
+      await this.showDockedView();
+    }
+    async handleMessage(message) {
+      const { openSiblingFile } = this.host;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "insertTag" || message.type === "insertAttr") {
+        const item = (message.type === "insertTag" ? tags : attrs).find(item => item.id === message.id);
+        if (item) return this.insertTag(item);
+      }
+      if (message.type === "openFloatingBar") return this.openFloating();
+      if (message.type === "showDockedBar") return this.showDocked();
+      if (message.type === "openPreviousFile") return openSiblingFile(-1);
+      if (message.type === "openNextFile") return openSiblingFile(1);
+    }
+    showDockedView() {
+      return this.host.vscode.commands.executeCommand("mewReader.bar.focus");
+    }
+    async insertTag(item) {
+      const { vscode, targetEditor } = this.host;
+      const editor = targetEditor();
+      if (!editor) return vscode.window.showInformationMessage("Open a text editor before inserting MEW tags or attributes.");
+      let engine = this.editors.get(editor);
+      if (!engine) {
+        const adapter = {
+          getValue: () => editor.document.getText(),
+          selections: () => editor.selections.map(selection => ({
+            start: editor.document.offsetAt(selection.start), end: editor.document.offsetAt(selection.end)
+          })),
+          async replaceRanges(changes, selections) {
+            // Reject conflicting ranges as a unit; never silently discard a cursor's edit.
+            const ordered = [...changes].sort((a, b) => a.start - b.start || a.end - b.end);
+            if (ordered.some((edit, index) => index && edit.start < ordered[index - 1].end)) {
+              vscode.window.showInformationMessage("标签替换范围重叠，请调整选区后重试。");
+              return false;
+            }
+            const document = editor.document;
+            const applied = await editor.edit(builder => {
+              for (const edit of ordered) builder.replace(
+                new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)), edit.text);
+            });
+            if (!applied || document.isClosed) return false;
+            editor.selections = selections.map(selection => new vscode.Selection(
+              document.positionAt(selection.start), document.positionAt(selection.end)));
+            editor.revealRange?.(editor.selection, vscode.TextEditorRevealType?.InCenterIfOutsideViewport);
+            return true;
+          },
+          focus: () => vscode.window.showTextDocument(editor.document, { viewColumn: editor.viewColumn, preserveFocus: true })
+        };
+        engine = new TagEditor(adapter);
+        this.editors.set(editor, engine);
+      }
+      return engine.applyTag(item);
+    }
+  }
+  function mountWebview(api, floating = false) {
+    const bar = document.querySelector(".bar");
+    if (!bar) return;
+    if (floating) api.setState({ ...api.getState(), floating: true });
+    const button = (type, item, attr = false) => {
+      const element = makeButton(item.label, item.title, attr ? "attr" : "", { type, id: item.id || type });
+      bar.append(element);
+    };
+    tags.forEach(item => button("insertTag", item));
+    attrs.forEach(item => button("insertAttr", item, true));
+    button("openPreviousFile", { label: "←", title: "Open Previous File in Folder" }, true);
+    button("openNextFile", { label: "→", title: "Open Next File in Folder" }, true);
+    button(floating ? "showDockedBar" : "openFloatingBar", {
+      label: floating ? "返回标签栏 ↙" : "另窗打开 ↗",
+      title: floating ? "关闭独立窗口，返回原停靠位置" : "在独立窗口打开标签栏；可在窗口标题栏开启置顶"
+    }, true);
+    bar.addEventListener("click", event => {
+      const element = event.target.closest("button[data-type]");
+      if (element) api.postMessage({ type: element.dataset.type, id: element.dataset.id });
+    });
+  }
+  const api = { mount, tags, attrs, tagMap, tagForKeyEvent, blockTagNames, TagEditor, renderBar, mountWebview, TagBarViewProvider };
+  if (typeof module === "object" && module.exports) module.exports = api;
+  else {
+    window.MewTagPanel = api;
+    const script = typeof document === "object" ? document.currentScript : null;
+    if (script?.hasAttribute("data-mew-tag-bar")) mountWebview(acquireVsCodeApi(), script.dataset.floating === "true");
+  }
 })();

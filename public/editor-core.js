@@ -135,32 +135,18 @@
       const check = value => { if (value === false) throw new Error('编辑器未能应用替换'); return value; };
       return result?.then ? result.then(check) : check(result);
     }
-    parse(document = window.document) {
+    parse(document = globalThis.document) {
       if (this.index) return this.index;
-      // Editable tag, text-layout and font rules shared by pairs and definitions.
-      const rules = {
-        voidTags: /^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/,
-        rawTags: /^(script|style|textarea|title)$/,
-        ignoredTags: /^(head|script|style)$/,
-        newlineTags: /^(p|div|li|h[1-6])$/, lineBreakTag: "br",
-        style: /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i,
-        fonts: [
-          ['italic', /^(i|em)$/, /(?:^|;)\s*font-style\s*:\s*([^;!]+)/i, /^(normal|italic|oblique)\b/i, value => !/^normal$/i.test(value)],
-          ['bold', /^(b|strong)$/, /(?:^|;)\s*font-weight\s*:\s*([^;!]+)/i, /^(normal|bold|[1-9]00)$/i, value => /bold/i.test(value) || Number(value) >= 600]
-        ],
-        paragraphTag: "p", align: /\balign\s*=\s*["']?(center|right)\b/i,
-        alignIds: { center: "c", right: "r" }
-      };
       const starts = [], ends = [], formats = [], byStart = new Map(), tagStack = [];
       const stack = [{ name: '', italic: false, bold: false, tags: [] }];
-      let raw = "", ignored = "", rawName, sharedTags = true, template;
-      const tokens = /<!--[\s\S]*?-->|<!--|<![^>]*>|<\/?[a-z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>|&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);|[^<&]+|[<&]/gi;
+      let raw = "", ignored = "", rawName, declarationEnd = 0, template;
+      const tokens = /<!--[\s\S]*?-->|<!--|<\/?[a-z][\w:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>|<!(?=[^>]*>)[^><]*>?|&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);|[^<&]+|[<&]/gi;
       for (const token of this.snapshot.source.matchAll(tokens)) {
         const text = token[0], tag = /^<(\/?)\s*([a-z][\w:-]*)/i.exec(text), name = tag?.[2].toLowerCase(), end = token.index + text.length;
-        const empty = tag && (rules.voidTags.test(name) || /\/\s*>$/.test(text));
-        const align = name === rules.paragraphTag && text.match(rules.align)?.[1]?.toLowerCase();
+        const empty = tag && (/^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/.test(name) || /\/\s*>$/.test(text));
+        const align = name === "p" && text.match(/\balign\s*=\s*["']?(center|right)\b/i)?.[1]?.toLowerCase();
         const node = tag && !tag[1] && (!rawName || !ignored) && { name, start: token.index, openEnd: end, open: text,
-          id: name === rules.paragraphTag ? rules.alignIds[align] || name : name };
+          id: name === "p" ? ({ center: "c", right: "r" }[align] || name) : name };
         // Pair repair and formatting retain their own closing policies on shared opening nodes.
         if (tag && (!rawName || tag[1] && name === rawName)) {
           if (tag[1]) {
@@ -172,13 +158,13 @@
           } else if (empty) byStart.set(node.start, Object.assign(node, { closeStart: end, end }));
           else {
             tagStack.push(node);
-            if (rules.rawTags.test(name)) rawName = name;
+            if (/^(script|style|textarea|title)$/.test(name)) rawName = name;
           }
         }
-        if (text.startsWith("<!") && !text.startsWith("<!--") && text.slice(2).includes("<")) sharedTags = false;
+        if (text.startsWith("<!") && !text.startsWith("<!--")) declarationEnd = this.snapshot.source.indexOf(">", token.index) + 1;
         if (text === "<!--") ignored = "!--";
-        if (tag && !tag[1] && rules.ignoredTags.test(name)) ignored ||= name;
-        if (ignored || text.startsWith("<!")) {
+        if (tag && !tag[1] && /^(head|script|style)$/.test(name)) ignored ||= name;
+        if (ignored || text.startsWith("<!") || token.index < declarationEnd) {
           if (tag?.[1] && name === ignored) ignored = "";
           continue;
         }
@@ -191,18 +177,18 @@
               stack.length = at;
             }
           } else if (!empty) {
-            const frame = { ...stack.at(-1), name, definition: node }, style = rules.style.exec(text);
+            const frame = { ...stack.at(-1), name, definition: node }, style = /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(text);
             node.rawStart = raw.length;
-            for (const [key, tags, declaration, valid, enabled] of rules.fonts) {
-              const value = style && declaration.exec(style[1] ?? style[2])?.[1].trim();
-              node[key] = value && valid.test(value) ? enabled(value) : tags.test(name) ? true : null;
-              frame[key] = node[key] ?? frame[key];
-            }
+            const italic = /(?:^|;)\s*font-style\s*:\s*([^;!]+)/i.exec(style?.[1] ?? style?.[2] ?? "")?.[1].trim();
+            const bold = /(?:^|;)\s*font-weight\s*:\s*([^;!]+)/i.exec(style?.[1] ?? style?.[2] ?? "")?.[1].trim();
+            node.italic = italic && /^(normal|italic|oblique)\b/i.test(italic) ? !/^normal$/i.test(italic) : /^(i|em)$/.test(name) ? true : null;
+            node.bold = bold && /^(normal|bold|[1-9]00)$/i.test(bold) ? /bold/i.test(bold) || Number(bold) >= 600 : /^(b|strong)$/.test(name) ? true : null;
+            frame.italic = node.italic ?? frame.italic; frame.bold = node.bold ?? frame.bold;
             if (node.italic !== null || node.bold !== null) frame.tags = [...frame.tags, node];
             stack.push(frame);
           }
-          value = (tag[1] && rules.newlineTags.test(name)) || name === rules.lineBreakTag ? "\n" : "";
-        } else if (text.startsWith("&") && text.endsWith(";")) {
+          value = (tag[1] && /^(p|div|li|h[1-6])$/.test(name)) || name === "br" ? "\n" : "";
+        } else if (document && text.startsWith("&") && text.endsWith(";")) {
           (template ||= document.createElement("template")).innerHTML = text;
           value = template.content.textContent;
         }
@@ -214,7 +200,7 @@
           formats.push(stack.at(-1));
         }
       }
-      return this.index = { ...this.snapshot, raw, starts, ends, formats, tags: sharedTags ? { pairs: [...byStart.values()], byStart } : undefined, model: this.model };
+      return this.index = { ...this.snapshot, raw, starts, ends, formats, tags: { pairs: [...byStart.values()], byStart }, model: this.model };
     }
   }
 
