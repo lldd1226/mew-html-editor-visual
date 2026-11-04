@@ -43,10 +43,7 @@ async function restoreSession() {
     if (saved?.version !== 1 || !Array.isArray(saved.documents)) return;
     for (const entry of saved.documents) {
       if (typeof entry.path !== 'string' || !entry.path || state.docs.has(entry.path)) continue;
-      const options = {
-        read: () => api(`/api/file?path=${encodeURIComponent(entry.path)}`),
-        write: snapshot => postJson('/api/save', { path: entry.path, ...snapshot })
-      };
+      const options = documentOptions(entry.path);
       const hasDraft = typeof entry.content === 'string' && typeof entry.savedContent === 'string';
       let d;
       try { d = await DocumentModel.load(options); }
@@ -58,11 +55,11 @@ async function restoreSession() {
       if (hasDraft && d.content !== entry.content) {
         if (d.savedContent !== entry.savedContent) {
           // Keep the original disk version so saving still detects the conflict.
-          d.savedContent = entry.savedContent;
-          d.mtime = entry.mtime;
+          d.update(d.content, { text: entry.savedContent, mtime: entry.mtime });
           notify(`${entry.path} 在暂存后已被外部修改；已保留暂存内容，保存时将检查冲突`);
         }
         d.update(entry.content);
+        d.model.setValue(d.content);
       }
       Object.assign(d, { path: entry.path, viewState: entry.viewState });
       state.docs.set(d.path, d);
@@ -254,26 +251,22 @@ async function saveAs() {
     }
     const wasActive = doc() === d;
     const viewState = wasActive ? editor.saveViewState() : d.viewState;
+    const replacement = new DocumentModel({ ...documentOptions(data.path), text: d.content, mtime: data.mtime, editable: d.editable });
+    replacement.update(d.content, { text: snapshot, mtime: data.mtime });
+    replacement.viewState = viewState;
     state.docs.delete(oldPath);
     clearTimeout(externalCheckTimers.get(oldPath));
     externalCheckTimers.delete(oldPath);
     d.reloadRevision += 1;
-    d.path = data.path;
-    d.savedContent = snapshot;
-    d.mtime = data.mtime;
-    d.read = () => api(`/api/file?path=${encodeURIComponent(d.path)}`);
-    d.write = value => postJson('/api/save', { path: d.path, ...value });
-    if (wasActive) editor.setModel(null);
-    d.model?.dispose();
-    d.model = null;
-    d.viewState = viewState;
-    state.docs.set(d.path, d);
+    if (wasActive) source.setDocument(null);
+    d.dispose();
+    state.docs.set(replacement.path, replacement);
     if (wasActive) {
-      state.path = d.path;
-      switchDoc(d.path);
+      state.path = replacement.path;
+      switchDoc(replacement.path);
     } else renderTabs();
     ui.tree.scheduleRefresh();
-    notify(`Saved as ${d.path}${d.dirty ? '; newer edits remain unsaved' : ''}`);
+    notify(`Saved as ${replacement.path}${replacement.dirty ? '; newer edits remain unsaved' : ''}`);
   } catch (error) { notify(error.message); }
 }
 async function openFile(rel) {
@@ -285,15 +278,12 @@ async function openFile(rel) {
   try {
     let loading = pendingOpens.get(rel);
     if (!loading) {
-      let canonicalPath = rel;
       loading = DocumentModel.load({
         read: async () => {
-          const data = await api(`/api/file?path=${encodeURIComponent(canonicalPath)}`);
-          canonicalPath = data.path;
-          return data;
-        },
-        write: snapshot => postJson("/api/save", { path: canonicalPath, ...snapshot })
-      }).then(d => Object.assign(d, { path: canonicalPath }));
+          const data = await api(`/api/file?path=${encodeURIComponent(rel)}`);
+          return { ...data, ...documentOptions(data.path) };
+        }
+      });
       pendingOpens.set(rel, loading);
       loading.finally(() => {
         if (pendingOpens.get(rel) === loading) pendingOpens.delete(rel);
@@ -438,23 +428,19 @@ async function checkCssUpdate() {
 }
 // Each opened file owns one Monaco model and view state. All commands address
 // this same document registry; ui.js owns its visual representation.
-function modelFor(d) {
-  if (!d.model) {
-    d.model = source.createModel({
-      text: d.content,
-      language: languageForPath(monaco, d.path),
-      uri: monaco.Uri.from({ scheme: 'mew', path: '/' + d.path }),
-      onChange: model => {
-        const wasDirty = d.dirty;
-        d.update(d.textFromEditor(model.getValue()));
-        const active = d === doc();
-        if (wasDirty !== d.dirty) { if (active) markDirty(); else renderTabs(); }
-        else scheduleSessionBackup();
-        if (active) scheduleEditorRefresh();
-      }
-    });
-  }
-  return d.model;
+function documentOptions(path) {
+  return {
+    path, api: monaco, language: languageForPath(monaco, path),
+    uri: monaco.Uri.from({ scheme: 'mew', path: '/' + path }),
+    read: () => api(`/api/file?path=${encodeURIComponent(path)}`),
+    write: value => postJson('/api/save', { path, ...value }),
+    onChange: (d, wasDirty) => {
+      const active = d === doc();
+      if (wasDirty !== d.dirty) { if (active) markDirty(); else renderTabs(); }
+      else scheduleSessionBackup();
+      if (active) scheduleEditorRefresh();
+    }
+  };
 }
 function saveEditorView() {
   const d = doc();
@@ -476,7 +462,7 @@ function switchDoc(path) {
   const d = state.docs.get(path);
   if (!d) return;
   state.path = path;
-  editor.setModel(modelFor(d));
+  source.setDocument(d);
   const language = d.model.getLanguageId();
   editor.updateOptions({
     readOnly: !d.editable,
@@ -535,11 +521,11 @@ async function closeDocs(paths) {
         }
       }
       if (state.docs.get(path) !== d) continue;
-      if (doc() === d) { editor.setModel(null); state.path = ''; }
+      if (doc() === d) { source.setDocument(null); state.path = ''; }
       state.docs.delete(path);
       clearTimeout(externalCheckTimers.get(path));
       externalCheckTimers.delete(path);
-      d.model?.dispose();
+      d.dispose();
     }
     if (!doc()) {
       const i = order.indexOf(activePath);
@@ -549,7 +535,7 @@ async function closeDocs(paths) {
       if (!next) next = state.docs.keys().next().value; 
       if (next) switchDoc(next);
       else {
-        editor.setModel(null);
+        source.setDocument(null);
         ui.clearPreview();
         ui.tree.setActive();
       }

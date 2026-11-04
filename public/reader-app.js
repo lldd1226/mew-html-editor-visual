@@ -127,7 +127,7 @@
     if (source) return source.editor;
     monaco = api;
     source = new MonacoController(monaco, byId("monacoEditor"), {
-      page: "reader", scale: ui.editorScale(), dark: ui.isDark(), readOnly: true
+      scale: ui.editorScale(), dark: ui.isDark(), readOnly: true
     });
     tagEditor = new tagPanel.TagEditor(source);
     bindReaderContextMenu(source.editor);
@@ -149,7 +149,7 @@
         else if (tagMap.has(shortcut)) editTag(tagMap.get(shortcut));
       });
     }
-    window.readerMonaco = { editor: source.editor, get model() { return source.model; }, save, showSource: () => setMode('source'),
+    window.readerMonaco = { editor: source.editor, save, showSource: () => setMode('source'),
       reviewFiles() {
         const pages = currentVolume()?.pages || [], volume = state.volume;
         return { current: state.page, files: [...pages], async open(page) {
@@ -199,7 +199,7 @@
   }
 
   function currentSource() {
-    if (state.mode !== "visual") return state.document.textFromEditor(source?.getValue() || "");
+    if (state.mode !== "visual") return state.document.textFromEditor(source?.editor.getValue() || "");
     const live = ui.getVisualDocument();
     if (!live?.body) return state.document.content;
     const parsed = new DOMParser().parseFromString(state.document.content, "text/html");
@@ -228,7 +228,7 @@
       ? { top: visual?.scrollingElement?.scrollTop || 0, left: visual?.scrollingElement?.scrollLeft || 0 }
       : null;
     source?.[method]();
-    updateWorkingCopy(source?.getValue() || "");
+    updateWorkingCopy(source?.editor.getValue() || "");
     if (state.mode === "visual") renderVisual(scroll);
     else source?.focus();
     notify(`已${action}`);
@@ -294,7 +294,8 @@
         }
         const data = await api(url);
         const document = new DocumentModel({
-          ...data,
+          ...data, api: monaco, uri: monaco.Uri.from({ scheme: "mew-reader", path: `/${volume.id}/${page}.html` }),
+          onChange: current => { if (state.document === current) { markDirty(); updateHistoryButtons(); } },
           read: () => api(url),
           write: snapshot => api(url, {
             method: "PUT", headers: { "content-type": "application/json" },
@@ -369,17 +370,10 @@
       // HTML fallback page. Volumes without a PDF retain navigation memory.
       if (!volume.pdfUrl) rememberPdfPage(state.pdfPage);
       if (editorPath) editorPathCache.set(`${volume.id}:${page}`, editorPath);
-      if (!readerOnly && source.model) previousDocument.viewState = source.editor.saveViewState();
+      if (!readerOnly && source.editor.getModel()) previousDocument.viewState = source.editor.saveViewState();
       state.document = document;
       if (!readerOnly) {
-        document.model ||= source.createModel({ text: document.content, language: "html",
-          uri: monaco.Uri.from({ scheme: "mew-reader", path: `/${volume.id}/${page}.html` }),
-          onChange: model => {
-            document.update(document.textFromEditor(model.getValue()));
-            if (state.document === document) { markDirty(); updateHistoryButtons(); }
-          }
-        });
-        source.setModel(document.model);
+        source.setDocument(document);
         source.setEditable(document.editable);
         markDirty();
         setMode(state.mode, { resetSourceScroll: !document.viewState });
@@ -670,7 +664,7 @@
 
   function insertSourceTag(tag) {
     const { start, end } = source.selection();
-    const text = source.getValue();
+    const text = source.editor.getValue();
     const operation = tagEditor.applyTag(tag);
     const removed = operation.text.length < operation.end - operation.start;
     const wrapped = tag.open + text.slice(start, end) + tag.close;
@@ -679,7 +673,7 @@
   }
 
   function applySourceEdit(text, start, end, selectStart, selectEnd = selectStart) {
-    source.replaceRange(text, start, end, start, start, "reader.edit");
+    state.document.applyEdits([{ start, end, text }], { editor: source.editor, origin: "reader.edit", selections: [{ start, end: start }] });
     source.setSelection(selectStart, selectEnd);
     source?.focus();
   }
@@ -751,7 +745,7 @@
       attr: (index) => {
         if (state.mode === "visual") return notify("属性按钮请在源代码模式使用");
         const attr = attrs[index], { start, end } = source.selection();
-        const selected = source.getValue().slice(start, end);
+        const selected = source.editor.getValue().slice(start, end);
         applySourceEdit(attr.text + selected, start, end, start + (attr.cursorOffset ?? attr.text.length + selected.length));
       },
       visualInput: () => updateWorkingCopy(),

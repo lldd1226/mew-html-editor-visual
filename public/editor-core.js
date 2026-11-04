@@ -1,21 +1,25 @@
 (() => {
   "use strict";
 
+  // Each document owns its editor model, version snapshot and derived HTML index.
   class DocumentModel {
     static async load(options) {
       return new DocumentModel({ ...options, ...await options.read() });
     }
 
-    constructor({ text = "", mtime = null, editable = true, read, write } = {}) {
+    constructor({ text = "", mtime = null, editable = true, read, write, path, model, api, language = "html", uri, onChange } = {}) {
       this.content = text;
-      this.savedContent = text;
-      this.mtime = mtime;
-      this.editable = editable;
-      this.revision = 0;
-      this.reloadRevision = 0;
-      this.read = read;
-      this.write = write;
+      Object.assign(this, { editable, read, write, path });
+      this.revision = this.reloadRevision = 0;
       this.pending = Promise.resolve();
+      this.model = model ?? api?.editor.createModel(text, language, uri) ?? null;
+      this.update(text, { text, mtime });
+      this.model?.onDidChangeContent?.(() => { const wasDirty = this.dirty; this.update(); onChange?.(this, wasDirty); });
+    }
+
+    dispose() {
+      this.model?.dispose();
+      this.model = this.snapshot = this.index = null;
     }
 
     get dirty() { return this.content !== this.savedContent; }
@@ -28,9 +32,15 @@
       return text;
     }
 
-    update(text) {
+    update(text, saved) {
+      const source = this.model?.getValue?.() ?? text ?? this.content, version = this.model?.getVersionId?.();
+      text ??= this.textFromEditor(source);
       if (text !== this.content) this.revision += 1;
       this.content = text;
+      if (!this.snapshot || this.snapshot.source !== source || this.snapshot.version !== version) {
+        this.snapshot = { source, version }; this.index = null;
+      }
+      if (saved) { this.savedContent = saved.text; this.mtime = saved.mtime; }
     }
 
     enqueue(operation) {
@@ -39,47 +49,172 @@
       return task;
     }
 
-    async writeSnapshot(text) {
-      if (!this.editable) throw new Error("Document is read-only");
-      const result = await this.write({ text, mtime: this.mtime });
-      this.savedContent = text;
-      this.mtime = result.mtime;
-      return result;
-    }
-
-    save(text = this.content) {
+    save(text = this.content, { latest = false } = {}) {
       const revision = this.reloadRevision;
-      return this.enqueue(() => {
-        if (revision !== this.reloadRevision) throw new Error("File reloaded before saving. Review the current content and save again.");
-        return this.writeSnapshot(text);
+      return this.enqueue(async () => {
+        if (latest) {
+          if (!this.dirty) return;
+          text = this.content;
+        } else if (revision !== this.reloadRevision) throw new Error("File reloaded before saving. Review the current content and save again.");
+        if (!this.editable) throw new Error("Document is read-only");
+        const result = await this.write({ text, mtime: this.mtime });
+        this.update(this.content, { text, mtime: result.mtime });
+        return result;
       });
     }
 
     async saveUntilClean() {
-      while (this.dirty) {
-        await this.enqueue(() => this.dirty ? this.writeSnapshot(this.content) : undefined);
-      }
+      while (this.dirty) await this.save(undefined, { latest: true });
     }
 
     refresh() {
       return this.enqueue(async () => {
-        const data = await this.read();
-        if (data.text === this.savedContent) {
-          this.mtime = data.mtime;
-          return "unchanged";
-        }
-        if (data.text === this.content) {
-          this.savedContent = data.text;
-          this.mtime = data.mtime;
-          return "saved";
-        }
-        if (this.dirty) return "conflict";
-        this.reloadRevision += 1;
-        this.update(data.text);
-        this.savedContent = data.text;
-        this.mtime = data.mtime;
-        return "updated";
+        const { text, mtime } = await this.read();
+        const status = text === this.savedContent ? "unchanged" : text === this.content ? "saved" : this.dirty ? "conflict" : "updated";
+        if (status === "conflict") return status;
+        if (status === "updated") this.reloadRevision += 1;
+        this.update(status === "updated" ? text : this.content, { text, mtime });
+        return status;
       });
+    }
+
+    rangeAt(start, end, textOffsets = false) {
+      if (textOffsets) {
+        const { source, starts, ends } = this.parse();
+        [start, end] = [starts[start] ?? source.length, (end > start ? ends[end - 1] : starts[start]) ?? source.length];
+      }
+      const a = this.model.getPositionAt(start), b = this.model.getPositionAt(end);
+      return { startLineNumber: a.lineNumber, startColumn: a.column,
+        endLineNumber: b.lineNumber, endColumn: b.column };
+    }
+    validateEdits(edits) {
+      const { source, version } = this.snapshot;
+      if (edits.versionId !== undefined && edits.versionId !== version) throw new Error('编辑器内容已变化，无法应用旧修改');
+      const sorted = edits.map(edit => {
+        if (!edit.range) return { ...edit };
+        const range = this.model?.validateRange(edit.range);
+        if (!range || ['startLineNumber', 'startColumn', 'endLineNumber', 'endColumn']
+          .some(key => !Number.isInteger(edit.range[key]) || range[key] !== edit.range[key])) throw new Error('无效的替换范围');
+        return { ...edit, start: this.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }),
+          end: this.model.getOffsetAt({ lineNumber: range.endLineNumber, column: range.endColumn }), text: edit.text ?? '' };
+      }).sort((a, b) => a.start - b.start || a.end - b.end);
+      let previous = null;
+      for (const edit of sorted) {
+        if (!Number.isInteger(edit.start) || !Number.isInteger(edit.end) || edit.start < 0
+          || edit.end < edit.start || edit.end > source.length || typeof edit.text !== 'string') throw new Error('无效的替换范围');
+        if (previous && (edit.start < previous.end || edit.start === previous.start)) throw new Error('替换范围重叠，请逐条处理');
+        if (edit.expected !== undefined && source.slice(edit.start, edit.end) !== edit.expected) throw new Error('原文已变化，无法应用旧修改');
+        previous = edit;
+      }
+      return Object.defineProperty(sorted, 'versionId', { value: version });
+    }
+    applyEdits(edits, { editor, origin = 'review-replacement', selections } = {}) {
+      const api = editor?.getDomNode?.()?.ownerDocument?.defaultView?.monaco;
+      if (editor) {
+        this.update(this.content);
+        if (!this.model || editor.document !== this) throw new Error('编辑器内容已变化，无法应用旧修改');
+        if (!this.editable || editor.getOption?.(api?.editor.EditorOption.readOnly ?? 104)) throw new Error('当前文件只读');
+      }
+      edits = this.validateEdits(edits);
+      if (!editor) {
+        const pieces = [];
+        let offset = 0;
+        for (const edit of edits) {
+          pieces.push(this.snapshot.source.slice(offset, edit.start), edit.text); offset = edit.end;
+        }
+        pieces.push(this.snapshot.source.slice(offset));
+        return { source: pieces.join(''), edits };
+      }
+      if (!edits.length) return;
+      editor.pushUndoStop?.();
+      const result = editor.executeEdits(origin, edits.map(edit => edit.range ? edit
+        : { range: this.rangeAt(edit.start, edit.end), text: edit.text, forceMoveMarkers: true }), typeof selections === 'function' ? selections
+        : selections && (() => selections.map(selection => selection.selectionStartLineNumber !== undefined ? selection
+          : api.Selection.fromPositions(this.model.getPositionAt(selection.start), this.model.getPositionAt(selection.end)))));
+      editor.pushUndoStop?.();
+      const check = value => { if (value === false) throw new Error('编辑器未能应用替换'); return value; };
+      return result?.then ? result.then(check) : check(result);
+    }
+    parse(document = window.document) {
+      if (this.index) return this.index;
+      // Editable tag, text-layout and font rules shared by pairs and definitions.
+      const rules = {
+        voidTags: /^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/,
+        rawTags: /^(script|style|textarea|title)$/,
+        ignoredTags: /^(head|script|style)$/,
+        newlineTags: /^(p|div|li|h[1-6])$/, lineBreakTag: "br",
+        style: /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i,
+        fonts: [
+          ['italic', /^(i|em)$/, /(?:^|;)\s*font-style\s*:\s*([^;!]+)/i, /^(normal|italic|oblique)\b/i, value => !/^normal$/i.test(value)],
+          ['bold', /^(b|strong)$/, /(?:^|;)\s*font-weight\s*:\s*([^;!]+)/i, /^(normal|bold|[1-9]00)$/i, value => /bold/i.test(value) || Number(value) >= 600]
+        ],
+        paragraphTag: "p", align: /\balign\s*=\s*["']?(center|right)\b/i,
+        alignIds: { center: "c", right: "r" }
+      };
+      const starts = [], ends = [], formats = [], byStart = new Map(), tagStack = [];
+      const stack = [{ name: '', italic: false, bold: false, tags: [] }];
+      let raw = "", ignored = "", rawName, sharedTags = true, template;
+      const tokens = /<!--[\s\S]*?-->|<!--|<![^>]*>|<\/?[a-z][^>"']*(?:(?:"[^"]*"|'[^']*')[^>"']*)*>|&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);|[^<&]+|[<&]/gi;
+      for (const token of this.snapshot.source.matchAll(tokens)) {
+        const text = token[0], tag = /^<(\/?)\s*([a-z][\w:-]*)/i.exec(text), name = tag?.[2].toLowerCase(), end = token.index + text.length;
+        const empty = tag && (rules.voidTags.test(name) || /\/\s*>$/.test(text));
+        const align = name === rules.paragraphTag && text.match(rules.align)?.[1]?.toLowerCase();
+        const node = tag && !tag[1] && (!rawName || !ignored) && { name, start: token.index, openEnd: end, open: text,
+          id: name === rules.paragraphTag ? rules.alignIds[align] || name : name };
+        // Pair repair and formatting retain their own closing policies on shared opening nodes.
+        if (tag && (!rawName || tag[1] && name === rawName)) {
+          if (tag[1]) {
+            const open = tagStack.at(-1), crossed = tagStack.findLastIndex(item => item.name === name);
+            if (open && (open.name === name || crossed < 0)) {
+              byStart.set(open.start, Object.assign(tagStack.pop(), { closeName: name, closeStart: token.index, end }));
+              if (name === rawName) rawName = undefined;
+            } else if (crossed >= 0) tagStack.length = crossed;
+          } else if (empty) byStart.set(node.start, Object.assign(node, { closeStart: end, end }));
+          else {
+            tagStack.push(node);
+            if (rules.rawTags.test(name)) rawName = name;
+          }
+        }
+        if (text.startsWith("<!") && !text.startsWith("<!--") && text.slice(2).includes("<")) sharedTags = false;
+        if (text === "<!--") ignored = "!--";
+        if (tag && !tag[1] && rules.ignoredTags.test(name)) ignored ||= name;
+        if (ignored || text.startsWith("<!")) {
+          if (tag?.[1] && name === ignored) ignored = "";
+          continue;
+        }
+        let value = text;
+        if (tag) {
+          if (tag[1]) {
+            const at = stack.findLastIndex(value => value.name === name);
+            if (at > 0) {
+              Object.assign(stack[at].definition, { fontCloseStart: token.index, closeEnd: end, closing: text, rawEnd: raw.length });
+              stack.length = at;
+            }
+          } else if (!empty) {
+            const frame = { ...stack.at(-1), name, definition: node }, style = rules.style.exec(text);
+            node.rawStart = raw.length;
+            for (const [key, tags, declaration, valid, enabled] of rules.fonts) {
+              const value = style && declaration.exec(style[1] ?? style[2])?.[1].trim();
+              node[key] = value && valid.test(value) ? enabled(value) : tags.test(name) ? true : null;
+              frame[key] = node[key] ?? frame[key];
+            }
+            if (node.italic !== null || node.bold !== null) frame.tags = [...frame.tags, node];
+            stack.push(frame);
+          }
+          value = (tag[1] && rules.newlineTags.test(name)) || name === rules.lineBreakTag ? "\n" : "";
+        } else if (text.startsWith("&") && text.endsWith(";")) {
+          (template ||= document.createElement("template")).innerHTML = text;
+          value = template.content.textContent;
+        }
+        const encoded = value !== text;
+        raw += value;
+        for (let i = 0; i < value.length; i++) {
+          starts.push(token.index + (encoded ? 0 : i));
+          ends.push(token.index + (encoded ? text.length : i + 1));
+          formats.push(stack.at(-1));
+        }
+      }
+      return this.index = { ...this.snapshot, raw, starts, ends, formats, tags: sharedTags ? { pairs: [...byStart.values()], byStart } : undefined, model: this.model };
     }
   }
 
@@ -137,7 +272,7 @@
     "editorHoverWidget.background": "#FAFAFD", "editorHoverWidget.border": "#E4E5E6", "editorGutter.background": "#FFFFFF",
     "editorOverviewRuler.border": "#F0F1F2", "editorOverviewRuler.findMatchForeground": "#0069CC99"
   };
-  // 两个入口共用默认配置；仅在确有页面差异时填写下面的覆盖项。
+  // 两个入口共用默认配置；调用方直接传入各自的覆盖项。
   const monacoOptions = {
     model: null, automaticLayout: true, fontFamily: 'Consolas, "Cascadia Mono", monospace',
     fontSize: 14, lineHeight: 21, tabSize: 2, wordWrap: "on", minimap: { enabled: false },
@@ -148,8 +283,6 @@
     colorDecorators: true, defaultColorDecorators: "never",
     renderLineHighlight: "gutter", renderLineHighlightOnlyWhenFocus: true
   };
-  const indexMonacoOptions = {};
-  const readerMonacoOptions = {};
   const registeredThemes = new WeakSet();
 
   function setMonacoTheme(api, dark) {
@@ -216,16 +349,17 @@
   }
 
   class MonacoController {
-    constructor(api, host, { page = "index", scale = 1, dark = false, ...options } = {}) {
+    constructor(api, host, { scale = 1, dark = false, ...options } = {}) {
       this.api = api;
       registerHtmlStyleColorProvider(api);
       setMonacoTheme(api, dark);
-      const config = { ...monacoOptions, ...(page === "reader" ? readerMonacoOptions : indexMonacoOptions), ...options };
+      const config = { ...monacoOptions, ...options };
       this.fontSize = config.fontSize;
       this.lineHeight = config.lineHeight;
       this.editor = api.editor.create(host, {
         ...config, fontSize: this.fontSize * scale, lineHeight: Math.round(this.lineHeight * scale)
       });
+      this.editor.document = this.editor.getModel() ? new DocumentModel({ model: this.editor.getModel() }) : null;
       const settingLabels = new Map();
       for (const [index, [name, label, values, read, write]] of [
         ["wordWrap", "自动换行", ["off", "on"]],
@@ -258,8 +392,8 @@
         const actions = getActions(...args).map(action => {
           if (!/^editor\.action\.clipboard(Copy|Cut|Paste)Action$/.test(action.id)) return action;
           const run = action.run.bind(action);
-          action.run = (...params) => { this.focus(); const model = this.model; return action.id.endsWith("PasteAction")
-            ? navigator.clipboard.readText().then(text => { if (text && this.model === model && !this.editor.getOption(api.editor.EditorOption.readOnly)) this.editor.trigger("mew", "paste", { text }); }) : run(...params); };
+          action.run = (...params) => { this.focus(); const model = this.editor.getModel(); return action.id.endsWith("PasteAction")
+            ? navigator.clipboard.readText().then(text => { if (text && this.editor.getModel() === model && !this.editor.getOption(api.editor.EditorOption.readOnly)) this.editor.trigger("mew", "paste", { text }); }) : run(...params); };
           return action;
         });
         // addAction prefixes menu command IDs with the editor instance ID.
@@ -303,15 +437,10 @@
       };
     }
 
-    createModel({ text = "", language = "html", uri, onChange } = {}) {
-      const model = this.api.editor.createModel(text, language, uri);
-      if (onChange) model.onDidChangeContent(() => onChange(model));
-      return model;
+    setDocument(document) {
+      this.editor.document = document;
+      this.editor.setModel(document?.model || null);
     }
-
-    get model() { return this.editor.getModel(); }
-    getValue() { return this.model?.getValue() || ""; }
-    setModel(model) { this.editor.setModel(model); }
     focus() { this.editor.focus(); }
     hasTextFocus() { return this.editor.hasTextFocus(); }
     setEditable(editable) { this.editor.updateOptions({ readOnly: !editable }); }
@@ -319,55 +448,27 @@
       this.editor.updateOptions({ fontSize: this.fontSize * scale, lineHeight: Math.round(this.lineHeight * scale) });
     }
     selection() {
-      const selection = this.editor.getSelection(), model = this.model;
-      return selection && model ? { start: model.getOffsetAt(selection.getStartPosition()), end: model.getOffsetAt(selection.getEndPosition()) } : { start: 0, end: 0 };
-    }
-    selections() {
-      return (this.editor.getSelections() || []).map(selection => ({
-        start: this.model.getOffsetAt(selection.getStartPosition()),
-        end: this.model.getOffsetAt(selection.getEndPosition())
-      }));
-    }
-    replaceRanges(edits, selections, origin) {
-      const model = this.model;
-      this.editor.pushUndoStop();
-      this.editor.executeEdits(origin, edits.map(edit => ({
-        range: this.api.Range.fromPositions(model.getPositionAt(edit.start), model.getPositionAt(edit.end)),
-        text: edit.text, forceMoveMarkers: true
-      })), () => selections.map(selection => this.api.Selection.fromPositions(
-        model.getPositionAt(selection.start), model.getPositionAt(selection.end))));
-      this.editor.pushUndoStop();
+      const selection = this.editor.getSelection();
+      return selection && this.editor.getModel() ? { start: this.editor.getModel().getOffsetAt(selection.getStartPosition()), end: this.editor.getModel().getOffsetAt(selection.getEndPosition()) } : { start: 0, end: 0 };
     }
     setSelection(start, end = start) {
-      this.editor.setSelection(this.api.Selection.fromPositions(this.model.getPositionAt(start), this.model.getPositionAt(end)));
-    }
-    replaceRange(text, start, end, selectStart = start, selectEnd = selectStart, origin = "mew.edit") {
-      const model = this.model;
-      if (!model) return;
-      const range = this.api.Range.fromPositions(model.getPositionAt(start), model.getPositionAt(end));
-      this.editor.pushUndoStop();
-      this.editor.executeEdits(origin, [{ range, text, forceMoveMarkers: true }], () => [
-        this.api.Selection.fromPositions(model.getPositionAt(selectStart), model.getPositionAt(selectEnd))
-      ]);
-      this.editor.pushUndoStop();
+      this.editor.setSelection(this.api.Selection.fromPositions(this.editor.getModel().getPositionAt(start), this.editor.getModel().getPositionAt(end)));
     }
     setValue(text, preserveUndo = false, origin = "mew.setValue") {
       text = String(text ?? "");
-      if (!this.model || this.getValue() === text) return;
-      if (!preserveUndo) return this.model.setValue(text);
-      const range = this.model.getFullModelRange();
-      this.editor.pushUndoStop();
-      this.editor.executeEdits(origin, [{ range, text, forceMoveMarkers: true }]);
-      this.editor.pushUndoStop();
+      if (!this.editor.getModel() || this.editor.getValue() === text) return;
+      if (!preserveUndo) return this.editor.getModel().setValue(text);
+      const range = this.editor.getModel().getFullModelRange();
+      return this.editor.document.applyEdits([{ range, text, forceMoveMarkers: true }], { editor: this.editor, origin });
     }
     undo() { this.editor.trigger("mew", "undo"); this.focus(); }
     redo() { this.editor.trigger("mew", "redo"); this.focus(); }
-    canUndo() { return Boolean(this.model?.canUndo()); }
-    canRedo() { return Boolean(this.model?.canRedo()); }
+    canUndo() { return Boolean(this.editor.getModel()?.canUndo()); }
+    canRedo() { return Boolean(this.editor.getModel()?.canRedo()); }
     async toggleFind({ replace = true, toggleIfVisible = true, readClipboard = false } = {}) {
       const visible = this.editor.getDomNode()?.querySelector(".find-widget")?.classList.contains("visible");
       if (visible && toggleIfVisible) return this.editor.trigger("mew", "closeFindWidget");
-      const selected = this.model?.getValueInRange(this.editor.getSelection());
+      const selected = this.editor.getModel()?.getValueInRange(this.editor.getSelection());
       const clipboard = !selected && readClipboard && !visible && navigator.clipboard?.readText?.().catch(() => null);
       if (!visible) this.focus();
       await this.editor.getAction(replace ? "editor.action.startFindReplaceAction" : "actions.find")?.run();

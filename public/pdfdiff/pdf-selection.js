@@ -49,7 +49,7 @@
       : activeEditor; } catch { return null; }
   }
   const sourcePages = () => window.ReaderUI?.getPdfSourcePages?.();
-  review.locator.options = options;
+  Object.assign(review.locator.options, options);
   Object.assign(review.locator.environment, {
     document, getPdf: () => viewer?.pdfDocument, getSourcePages: sourcePages,
     getTargets() {
@@ -86,7 +86,7 @@
       const model = editor?.getModel();
       if (!model || !viewer?.pdfDocument || key && !diffHighlight || !items?.length && !key) return;
       const data = review.locator.reviewLists.get(items);
-      const entries = data?.entries || items.map(item => item.pdfSource || review.locator.editorSourceIndex(model).entry(item.sourceStart, item.sourceEnd, true));
+      const entries = data?.entries || items.map(item => item.pdfSource || review.locator.editorSourceIndex(editor.document).entry(item.sourceStart, item.sourceEnd, true));
       const pointer = { editor, model, version: model.getVersionId?.(), pdf: viewer?.pdfDocument, entries, key };
       if (key) defaultPointer = pointer;
       else reviewPointer = pointer;
@@ -188,7 +188,7 @@
     if (!selectionHighlight && entries.length) return;
     ++selectionRevision;
     if (entries.length) lastInteraction = performance.now();
-    const decode = text => (plain ? String(text || "") : review.locator.sourceIndex(String(text || "")).raw).trim();
+    const decode = text => (plain ? String(text || "") : new window.MewEditorCore.DocumentModel({ text: String(text || "") }).parse(document).raw).trim();
     contexts = entries.map(input => {
       const entry = input && typeof input === 'object' ? input : { text: input }, text = entry.text, value = entry.marked ? text : decode(text);
       const start = entry.start + (plain && !entry.marked ? text.length - text.trimStart().length : 0);
@@ -254,7 +254,7 @@
         return range;
       }) : [];
       if (!marked && !ranges.some(range => model.getOffsetAt(range.getEndPosition()) > model.getOffsetAt(range.getStartPosition()))) { select([]); if (viewer) queueWarm(); return; }
-      review.locator.editorSourceIndex(model);
+      review.locator.editorSourceIndex(editor.document);
       if (viewer && review.locator.index.prepared?.pdf !== viewer.pdfDocument) queueWarm();
       const entries = ranges.map(range => {
         const start = model.getOffsetAt(range.getStartPosition()), end = model.getOffsetAt(range.getEndPosition());
@@ -306,6 +306,8 @@
     if (!instance?.getPageView || !instance.eventBus || viewer === instance) return;
     resetPdf();
     viewer = instance;
+    // Match PDF.js's language-neutral measurement canvas; inherited zh-CN changes serif fallback widths.
+    instance.viewer.lang = 'und';
     const manualScroll = () => {
       if (viewer !== instance) return;
       lastInteraction = performance.now();
@@ -495,7 +497,7 @@
     const model = editor?.getModel();
     if (!model || !editor.setSelection) return;
     activeEditor = editor;
-    const index = review.locator.editorSourceIndex(model), { hit, difference } = index.locateSource(chunks, viewer?.pdfDocument);
+    const index = review.locator.editorSourceIndex(editor.document), { hit, difference } = index.locateSource(chunks, viewer?.pdfDocument);
     select([]);
     for (const chunk of chunks) {
       const result = nativeBoxes(chunk.div, [], [{ range: { start: chunk.start, end: chunk.end }, difference }]);
@@ -504,7 +506,7 @@
     report("idle", { mode: "pdf-selection", differences: difference ? [difference] : [] });
     if (!hit) return; // An ambiguous match must not move the editor selection.
     publishSources();
-    const target = window.PdfSelectionDiff.rangeAt(model, hit.start, hit.end, index);
+    const target = editor.document.rangeAt(hit.start, hit.end, true);
     syncingPdf = true;
     try {
       editor.setSelection(target);
@@ -581,10 +583,10 @@
     const documentIndex = review.locator.getDocumentIndex(pdf, scope);
     const visible = review.locator.environment.getVisiblePages?.() || [], pageIndexes = visible.map(page => page.index);
     for (const source of new Set(entries.map(entry => entry.index).filter(Boolean)))
-      source?.prepare(pageIndexes, pdf);
+      source?.update(pageIndexes, pdf);
     entries = entries.flatMap(entry => {
       if (!visibleOnly && !entry.marked) return [entry];
-      const connections = entry.index?.pairs([...pageIndexes, documentIndex]);
+      const connections = entry.index?.livePairs.filter(connection => pageIndexes.includes(connection.target) || connection.target === documentIndex);
       if (!connections?.length || connections.some(range => range.start <= entry.start && range.end >= entry.end)) return [entry];
       const ranges = [...connections,
         ...(entry.index.prepared?.differences || entry.index.getDifferences()).items

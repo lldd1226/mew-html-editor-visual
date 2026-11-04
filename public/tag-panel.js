@@ -56,11 +56,16 @@
 
   class TagEditor {
     constructor(editor) {
-      this.editor = editor;
-      this.detect(editor.getValue());
+      this.editor = editor.editor || editor;
+      this.detect(this.editor.getValue());
     }
 
     detect(text) {
+      const index = this.editor.document?.index;
+      if (index?.source === text && index.tags) {
+        this.text = text; this.detected = index.tags;
+        return;
+      }
       if (this.text === text) return;
       const stack = [], pairs = [], byStart = new Map();
       let rawName;
@@ -166,17 +171,21 @@
     applyTag(item) {
       const editor = this.editor;
       const tag = item.open !== undefined ? item : null;
-      const text = editor.getValue(), selections = editor.selections?.() || [editor.selection()];
+      if (!editor.getModel()) return;
+      const text = editor.getValue(), selections = (editor.getSelections() || []).map(selection => ({
+        start: editor.getModel().getOffsetAt(selection.getStartPosition()), end: editor.getModel().getOffsetAt(selection.getEndPosition())
+      }));
       if (tag) this.detect(text);
       const source = tag ? "mew.tag" : "mew.attr";
       const operations = selections.map(({ start, end }) => tag ? this.buildTagEdit(start, end, tag) : {
         start, end, text: item.text, selectStart: item.cursorOffset ?? item.text.length,
         selectEnd: item.cursorOffset ?? item.text.length
       });
+      let changes, cursors;
       if (operations.length === 1) {
         const op = operations[0];
-        editor.replaceRange(op.text, op.start, op.end, op.start + op.selectStart, op.start + op.selectEnd, source);
-        if (tag) editor.editor?.revealRangeInCenterIfOutsideViewport(editor.editor.getSelection());
+        changes = [{ start: op.start, end: op.end, text: op.text }];
+        cursors = [{ start: op.start + op.selectStart, end: op.start + op.selectEnd }];
       } else {
         const edits = new Map(), targets = [];
         for (const operation of operations) {
@@ -196,13 +205,28 @@
             targets.push({ operation: edits.get(key) });
           }
         }
-        const changes = [...edits.values()].sort((a, b) => a.start - b.start || a.end - b.end);
+        changes = [...edits.values()].sort((a, b) => a.start - b.start || a.end - b.end);
         const offset = (position, own) => position + changes.reduce((shift, edit) =>
           shift + (edit !== own && edit.end <= position ? edit.text.length - (edit.end - edit.start) : 0), 0);
-        editor.replaceRanges(changes, targets.map(({ operation: op, start, end }) => op ? {
+        cursors = targets.map(({ operation: op, start, end }) => op ? {
           start: offset(op.start, op) + op.selectStart, end: offset(op.start, op) + op.selectEnd
-        } : { start: offset(start), end: offset(end) }), source);
+        } : { start: offset(start), end: offset(end) });
       }
+      const Selection = editor.getSelection().constructor;
+      const range = (start, end) => {
+        const a = editor.getModel().getPositionAt(start), b = editor.getModel().getPositionAt(end);
+        return new Selection(a.lineNumber, a.column, b.lineNumber, b.column);
+      };
+      const select = () => cursors.map(({ start, end }) => range(start, end));
+      if (editor.document?.applyEdits) editor.document.applyEdits(changes, { editor, origin: source, selections: select });
+      else {
+        if (editor.getRawOptions().readOnly) throw new Error('当前文件只读');
+        editor.pushUndoStop();
+        const applied = editor.executeEdits(source, changes.map(edit => ({ range: range(edit.start, edit.end), text: edit.text, forceMoveMarkers: true })), select);
+        editor.pushUndoStop();
+        if (applied === false) throw new Error('编辑器未能应用替换');
+      }
+      if (operations.length === 1 && tag) editor.revealRangeInCenterIfOutsideViewport(editor.getSelection());
       editor.focus();
       return operations[0];
     }

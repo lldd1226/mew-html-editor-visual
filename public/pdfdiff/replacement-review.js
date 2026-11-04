@@ -186,7 +186,7 @@
       return values.flatMap(value => {
         if (!value.edits?.length || !(value.range ? value.range.start <= end && value.range.end >= start
           : value.edits.some(edit => edit.start <= end && edit.end >= start))) return [];
-        try { return [{ ...value, edits: window.PdfSelectionDiff.validateEdits(source, value.edits) }]; }
+        try { return [{ ...value, edits: editor.document.validateEdits(value.edits) }]; }
         catch { return []; }
       });
     };
@@ -232,7 +232,7 @@
               && !editor.getOption(api.editor.EditorOption.readOnly)) paintRevision(editor, model, [this], value.edits);
           },
           edit: { edits: value.edits.map(edit => ({ resource: model.uri, versionId: model.getVersionId(),
-            textEdit: { range: window.PdfSelectionDiff.rangeAt(model, edit.start, edit.end), text: edit.text } })) }
+            textEdit: { range: editor.document.rangeAt(edit.start, edit.end), text: edit.text } })) }
         })), dispose() {} };
       }
     };
@@ -250,7 +250,7 @@
         return { suggestions: plans(model, new api.Range(position.lineNumber, position.column, position.lineNumber, position.column), source).flatMap(value => {
           const start = Math.min(value.range?.start ?? Infinity, ...value.edits.map(edit => edit.start)),
             end = Math.max(value.range?.end ?? 0, ...value.edits.map(edit => edit.end));
-          const replacementRange = window.PdfSelectionDiff.rangeAt(model, start, end);
+          const replacementRange = editor.document.rangeAt(start, end);
           const text = value.edits.reduceRight((text, edit) => source.slice(start, edit.start) + edit.text
             + text.slice(edit.end - start), source.slice(start, end));
           if (replacementRange.startLineNumber !== replacementRange.endLineNumber || /[\r\n]/.test(text)) return [];
@@ -284,17 +284,17 @@
       editor.getDomNode()?.classList.remove('mew-review-suggestions'); };
   }
   function paintRevision(editor, model, key, edits, decorations = []) {
-    const toolbox = window.PdfSelectionDiff;
+    const documentModel = editor.document, diff = window.PdfSelectionDiff;
     revisionMarks.updateSource(editor, key, () => [...edits.flatMap(edit => {
       if (edit.options) return [edit];
       let offset = edit.start;
-      return toolbox.textDiff(model.getValueInRange(toolbox.rangeAt(model, edit.start, edit.end)), edit.text, true).parts.flatMap(part => {
+      return diff.textDiff(model.getValueInRange(documentModel.rangeAt(edit.start, edit.end)), edit.text, true).parts.flatMap(part => {
         const start = offset;
         offset += part.html.length;
         return part.changed ? [{ start, end: offset, text: part.pdf }] : [];
       });
     }).map(edit => ({
-      range: toolbox.rangeAt(model, edit.start, edit.end),
+      range: documentModel.rangeAt(edit.start, edit.end),
       options: edit.options || { description: 'Revision preview', stickiness: 1, showIfCollapsed: true,
         inlineClassName: edit.end > edit.start ? 'mew-review-current' : undefined,
         after: edit.text ? { content: edit.text, inlineClassName: 'mew-review-proposed', cursorStops: 0 } : undefined }
@@ -308,8 +308,8 @@
     return peer?.host && peer.host !== window.ReplacementReview ? { ...peer, request } : null;
   }
   function valid() {
-    return session && !session.stale && session.context.editor.getModel() === session.context.model
-      && (session.context.version !== undefined ? session.context.model.getVersionId?.() === session.context.version : session.context.model.getValue() === session.context.source)
+    return session && !session.stale && session.context.editor.document === session.context.documentModel
+      && session.context.snapshot === session.context.documentModel.snapshot
       && (!session.provider.isCurrent || session.provider.isCurrent(session.context));
   }
   function validateCandidates(result, previous) {
@@ -433,8 +433,8 @@
   function refreshAfterEdit(saved, priority = false) {
     if (saved.refreshTask) return saved.refreshTask;
     if (session !== saved || !saved.manualPending || composing || saved.context.editor.getModel() !== saved.context.model || saved.provider.available?.(saved.context.editor) === false) return Promise.resolve();
-    const request = ++generation, source = saved.context.model.getValue(), version = saved.context.model.getVersionId?.();
-    const context = { ...saved.context, source, version, request: { side: saved.context.request?.side } };
+    const request = ++generation, snapshot = saved.context.documentModel.snapshot, { source, version } = snapshot;
+    const context = { ...saved.context, source, version, snapshot, request: { side: saved.context.request?.side } };
     let resolveReady;
     const task = saved.refreshTask = new Promise(resolve => { resolveReady = resolve; });
     const ready = () => {
@@ -518,8 +518,9 @@
       mount(target);
     }
     const request = ++generation, controller = lastRequest.controller = new AbortController();
-    const model = target.getModel(), source = model.getValue(), version = model.getVersionId?.();
-    const context = { ...requestData?.snapshot?.context, editor: target, model, source, version, signal: controller.signal, toolbox: window.PdfSelectionDiff, request: requestData };
+    const model = target.getModel(), snapshot = target.document.snapshot, { source, version } = snapshot;
+    const context = { ...requestData?.snapshot?.context, editor: target, model, source, version,
+      signal: controller.signal, documentModel: target.document, snapshot, request: requestData };
     subscribe(target, 'onDidChangeModel', () => close());
     subscribe(target, 'onDidDispose', () => close(false, false));
     subscribe(target, 'onDidChangeModelContent', event => {
@@ -660,9 +661,9 @@
       if (!view) view = api.editor.createDiffEditor(get('preview'), { automaticLayout: true, readOnly: true, originalEditable: false,
         renderSideBySide: false, minimap: { enabled: false }, scrollBeyondLastLine: false, diffAlgorithm: 'advanced' });
       clearPreview();
-      previewModels = [api.editor.createModel(before, language), api.editor.createModel(after, language)];
-      if (!session.provider.preview) previewModels[1].applyEdits(window.PdfSelectionDiff.validateEdits(source, selectedEdits(get('file').checked))
-        .map(edit => ({ range: window.PdfSelectionDiff.rangeAt(model, edit.start, edit.end), text: edit.text })));
+      const modified = saved.provider.preview ? after
+        : new window.MewEditorCore.DocumentModel({ text: after }).applyEdits(selectedEdits(get('file').checked)).source;
+      previewModels = [api.editor.createModel(before, language), api.editor.createModel(modified, language)];
       view.setModel({ original: previewModels[0], modified: previewModels[1] });
     } catch (error) { if (session === saved && request === generation) { clearPreview(); message(error.message); } }
   }
@@ -684,13 +685,13 @@
         render(true);
         if (panel.dataset.side === 'pdf') await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
         if (session !== saved) return;
-        result.apply?.();
+        await result.apply?.();
         await refreshAfterEdit(saved, result.priority);
         return true;
       }
+      const snapshot = saved.context.documentModel.snapshot;
       Object.assign(saved, { ...validateCandidates(result, saved.choices),
-        position: result.position, context: { ...saved.context,
-          source: model.getValue(), version: model.getVersionId?.(), ...result.context } });
+        position: result.position, context: { ...saved.context, ...snapshot, snapshot, ...result.context } });
       if (saved.context.request) saved.context.request = { ...saved.context.request, snapshot: null };
       if (!valid()) { stale(); return; }
       render();
