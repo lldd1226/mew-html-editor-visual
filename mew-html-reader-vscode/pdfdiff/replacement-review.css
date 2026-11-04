@@ -50,7 +50,8 @@ body>header #replacementFeatures .review-feature>button:hover{background:var(--l
 .replacement-review.compact [data-title],.replacement-review.compact [data-options]{display:none}
 .replacement-review.compact .review-heading{gap:6px;justify-content:flex-end}
 .replacement-review.compact [data-position]{margin-right:auto}
-.replacement-review.compact [data-comparison]{font:12px/1.45 sans-serif}
+.replacement-review [data-comparison]{font-weight:bold}
+.replacement-review.compact [data-comparison]{font:bold 12px/1.45 sans-serif}
 .replacement-review.compact .review-controls{margin:5px 0 0;gap:5px}
 .replacement-review.compact button{padding:2px 6px}
 .mew-review-suggestions .action-widget{font-size:12px;padding:2px;max-width:min(320px,60vw)}

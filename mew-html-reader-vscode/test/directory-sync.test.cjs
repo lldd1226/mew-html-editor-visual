@@ -19,7 +19,7 @@ test('directory additions and deletions rematch the actual PDF label without mov
   const volume = { directoryUri: 'pages', pattern: '^(?<page>\\d+)\\.html$', explicitPages: [], pages: [1], files: new Map([[1, '1.html']]) };
   reader.current = { page: 1, volume };
   reader.panel = {};
-  reader.pdfPageLabel = '7a';
+  reader.pdfPageLabel = '7';
   const opened = [];
   reader.openHtmlPage = async (current, page, preserveFocus) => {
     assert.equal(preserveFocus, true, "automatic rematching keeps focus");
@@ -33,7 +33,7 @@ test('directory additions and deletions rematch the actual PDF label without mov
   entries = [['1.html', 1], ['9.html', 1]];
   await reader.refreshVolume();
   assert.deepEqual(opened, [7, 1]);
-  assert.equal(reader.pdfPageLabel, '7a');
+  assert.equal(reader.pdfPageLabel, '7');
   entries = [];
   await reader.refreshVolume();
   assert.deepEqual(opened, [7, 1]);

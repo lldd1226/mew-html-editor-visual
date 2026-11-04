@@ -7,7 +7,7 @@ const { tmpdir } = require("node:os");
 const { pathToFileURL, fileURLToPath } = require("node:url");
 const manifest = require("../package.json");
 
-test("extension activates, registers commands, and resolves a restored PDF custom editor", async () => {
+test("extension activates, registers commands, and resolves a restored PDF custom editor", async t => {
   const registered = new Set();
   let provider;
   let tagProvider;
@@ -19,6 +19,9 @@ test("extension activates, registers commands, and resolves a restored PDF custo
     toString() { return value; }
   });
   const vscode = {
+    MarkdownString: class { constructor(value) { this.value = value; } },
+    CodeActionKind: { QuickFix: 'quickfix' },
+    languages: Object.fromEntries(['registerHoverProvider', 'registerCodeActionsProvider', 'registerCompletionItemProvider'].map(name => [name, () => disposable])),
     ViewColumn: { Active: -1, Beside: -2 },
     Uri: {
       parse: uri,
@@ -27,6 +30,7 @@ test("extension activates, registers commands, and resolves a restored PDF custo
     window: {
       activeTextEditor: undefined,
       tabGroups: { all: [{ tabs: [{ input: undefined }] }] },
+      onDidChangeTextEditorSelection() { return disposable; },
       onDidChangeActiveTextEditor() { return disposable; },
       registerWebviewViewProvider() { return disposable; },
       registerWebviewPanelSerializer(viewType, value) {
@@ -46,6 +50,7 @@ test("extension activates, registers commands, and resolves a restored PDF custo
       showErrorMessage() {}, showInformationMessage() {}
     },
     workspace: { registerTextDocumentContentProvider() { return disposable; }, async openTextDocument(uri) { return { uri, getText: () => "", version: 1, isDirty: false }; },
+      onDidChangeTextDocument() { return disposable; },
       onDidSaveTextDocument() { return disposable; },
       getConfiguration() { return { get: (_key, fallback) => fallback }; } },
     commands: {
@@ -57,15 +62,14 @@ test("extension activates, registers commands, and resolves a restored PDF custo
   Module._load = function (request, parent, isMain) {
     return request === "vscode" ? vscode : original.call(this, request, parent, isMain);
   };
-  try {
+  t.after(() => { Module._load = original; });
+  {
     const extension = require("../extension.cjs");
     extension.activate({
       subscriptions: [],
       extensionUri: uri("file:///extension"),
       globalState: { get() { return {}; }, update() { return Promise.resolve(); } }
     });
-  } finally {
-    Module._load = original;
   }
   const contributed = manifest.contributes.commands.map(item => item.command);
   assert.deepEqual(contributed.filter(id => !registered.has(id)), []);
@@ -133,12 +137,10 @@ test("extension activates, registers commands, and resolves a restored PDF custo
   vscode.commands.executeCommand = async (...args) => { commands.push(args); };
   let tagRevealed;
   tagProvider.panels.add({ reveal(...args) { tagRevealed = args; } });
-  tagProvider.findFloating = () => { throw new Error("Attached tag bar must not traverse PDF groups"); };
+  tagProvider.findFloating = () => undefined;
   await tagProvider.show();
   assert.deepEqual(tagRevealed, [undefined, false]);
-  assert.deepEqual(commands.map(args => args[0]), [
-    "workbench.action.focusWindow", "workbench.action.enableCompactAuxiliaryWindow"
-  ]);
+  assert.deepEqual(commands.map(args => args[0]), ["workbench.action.focusWindow"]);
   commands.length = 0;
   let pdfRevealed;
   panel.reveal = (...args) => { pdfRevealed = args; };

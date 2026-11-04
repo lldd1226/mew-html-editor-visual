@@ -57,7 +57,7 @@ test('host recovery replaces only orphaned PDF tabs and keeps their editor group
         events.push('open');
       } }
     };
-    const sandbox = { require: () => vscode, module: { exports: {} },
+    const sandbox = { require: name => name === "./tag-panel.js" ? require("../tag-panel.js") : vscode, module: { exports: {} },
       setTimeout(callback) { recover = callback; return 1; }, clearTimeout() {} };
     vm.runInNewContext(source, sandbox);
     const reader = { report(error) { throw error; } };

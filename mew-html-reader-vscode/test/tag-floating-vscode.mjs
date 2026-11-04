@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const fixture = await mkdtemp(path.join(tmpdir(), 'mew-floating-'));
 const dev = path.join(fixture, 'extension');
 await mkdir(dev);
-for (const file of ['package.json', 'reader-core.cjs']) await copyFile(path.join(root, file), path.join(dev, file));
+for (const file of ['package.json', 'reader-core.cjs', 'tag-panel.js', 'editor-core.js']) await copyFile(path.join(root, file), path.join(dev, file));
 const resultPath = path.join(fixture, 'result.json');
 let source = await readFile(path.join(root, 'extension.cjs'), 'utf8');
 source = source.replace('function activate(context) {', `function activate(context) {
@@ -76,7 +76,10 @@ try {
       assert.equal(await native.evaluate(win => win.isMinimized()), true, 'pinned bar stays minimized until requested');
     }
     await mainNative.evaluate(win => win.focus());
-    await mainWindow.getByRole('button', { name: 'MEW Reader: Show Tag Bar', exact: true }).click();
+    await mainWindow.keyboard.press('F1');
+    await mainWindow.locator('.quick-input-widget input').fill('>MEW Reader: Show Tag Bar');
+    await mainWindow.locator('.quick-input-list').getByText('MEW Reader: Show Tag Bar', { exact: true }).waitFor();
+    await mainWindow.keyboard.press('Enter');
     let focused = false;
     for (let i = 0; i < 50; i++) {
       focused = await native.evaluate(win => win.isFocused() && !win.isMinimized());

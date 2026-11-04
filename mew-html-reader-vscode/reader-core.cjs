@@ -50,27 +50,32 @@ function formatPattern(pattern, page, volume) {
     .replace(/\{page(?::(\d+))?\}/g, (_, width) => String(page).padStart(Number(width || 0), "0"));
 }
 
+function normalizePage(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const text = String(value).trim(), number = Number(text);
+  return Number.isSafeInteger(number) ? number : text;
+}
+
 function pageFromName(name, pattern) {
   const match = new RegExp(pattern, "i").exec(name);
-  const value = match?.groups?.page ?? match?.[1];
-  const page = Number(value);
-  return Number.isFinite(page) ? page : null;
+  return normalizePage(match?.groups?.page ?? match?.[1]);
 }
 
 function pageFromPdfLabel(label) {
-  const value = String(label ?? "").match(/^(\d+)/)?.[1];
-  return value ? Number(value) : null;
+  return normalizePage(label);
 }
 
 function adjacentPage(pages, current, direction) {
-  const sorted = [...new Set(pages.map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
-  const index = sorted.indexOf(Number(current));
+  const sorted = [...new Set(pages.map(normalizePage).filter(page => page != null))].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : typeof a === "number" ? 1 : typeof b === "number" ? -1 : 0);
+  const index = sorted.indexOf(normalizePage(current));
   if (index < 0) return null;
   return sorted[index + Math.sign(direction)] ?? null;
 }
 
 function pageAtOrBefore(pages, requested) {
-  return pages.map(Number).filter(page => Number.isFinite(page) && page <= Number(requested)).sort((a, b) => b - a)[0] ?? null;
+  const target = normalizePage(requested);
+  if (typeof target !== "number") return pages.includes(target) ? target : null;
+  return pages.filter(page => typeof page === "number" && page <= target).sort((a, b) => b - a)[0] ?? null;
 }
 
 function normalizedVolumes(config) {
@@ -91,7 +96,7 @@ function normalizedVolumes(config) {
       directory: String(directory), pattern: String(pattern), pdf: String(pdf),
       pageLabel: String(volume.pageLabel ?? config.pageLabel ?? "{page}"),
       toc: Array.isArray(volume.toc) ? volume.toc : [],
-      explicitPages: [...new Set(explicitPages.map(Number).filter(Number.isFinite))].sort((a, b) => a - b)
+      explicitPages: [...new Set(explicitPages.map(normalizePage).filter(page => page != null))].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : typeof a === "number" ? 1 : typeof b === "number" ? -1 : 0)
     }];
   });
 }

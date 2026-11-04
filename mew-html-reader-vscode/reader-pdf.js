@@ -365,8 +365,11 @@ async function initializeReview() {
     getPdfViewer: () => viewer,
     getSourceEditor: () => sourceSnapshot?.uri ? editor : null,
     getPdfSourcePages: () => (labels || []).flatMap((label, i) => {
-      const page = Number(String(label).match(/^(\d+)/)?.[1]);
-      return page >= sourceSnapshot?.pageStart && page < sourceSnapshot?.pageEnd ? [i + 1] : [];
+      const text = String(label).trim(), number = Number(text);
+      const page = Number.isSafeInteger(number) ? number : text;
+      return (typeof page === "number" && typeof sourceSnapshot?.pageStart === "number"
+        ? page >= sourceSnapshot?.pageStart && (typeof sourceSnapshot?.pageEnd !== "number" || page < sourceSnapshot?.pageEnd)
+        : page === sourceSnapshot?.pageStart) ? [i + 1] : [];
     }),
     notify: showStatus
   };

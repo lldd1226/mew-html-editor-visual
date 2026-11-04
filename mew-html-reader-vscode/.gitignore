@@ -1,4 +1,4 @@
 node_modules/
 *.vsix
-test/artifacts/
+test/
 vendor/

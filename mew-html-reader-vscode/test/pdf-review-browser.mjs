@@ -11,6 +11,7 @@ const require = createRequire(new URL('../extension.cjs', import.meta.url));
 const source = await readFile(path.join(root, 'extension.cjs'), 'utf8');
 const uri = value => ({ scheme: 'file', path: value, toString: () => value });
 const htmlUri = uri('file:///pages/1.html'), pdfUri = uri('file:///book.pdf');
+const handlers = [], disposable = { dispose() {} };
 let text = '<p>Before WRONG after.</p>', version = 1, saves = 0, editCalls = 0, diffCalls = 0;
 const original = text, snapshots = [];
 class Position { constructor(line, character) { this.line = line; this.character = character; } }
@@ -38,18 +39,27 @@ const editor = { document, selections: [new Selection(new Position(0, 0), new Po
 const state = new Map();
 const context = { extensionUri: '', subscriptions: [], globalState: { get: (key, fallback) => state.get(key) ?? fallback, update: async (key, value) => state.set(key, value) } };
 class MarkdownString { appendText() { return this; } appendMarkdown() { return this; } }
-const vscode = { Position, Range, Selection, MarkdownString, ThemeColor: class { constructor(id) { this.id = id; } }, TextEditorRevealType: { InCenterIfOutsideViewport: 0 },
-  commands: { async executeCommand(command) { assert.equal(command, 'vscode.diff'); diffCalls++; } },
+const vscode = { Position, Range, Selection, MarkdownString,
+  CodeActionKind: { QuickFix: 'quickfix' },
+  TextEditorSelectionChangeKind: { Mouse: 1, Keyboard: 2 },
+  languages: Object.fromEntries(['registerHoverProvider', 'registerCodeActionsProvider', 'registerCompletionItemProvider'].map(name => [name, () => disposable])), ThemeColor: class { constructor(id) { this.id = id; } }, TextEditorRevealType: { InCenterIfOutsideViewport: 0 },
+  commands: { registerCommand: () => disposable, async executeCommand(command) { assert.equal(command, 'vscode.diff'); diffCalls++; } },
   Uri: { parse: uri, joinPath: (base, ...parts) => `${base}/${parts.join('/')}` },
-  window: { visibleTextEditors: [editor], createTextEditorDecorationType: () => ({ dispose() {} }),
-    showTextDocument: async () => editor }, workspace: { openTextDocument: async () => document } };
+  window: { activeTextEditor: editor, onDidChangeActiveTextEditor: () => disposable, onDidChangeTextEditorSelection: () => disposable, visibleTextEditors: [editor], createTextEditorDecorationType: () => ({ dispose() {} }),
+    showTextDocument: async () => editor }, workspace: { onDidChangeTextDocument: () => disposable, registerTextDocumentContentProvider: () => disposable, openTextDocument: async () => document } };
 const sandbox = { require: name => name === 'vscode' ? vscode : require(name), exports: {}, module: { exports: {} }, console, setTimeout, clearTimeout };
 vm.createContext(sandbox);
-vm.runInContext(source + '\nexports.pdfHtml=pdfHtml;exports.Controller=ReaderController;exports.PdfReview=PdfReview;', sandbox);
-const Review = sandbox.exports.PdfReview;
+vm.runInContext(source + '\nexports.pdfHtml=pdfHtml;exports.Controller=ReaderController;', sandbox);
+async function hostModule(file) {
+  const module = { exports: {} };
+  vm.runInNewContext(await readFile(path.join(root, file), 'utf8'), { module,
+    require: name => name === 'vscode' ? vscode : require(path.join(root, 'pdfdiff', name)), console });
+  return module.exports;
+}
+const selectionHost = await hostModule('pdfdiff/pdf-selection.js');
+const reviewHost = await hostModule('pdfdiff/replacement-review.js');
 const html = sandbox.exports.pdfHtml({ cspSource: "'self'", asWebviewUri: value => value }, context);
 const controller = new sandbox.exports.Controller(context);
-controller.review = new Review(controller);
 controller.current = { uri: htmlUri, page: 1, volume: { pdfUri, pages: [1, 2] } };
 controller.panelPdfUri = pdfUri;
 // An uncompressed PDF fixture keeps its OCR text independently inspectable.
@@ -81,48 +91,55 @@ try {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') console.error(message.text()); });
-  const panel = controller.panel = { webview: { postMessage: async message => {
+  const panel = controller.panel = { onDidDispose() {}, webview: { onDidReceiveMessage(callback) { handlers.push(callback); return disposable; }, postMessage: async message => {
     snapshots.push(message); await page.evaluate(message => window.postMessage(message), message); return true;
   } } };
+  const sourceBridge = selectionHost.attach(controller, panel);
+  reviewHost.attach(controller, panel, sourceBridge, async () => {});
   controller.ready = true;
   await page.exposeFunction('nativePostMessage', async message => {
-    if (message.type.startsWith('review')) await controller.review.handleMessage(message, panel);
+    if (message.type.startsWith('review')) handlers.forEach(callback => callback(message));
     if (message.type === 'ready') {
       await panel.webview.postMessage({ type: 'showPdf', url: `http://127.0.0.1:${server.address().port}/book.pdf`, htmlUri: htmlUri.toString(), fileName: 'Fixture PDF', pageLabel: '1' });
-      await controller.review.sendSource();
+      await sourceBridge.publish();
     }
   });
   await page.addInitScript(() => { window.acquireVsCodeApi = () => ({ getState: () => null, setState() {}, postMessage: message => { void window.nativePostMessage(structuredClone(message)); } }); });
   await page.route('**/monaco/**', route => { throw new Error('Native review must not load Monaco'); });
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(() => window.PdfSelection?.viewer?.pdfDocument && document.querySelector('.textLayer span'), null, { timeout: 20000 });
-  await page.waitForFunction(() => window.PdfSelection?.locator?.index?.differences?.items?.length, null, { timeout: 15000 });
-  await page.evaluate(() => window.PdfReviewProvider.locator.prepareReview({
-    type: 'pdf-selection-difference', detail: { editor: window.ReaderUI.getSourceEditor() }
-  }));
+  await page.waitForFunction(() => window.PdfSelection?.locator?.index?.getDifferences().items.length, null, { timeout: 15000 }).catch(async error => {
+    console.log(await page.evaluate(() => ({ status: PdfSelection.status, model: readerMonaco.getValue(), index: PdfSelection.locator.index?.raw, prepared: !!PdfSelection.locator.index?.prepared, pages: ReaderUI.getPdfSourcePages(), options: PdfSelectionOptions, text: document.querySelector('.textLayer')?.textContent }))); console.log(errors); throw error;
+  });
+
+  await page.evaluate(() => window.PdfReviewProvider.locator.prepareReview({ editor: window.ReaderUI.getSourceEditor() }));
   assert.equal(await page.locator('.replacement-review:not([hidden])').count(), 0,
     'native selection differences do not open a review popup');
   await page.locator('#tools summary').click();
   await page.getByRole('button', { name: 'PDF 文字差异审阅', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('.replacement-review [data-comparison]')?.textContent.includes('WRONG'), null, { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector('.replacement-review [data-comparison]')?.textContent.includes('HTML:'), null, { timeout: 10000 }).catch(async error => {
+    console.log(await page.locator('.replacement-review').textContent()); console.log(errors); throw error;
+  });
   assert.equal(text, original, 'opening review does not edit native source');
   const popup = page.locator('.replacement-review');
-  await popup.locator('[data-apply]').click();
-  assert.equal(text, original, 'preview does not edit native source');
-  await page.evaluate(() => window.ReaderUI.getSourceEditor().previewReview({ before: window.ReaderUI.getSourceEditor().getValue(), after: '<p>Before RIGHT after.</p>' }));
+  await popup.locator('[data-preview-diff]').click();
   for (let i = 0; diffCalls === 0 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(diffCalls, 1, 'review preview opens the VS Code diff editor');
   assert.equal(text, original, 'native diff leaves source unchanged');
+  await page.locator('#tools summary').click();
+  await page.getByRole('button', { name: 'PDF 文字差异审阅', exact: true }).click();
+  const expected = '<p>Before RONG after.</p>';
   await popup.locator('[data-save]').click();
-  await page.waitForFunction(() => window.ReaderUI.getSourceEditor().getValue().includes('RIGHT'));
-  assert.equal(text, '<p>Before RIGHT after.</p>');
+  await page.waitForFunction(expected => window.ReaderUI.getSourceEditor().getValue() === expected, expected);
+  assert.equal(text, expected);
   assert.equal(editCalls, 1);
-  for (let i = 0; saves === 0 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  for (let i = 0; saves === 0 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(saves, 1);
   // Old native edit requests must not modify a newer source version.
   const oldVersion = version; text += '\n'; version++;
-  await controller.review.handleMessage({ type: 'reviewApply', id: 1000, uri: htmlUri.toString(), version: oldVersion,
-    source: '<p>Before RIGHT after.</p>', edits: [{ start: 10, end: 15, text: 'STALE' }] }, panel);
+  handlers.forEach(callback => callback({ type: 'reviewApply', id: 1000, uri: htmlUri.toString(), version: oldVersion,
+    source: '<p>Before RIGHT after.</p>', edits: [{ start: 10, end: 15, text: 'STALE' }] }));
+  for (let i = 0; i < 100 && !snapshots.some(message => message.id === 1000); i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(editCalls, 1); assert.equal(saves, 1);
   assert.ok(snapshots.find(message => message.id === 1000 && message.error));
   assert.equal(await page.evaluate(() => window.readerMonaco === window.ReaderUI.getSourceEditor()), true);

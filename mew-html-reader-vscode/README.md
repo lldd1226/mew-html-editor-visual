@@ -25,7 +25,7 @@
 
 ## PDF 差异审阅
 
-PDF 文本映射、差异计算和字体检测复用当前 `pdf-selection-diff.js` 与 `pdf-review-provider.js`。扩展内的 `replacement-review.js`、`pdf-selection.js` 是 VS Code 专用实现，分别负责审阅操作与选区、高亮同步；两者同时提供扩展宿主入口和 PDF Webview 入口，复用同一份探测候选。
+`editor-core.js` 通过 `DocumentModel` 实例管理编辑器 model、文档快照、HTML 派生索引和编辑提交；`editor.document` 直接持有当前实例；原生 `TextDocument` 保持正文与版本的所有权。PDF 差异计算、映射控制和审阅适配分别复用 `pdf-selection-diff.js`、`pdf-connection.js` 与 `pdf-review-provider.js`。`PdfConnections` 构造时直接初始化源码索引；每个 PDF／页范围的读取任务、正文、页面和字体准备也由对应索引实例持有，缓存表直接保存该实例。扩展内的 `replacement-review.js`、`pdf-selection.js` 是 VS Code 专用实现，分别负责审阅操作与选区、高亮同步；两者同时提供扩展宿主入口和 PDF Webview 入口，复用同一份探测候选。
 
 `editor-core.js` 的 `VSCodeController` 负责在 Webview 中接收源码快照、发送原生操作请求。`replacement-review.js` 直接注册 VS Code 悬浮提示、代码操作、补全和原生 diff 预览，执行带文件、版本校验的编辑和保存；`pdf-selection.js` 直接订阅文档及选区变化并设置原生高亮。`extension.cjs` 只加载模块，不保留 `PdfReview` 类。设置保存在扩展 `globalState`。通用探测文件与网页端同步，保留这两个模块的 VS Code 专用入口。
 
@@ -39,9 +39,13 @@ HTML 编辑器右键菜单提供“PDF 与源码选区联动”和“差异设�
 
 ## 开发与安装
 
+`public/tag-panel.js` 是标签模块的维护入口；在扩展目录中运行以下命令。
+
 ```powershell
 npm install
+npm run sync
 npm run check
+npm run test:browser
 npm run package
 ```
 
@@ -49,7 +53,7 @@ npm run package
 
 右上角“复制本页图片”复制当前页像素面积最大的内嵌图片，按图片自身尺寸解码为 PNG 写入剪贴板，不截取页面、不应用阅读配色或缩放。无内嵌图片时提示。图片读取和编码仅在点击时执行。
 
-扩展宿主重启恢复：若 VS Code 保留了未重新绑定的 PDF 页签，插件会在原编辑器组内自动重建它，并保留独立窗口。页码、缩放和翻页方向等恢复状态保存在当前工作区的 `workspaceState`（`mewReader.pdfSession`）；扫描显示设置仍保存在全局 `globalState`。网页模板、恢复辅助逻辑、标签定义、标签编辑与同步控制都在 `extension.cjs`，配置与排序辅助逻辑在 `reader-core.cjs`。
+扩展宿主重启恢复：若 VS Code 保留了未重新绑定的 PDF 页签，插件会在原编辑器组内自动重建它，并保留独立窗口。页码、缩放和翻页方向等恢复状态保存在当前工作区的 `workspaceState`（`mewReader.pdfSession`）；扫描显示设置仍保存在全局 `globalState`。PDF 模板、恢复与同步控制在 `extension.cjs`，配置与排序辅助逻辑在 `reader-core.cjs`。标签定义、编辑引擎、面板与浮窗控制统一在 `public/tag-panel.js`：网页和 Webview 使用浏览器入口，扩展宿主使用 CommonJS 入口。扩展内的 `tag-panel.js` 是同源打包副本；修改共享源后运行 `npm run sync`，打包也会自动同步，`npm run check` 会检查副本是否过期。
 
 
 ### 0.1.5 窗口与焦点修复

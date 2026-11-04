@@ -461,8 +461,11 @@
     ]
   },
   "scripts": {
-    "check": "node --check extension.cjs && node --check editor-core.js && node --check reader-core.cjs && node --check reader-pdf.js && node --check pdf-source.mjs && node --check pdf-worker.mjs && node --check generate-mew-brief-config.mjs && node --test test/*.test.cjs",
-    "package": "vsce package"
+    "check": "node sync-shared.cjs --check && node --check extension.cjs && node --check tag-panel.js && node --check pdfdiff/pdf-selection.js && node --check pdfdiff/replacement-review.js && node --check editor-core.js && node --check reader-core.cjs && node --check reader-pdf.js && node --check pdf-source.mjs && node --check pdf-worker.mjs && node --check generate-mew-brief-config.mjs && node --test test/*.test.cjs",
+    "package": "vsce package",
+    "sync": "node sync-shared.cjs",
+    "vscode:prepublish": "npm run sync",
+    "test:browser": "node test/tag-panel-browser.mjs && node test/pdf-review-browser.mjs"
   },
   "dependencies": {
     "pdfjs-dist": "6.2.108"

@@ -3,3 +3,5 @@ generate-mew-brief-config.mjs
 package-ready/**
 *.vsix
 node_modules/**
+sync-shared.cjs
+taginsertervscode.ps1

@@ -11,7 +11,7 @@ const start = popupSource.indexOf("  document.addEventListener('pointerdown', ev
 const end = popupSource.indexOf('  new ResizeObserver', start);
 assert.ok(start >= 0 && end > start);
 const handler = popupSource.slice(start, end);
-const prepare = providerSource.slice(providerSource.indexOf('  prepareReview(context = {}) {'), providerSource.indexOf('  reviewItems(context = this.reviewRequest || {}) {'));
+const events = providerSource.slice(providerSource.indexOf('function onReviewClosed(event) {'), providerSource.indexOf('function presentation(context, item) {'));
 const increment = selectionSource.match(/listen\(viewer.container, 'pointerdown', .*?;\n/)[0];
 const browser = await launchBrowser();
 try {
@@ -19,34 +19,36 @@ try {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.setContent('<div id="viewer"><div id="passage">PDF passage</div></div><section id="panel"><button>Popup action</button></section>');
-  await page.evaluate(({ handler, prepare, increment }) => {
-    const panel = document.getElementById('panel'), viewer = { container: document.getElementById('viewer') };
+  await page.evaluate(({ handler, events, increment }) => {
+    const pdf = {}, panel = document.getElementById('panel'), viewer = { container: document.getElementById('viewer'), pdfDocument: pdf };
     let returningToWindow = false, interactionId = 0, opens = 0;
     const model = { getVersionId: () => 1 }, editor = { getModel: () => model, getSelection: () => ({ toString: () => 'same passage' }) };
     const selection = () => ({ interactionId });
     const host = { isOpenFor: () => !panel.hidden, openForSelection: () => { opens++; panel.hidden = false; } };
     const listeningWindow = { ReplacementReview: host }, nativeEditor = false;
-    const locator = new (eval('(class {' + prepare + '})'))();
-    locator.textEnabled = true;
-    locator.reviewItems = function () {
-      this.reviewRequest.notice = { source: {} };
-      return { items: [], selection: { id: 'same-difference' } };
-    };
+    let dismissed = null;
+    const item = { id: 'same-difference' };
+    const locator = { textEnabled: true, reviewItems: () => ({ items: [item], selection: item }) };
+    const activeFontStyles = () => ['italic', 'bold'], pdfViewer = viewer;
+    const handlers = eval('(() => { const viewer = () => pdfViewer; ' + events + '; return { onReviewClosed, onDifference }; })()');
     function close() {
       panel.hidden = true;
-      locator.prepareReview({ type: 'replacement-review-closed', detail: { id: 'pdf-ocr', editor, model } });
+      handlers.onReviewClosed({ type: 'replacement-review-closed', detail: { id: 'pdf-ocr', editor, model } });
     }
     eval(handler);
     const listen = (target, type, listener, options) => target.addEventListener(type, listener, options);
     eval(increment);
     // The real selection path publishes a clicked notice after pointerup.
-    viewer.container.addEventListener('pointerup', () => locator.prepareReview({ type: 'pdf-selection-difference', detail: { editor, side: 'pdf', interactionId } }));
+    viewer.container.addEventListener('pointerup', () => handlers.onDifference({ type: 'pdf-selection-difference', detail: {
+      editor, pdf, side: 'pdf', interactionId, candidateId: item.id, kind: 'text',
+      notices: [{ html: 'WRONG', pdf: 'RIGHT', source: { index: { source: 'WRONG', version: 1 }, start: 0, end: 5 } }]
+    } }));
     window.fixture = {
       state: () => ({ hidden: panel.hidden, opens, interactionId }),
       returning: () => { returningToWindow = true; },
-      reopen: () => { panel.hidden = false; locator.dismissed = null; }
+      reopen: () => { panel.hidden = false; dismissed = null; }
     };
-  }, { handler, prepare, increment });
+  }, { handler, events, increment });
   await page.locator('#panel button').click();
   assert.equal((await page.evaluate(() => fixture.state())).hidden, false, 'popup controls stay open');
   await page.evaluate(() => fixture.returning());

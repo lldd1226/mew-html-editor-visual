@@ -5,8 +5,8 @@ const { formatPattern, pageFromName, pageFromPdfLabel, adjacentPage, pageAtOrBef
 test("patterns and labels follow reader.html semantics", () => {
   assert.equal(formatPattern("ME{volume:02}-{page:03}.html", 7, 4), "ME04-007.html");
   assert.equal(pageFromName("ME04-007.html", "^ME04-(?<page>\\d+)\\.html$"), 7);
-  assert.equal(pageFromPdfLabel("17a"), 17);
-  assert.equal(pageFromPdfLabel("iv"), null);
+  assert.equal(pageFromPdfLabel("17a"), "17a");
+  assert.equal(pageFromPdfLabel("iv"), "iv");
 });
 
 test("adjacent navigation uses actual configured pages and does not wrap", () => {
@@ -88,4 +88,50 @@ test("native source snapshots preserve CRLF offsets and send decorations without
   assert.equal(sent.at(-1).data.decorations[0].className, "mew-ocr-diff-text");
   collection.clear();
   assert.equal(sent.at(-1).data.decorations.length, 0);
+});
+
+test("native document commits retain host ownership and reject a stale model before IPC", async () => {
+  const fs = require("node:fs"), vm = require("node:vm"), window = {}, sent = [];
+  const document = { body: { ownerDocument: { defaultView: {} } } };
+  vm.runInNewContext(fs.readFileSync(require.resolve("../editor-core.js"), "utf8"), { window, document });
+  const editor = new window.MewEditorCore.VSCodeController(() => {}, async (type, data) => {
+    sent.push(structuredClone({ type, data })); return true;
+  });
+  editor.receive({ uri: 'file:///first.html', version: 3, text: 'Alpha word.', readOnly: false });
+  const owner = editor.document, snapshot = owner.snapshot;
+  assert.equal(await owner.applyEdits([{ start: 6, end: 10, text: 'WORD', expected: 'word' }], { editor }), true);
+  assert.equal(sent[0].type, 'reviewApply');
+  assert.equal(sent[0].data.source, 'Alpha word.');
+  assert.deepEqual(sent[0].data.edits, [{ start: 6, end: 10, text: 'WORD' }]);
+  assert.equal(editor.getModel().getValue(), snapshot.source, 'only the native document host publishes committed text');
+  editor.receive({ uri: 'file:///second.html', version: 3, text: snapshot.source, readOnly: false });
+  assert.throws(() => owner.applyEdits([{ start: 6, end: 10, text: 'WORD' }], { editor }), /编辑器内容已变化/);
+  assert.equal(sent.length, 1);
+});
+
+ test("string page labels match exactly and retain configured navigation order", () => {
+  const [volume] = normalizedVolumes({pdf:"a.pdf",pagePattern:"^(.+)[.]html$",pages:["i","ii","iv","A","001",3]});
+  assert.deepEqual(volume.explicitPages, ["i","ii","iv","A",1,3]);
+  assert.equal(pageFromName("iv.html", "^(.+)[.]html$"), "iv");
+  assert.equal(pageFromName("001.html", "^(.+)[.]html$"), 1);
+  assert.equal(pageAtOrBefore(volume.explicitPages, "iv"), "iv");
+  assert.equal(pageAtOrBefore(volume.explicitPages, "iii"), null);
+  assert.equal(pageAtOrBefore(volume.explicitPages, "002"), 1);
+  assert.equal(adjacentPage(volume.explicitPages, "iv", 1), "A");
+  assert.equal(pageFromPdfLabel(""), null);
+ });
+
+test("native preview validates versioned edits before applying them to detached text", async () => {
+  const fs = require('node:fs'), vm = require('node:vm'), window = {}, sent = [];
+  vm.runInNewContext(fs.readFileSync(require.resolve('../editor-core.js'), 'utf8'), { window });
+  const editor = new window.MewEditorCore.VSCodeController(() => {}, async (type, data) => { sent.push({ type, data }); return true; });
+  editor.receive({ uri: 'file:///first.html', version: 3, text: 'word' });
+  const edits = editor.document.validateEdits([{ start: 0, end: 4, text: 'WORD', expected: 'word' }]);
+  await editor.previewReview({ before: 'word', after: 'word', edits });
+  assert.equal(sent[0].type, 'reviewPreview');
+  assert.equal(sent[0].data.after, 'WORD');
+  assert.equal(editor.getValue(), 'word');
+  editor.receive({ uri: 'file:///first.html', version: 4, text: 'newer' });
+  assert.throws(() => editor.previewReview({ before: 'word', after: 'word', edits }), /编辑器内容已变化/);
+  assert.equal(sent.length, 1);
 });

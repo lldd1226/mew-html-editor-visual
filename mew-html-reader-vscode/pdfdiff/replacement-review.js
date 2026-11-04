@@ -54,8 +54,10 @@ if (typeof module === 'object' && module.exports) {
       provideHover(document, position) {
         if (popup && contains(popup, document, position))
           return new vscode.Hover(popup.markdown, popup.range);
-        const hits = hovers.filter(mark => contains(mark, document, position));
-        if (hits.length) return new vscode.Hover(hits.flatMap(mark => mark.markdown), hits[0].range);
+        const selection = vscode.window.activeTextEditor?.document === document ? vscode.window.activeTextEditor.selection : null;
+        const range = selection?.contains(position) ? selection : new vscode.Range(position, position);
+        const hits = hovers.filter(mark => contains(mark, document, mark.range.start) && mark.range.intersection(range));
+        if (hits.length) return new vscode.Hover(hits.flatMap(mark => mark.markdown), hits[0].range.union(range));
       }
     }), vscode.languages.registerCodeActionsProvider(selector, {
       provideCodeActions: (document, range) => matches(document, range).flatMap(({ plan, index }) =>
@@ -89,9 +91,6 @@ if (typeof module === 'object' && module.exports) {
       }
       await panel.webview.postMessage({ type: 'reviewSourceAction', action: 'mew.pdf-difference', request });
     }));
-    for (const id of ["pdf-selection-sync","pdf-ocr","pdf-font","pdf-bold","pdf-selection","source-diff"])
-      subscriptions.push(vscode.commands.registerCommand(`mewReader.toggle.${id}`, () =>
-        panel.webview.postMessage({ type: 'reviewToggle', id })));
     subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => { returningToSource = true; }));
     subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
       const { document, selection } = event.textEditor;
@@ -102,8 +101,8 @@ if (typeof module === 'object' && module.exports) {
         if (!returningToSource) void panel.webview.postMessage({ type: 'reviewClose' });
       }
       if (interactive) returningToSource = false;
-      if (panel.active || !interactive || event.textEditor !== vscode.window.activeTextEditor || !selection.isEmpty) return;
-      if (hovers.some(mark => contains(mark, document, selection.active)))
+      if (panel.active || !interactive || event.textEditor !== vscode.window.activeTextEditor) return;
+      if (hovers.some(mark => contains(mark, document, mark.range.start) && mark.range.intersection(selection)))
         void vscode.commands.executeCommand('editor.action.showHover', { focus: 'noAutoFocus' }).then(undefined, reader.report);
     }));
     subscriptions.push(panel.webview.onDidReceiveMessage(message => {
@@ -154,10 +153,9 @@ if (typeof module === 'object' && module.exports) {
           if (!hit.intersection(editor.selection)) return;
           const range = hit.union(editor.selection);
           popup = { uri: document.uri, version: document.version, range, markdown: data.map(hoverMarkdown) };
-          if (message.focus) {
-            await vscode.commands.executeCommand('editor.action.hideHover');
-            if (disposed || reader.panel !== panel || focusRevision !== reader.focusRevision) return;
-          }
+          await vscode.commands.executeCommand('editor.action.hideHover');
+          if (disposed || reader.panel !== panel || focusRevision !== reader.focusRevision
+            || (!message.focus && (panel.active || vscode.window.activeTextEditor !== editor))) return;
           return vscode.commands.executeCommand('editor.action.showHover', { focus: message.focus ? 'autoFocusImmediately' : 'noAutoFocus' });
         }
         if (message.type === 'reviewPreview') {
@@ -185,58 +183,70 @@ if (typeof module === 'object' && module.exports) {
   function create({ document = window.document, classes = {} }) {
     const { selection: selectionClass = 'review-highlight', pointer: pointerClass = 'review-pointer',
       caret: caretClass = 'review-caret' } = classes;
-    const selectionAreas = new Map(), pointerAreas = new Map(), marks = new Map();
+    const selectionAreas = new Map(), pointerAreas = new Map(), marks = new Map(), measurements = new WeakMap();
     return { measureHighlights, paintHighlight, clearHighlights, clearMarks, updateSource, selectionRange,
       getHighlight: (div, pointer = false) => (pointer ? pointerAreas : selectionAreas).get(div),
       dispose() { clearHighlights(); clearHighlights(true); clearMarks(); } };
     function measureHighlights(div, index, hits, focusHit) {
-      // Measure the indexed text nodes in their reading order.
+      const page = div.getBoundingClientRect(), sx = page.width / div.offsetWidth, sy = page.height / div.offsetHeight;
+      const width = div.clientWidth * sx, height = div.clientHeight * sy;
       const boxes = [], notices = [];
-      let range;
+      let focus = null, range;
+      if (!width || !height) return { count: hits.length, focus, boxes, notices };
+      let cache = measurements.get(index);
+      if (!cache || cache.div !== div || cache.width !== width || cache.height !== height) {
+        cache = { div, width, height, ranges: new Map() };
+        measurements.set(index, cache);
+      }
+      const relative = box => ({
+        x: (box.left - page.left - div.clientLeft * sx) / width,
+        y: (box.top - page.top - div.clientTop * sy) / height,
+        w: box.width / width, h: box.height / height, caret: !!box.caret
+      });
       const union = (a, b) => {
         const left = Math.min(a.left, b.left), top = Math.min(a.top, b.top), right = Math.max(a.right, b.right);
         return { left, top, right, width: right - left, height: Math.max(a.top + a.height, b.top + b.height) - top };
       };
-      let focus = null;
       for (const hit of hits) {
-        let noticeBox = null;
-        const caret = hit.start === hit.end || !!hit.difference && !index.raw.slice(hit.start, hit.end).trim();
-        const at = caret && hit.endBias ? Math.max(0, hit.start - 1) : hit.start;
-        // Reading order can differ from DOM order; measure the indexed text nodes.
-        for (const part of index.fontRuns(at, caret ? at : hit.end, true)) {
-          range ||= (div.ownerDocument || document).createRange();
-          range.setStart(part.node, Math.max(0, hit.start - part.start));
-          range.setEnd(part.node, Math.max(0, Math.min(part.node.length, (caret ? hit.start : hit.end) - part.start)));
-          if (!caret && !range.toString().trim()) continue;
-          for (let box of caret ? [range.getBoundingClientRect()] : range.getClientRects()) if ((box.width || caret) && box.height) {
-            // Collapsed ranges can have a fractional width in Chromium. Always
-            // draw missing text as a visible caret at the insertion point.
-            if (caret) box = { left: box.left - 2, right: box.left + 2, top: box.top, width: 4, height: box.height, caret: true };
-            const previous = boxes.at(-1);
-            // Range rects can include both a span and its text, or adjoining spans.
-            if (previous && !previous.caret && !box.caret && Math.abs(previous.top - box.top) < .5 && Math.abs(previous.height - box.height) < .5
-              && box.left >= previous.left && box.left <= previous.right + .5) {
-              boxes[boxes.length - 1] = union(previous, box);
-            } else boxes.push(box);
-            noticeBox = noticeBox ? union(noticeBox, box) : box;
-            if (hit === focusHit && !focus) focus = box;
+        const caret = !index.raw.slice(hit.start, hit.end).trim();
+        const key = `${hit.start}:${hit.end}:${Number(caret)}:${Number(!!hit.endBias)}`;
+        let measured = cache.ranges.get(key);
+        if (!measured) {
+          const areas = [];
+          let noticeBox = null, first = null;
+          const at = caret && hit.endBias ? Math.max(0, hit.start - 1) : hit.start;
+          for (const part of index.fontRuns(at, caret ? at : hit.end, true)) {
+            range ||= (div.ownerDocument || document).createRange();
+            range.setStart(part.node, Math.max(0, Math.min(part.node.length, hit.start - part.start)));
+            range.setEnd(part.node, Math.max(0, Math.min(part.node.length, (caret ? hit.start : hit.end) - part.start)));
+            if (!caret && !range.toString().trim()) continue;
+            for (let box of caret ? [range.getBoundingClientRect()] : range.getClientRects()) if ((box.width || caret) && box.height) {
+              if (caret) box = { left: box.left - 2, right: box.left + 2, top: box.top, width: 4, height: box.height, caret: true };
+              const previous = areas.at(-1);
+              if (previous && !previous.caret && !box.caret && Math.abs(previous.top - box.top) < .5 && Math.abs(previous.height - box.height) < .5
+                && box.left >= previous.left && box.left <= previous.right + .5) areas[areas.length - 1] = union(previous, box);
+              else areas.push(box);
+              noticeBox = noticeBox ? union(noticeBox, box) : box;
+              first ||= box;
+            }
           }
+          measured = { boxes: areas.map(relative), box: noticeBox && relative(noticeBox), focus: first && relative(first) };
+          // Cache geometry only; source offsets, differences and notices belong to the current request.
+          if (noticeBox) cache.ranges.set(key, measured);
+          if (cache.ranges.size > 256) cache.ranges.delete(cache.ranges.keys().next().value);
         }
-        if (noticeBox) notices.push({ box: noticeBox, ...hit.difference, target: { index, start: hit.start, end: hit.end }, source: hit.source });
+        boxes.push(...measured.boxes);
+        if (hit === focusHit && !focus) focus = measured.focus;
+        if (measured.box) notices.push({ ...hit.difference, box: measured.box,
+          target: { index, start: hit.start, end: hit.end }, source: hit.source });
       }
-      const pageBox = div.getBoundingClientRect();
-      const sx = pageBox.width / div.offsetWidth, sy = pageBox.height / div.offsetHeight;
-      const relative = box => ({
-        x: (box.left - pageBox.left - div.clientLeft * sx) / (div.clientWidth * sx),
-        y: (box.top - pageBox.top - div.clientTop * sy) / (div.clientHeight * sy),
-        w: box.width / (div.clientWidth * sx), h: box.height / (div.clientHeight * sy), caret: !!box.caret
-      });
-      return { count: hits.length, focus: focus && relative(focus), boxes: boxes.map(relative), notices: notices.map(notice => ({ ...notice, box: relative(notice.box) })) };
+      return { count: hits.length, focus, boxes, notices };
     }
     function paintHighlight(div, boxes, color, pointer = false) {
       const store = pointer ? pointerAreas : selectionAreas;
       const previous = store.get(div);
-      if (previous?.boxes === boxes && previous.node.isConnected) return previous;
+      if (previous?.node.isConnected && previous.boxes.length === boxes.length
+        && previous.boxes.every((box, i) => box === boxes[i])) return previous;
       if (!boxes.length) {
         previous?.node.remove();
         store.delete(div);
@@ -343,25 +353,25 @@ if (typeof module === 'object' && module.exports) {
     editor.bindReviewSuggestions(provide, () => session?.context.editor === editor && valid() ? session : null);
   }
   function paintRevision(editor, model, key, edits, decorations = []) {
-    const toolbox = window.PdfSelectionDiff;
+    const documentModel = editor.document, diff = window.PdfSelectionDiff;
     revisionMarks.updateSource(editor, key, () => [...edits.flatMap(edit => {
       if (edit.options) return [edit];
       let offset = edit.start;
-      return toolbox.textDiff(model.getValueInRange(toolbox.rangeAt(model, edit.start, edit.end)), edit.text, true).parts.flatMap(part => {
+      return diff.textDiff(model.getValueInRange(documentModel.rangeAt(edit.start, edit.end)), edit.text, true).parts.flatMap(part => {
         const start = offset;
         offset += part.html.length;
         return part.changed ? [{ start, end: offset, text: part.pdf }] : [];
       });
     }).map(edit => ({
-      range: toolbox.rangeAt(model, edit.start, edit.end),
+      range: documentModel.rangeAt(edit.start, edit.end),
       options: edit.options || { description: 'Revision preview', stickiness: 1, showIfCollapsed: true,
         inlineClassName: edit.end > edit.start ? 'mew-review-current' : undefined,
         after: edit.text ? { content: edit.text, inlineClassName: 'mew-review-proposed', cursorStops: 0 } : undefined }
     })), ...decorations]);
   }
   function valid() {
-    return session && !session.stale && session.context.editor.getModel() === session.context.model
-      && (session.context.version !== undefined ? session.context.model.getVersionId?.() === session.context.version : session.context.model.getValue() === session.context.source)
+    return session && !session.stale && session.context.editor.document === session.context.documentModel
+      && session.context.snapshot === session.context.documentModel.snapshot
       && (!session.provider.isCurrent || session.provider.isCurrent(session.context));
   }
   function validateCandidates(result, previous) {
@@ -447,8 +457,8 @@ if (typeof module === 'object' && module.exports) {
   function refreshAfterEdit(saved, priority = false) {
     if (saved.refreshTask) return saved.refreshTask;
     if (session !== saved || !saved.manualPending || saved.context.editor.getModel() !== saved.context.model || saved.provider.available?.(saved.context.editor) === false) return Promise.resolve();
-    const request = ++generation, source = saved.context.model.getValue(), version = saved.context.model.getVersionId?.();
-    const context = { ...saved.context, source, version, request: { side: saved.context.request?.side } };
+    const request = ++generation, snapshot = saved.context.documentModel.snapshot, { source, version } = snapshot;
+    const context = { ...saved.context, source, version, snapshot, request: { side: saved.context.request?.side } };
     let resolveReady;
     const task = saved.refreshTask = new Promise(resolve => { resolveReady = resolve; });
     const ready = () => {
@@ -530,8 +540,9 @@ if (typeof module === 'object' && module.exports) {
     bindSuggestions(target);
     if (provider.isEnabled?.() === false) { message('请先在菜单中启用此功能。'); place(); return; }
     const request = ++generation, controller = lastRequest.controller = new AbortController();
-    const model = target.getModel(), source = model.getValue(), version = model.getVersionId?.();
-    const context = { ...requestData?.snapshot?.context, editor: target, model, source, version, signal: controller.signal, toolbox: window.PdfSelectionDiff, request: requestData };
+    const model = target.getModel(), snapshot = target.document.snapshot, { source, version } = snapshot;
+    const context = { ...requestData?.snapshot?.context, editor: target, model, source, version,
+      signal: controller.signal, documentModel: target.document, snapshot, request: requestData };
     subscribe(target, 'onDidChangeModel', () => close());
     subscribe(target, 'onDidDispose', () => close(false, false));
     subscribe(target, 'onDidChangeModelContent', event => {
@@ -678,7 +689,7 @@ if (typeof module === 'object' && module.exports) {
       const data = saved.provider.preview ? await saved.provider.preview(saved, get('file').checked)
         : { before: source, after: source, language: model.getLanguageId() };
       if (!data || session !== saved || !valid()) return;
-      const edits = saved.provider.preview ? [] : window.PdfSelectionDiff.validateEdits(source, selectedEdits(get('file').checked));
+      const edits = saved.provider.preview ? [] : saved.context.documentModel.validateEdits(selectedEdits(get('file').checked));
       await saved.context.editor.previewReview({ ...data, edits });
     } catch (error) { if (session === saved) message(error.message); }
   }
@@ -704,9 +715,9 @@ if (typeof module === 'object' && module.exports) {
         await refreshAfterEdit(saved, result.priority);
         return true;
       }
+      const snapshot = saved.context.documentModel.snapshot;
       Object.assign(saved, { ...validateCandidates(result, saved.choices),
-        position: result.position, context: { ...saved.context,
-          source: model.getValue(), version: model.getVersionId?.(), ...result.context } });
+        position: result.position, context: { ...saved.context, ...snapshot, snapshot, ...result.context } });
       if (saved.context.request) saved.context.request = { ...saved.context.request, snapshot: null };
       if (!valid()) { stale(); return; }
       render();
@@ -836,6 +847,7 @@ if (typeof module === 'object' && module.exports) {
   });
   new ResizeObserver(queuePlace).observe(panel);
   window.addEventListener('resize', queuePlace);
+  document.fonts?.addEventListener('loadingdone', queuePlace);
   window.addEventListener('storage', event => {
     if ((event.key === previewKey || event.key === null) && valid()) render(true);
   });

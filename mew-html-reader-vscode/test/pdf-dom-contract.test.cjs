@@ -5,7 +5,7 @@ const test = require("node:test");
 
 test("PDF.js viewer container and viewer are div elements", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "extension.cjs"), "utf8");
-  assert.match(source, /<div id="stage"><div id="viewer" class="pdfViewer"><\/div><\/div>/);
+  assert.match(source, /<div id="stage" lang="und"><div id="viewer" class="pdfViewer"><\/div><\/div>/);
   assert.doesNotMatch(source, /<main id="stage">/);
 });
 

@@ -4,16 +4,20 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require.resolve('../extension.cjs'), 'utf8');
 const browser = { window: {} };
-vm.runInNewContext(fs.readFileSync(require.resolve('../../public/tag-panel.js'), 'utf8').replace('close = tag.open + text.slice(wrapper.closeStart, byStart.get(start).end);', 'close = tag.close + text.slice(wrapper.closeStart, byStart.get(start).end);'), browser);
+vm.runInNewContext(fs.readFileSync(require.resolve("../editor-core.js"), "utf8"), browser);
+vm.runInNewContext(fs.readFileSync(require.resolve('../../public/tag-panel.js'), 'utf8'), browser);
 const notices = [], shown = [];
 const vscode = {
   window: { showInformationMessage: message => notices.push(message), showTextDocument: async (...args) => shown.push(args) },
   Range: class { constructor(start, end) { this.start = start; this.end = end; } },
   Selection: class { constructor(start, end) { this.start = start; this.end = end; } }
 };
-const sandbox = { require: name => name === "./reader-core.cjs" ? require("../reader-core.cjs") : vscode, module: { exports: {} } };
-vm.runInNewContext(source + '\nmodule.exports.test = { TagEditor, tags, attrs, insertTag, TagBarViewProvider, findPdfTab };', sandbox);
-const api = sandbox.module.exports.test;
+const sandbox = { require: name => name === "vscode" ? vscode : require("node:module").createRequire(require.resolve("../extension.cjs"))(name), module: { exports: {} } };
+vm.runInNewContext(source + '\nmodule.exports.test = { findPdfTab };', sandbox);
+const shared = require('../tag-panel.js');
+const provider = Object.create(shared.TagBarViewProvider.prototype);
+Object.assign(provider, { editors: new WeakMap(), host: { vscode, targetEditor: () => vscode.window.activeTextEditor } });
+const api = { ...sandbox.module.exports.test, ...shared, insertTag: item => provider.insertTag(item) };
 const plain = value => JSON.parse(JSON.stringify(value));
 function editor(text, selections, accepts = true) {
   const document = { isClosed: false, getText: () => text, offsetAt: p => p, positionAt: n => n };
@@ -74,4 +78,8 @@ test('PDF reuse compares custom-editor type and URI', () => {
   vscode.window.tabGroups = {all:[group]};
   assert.equal(api.findPdfTab(uri).tab, tab);
   assert.equal(api.findPdfTab({toString: () => 'file:///other.pdf'}), undefined);
+});
+
+test('packaged tag module matches the shared source exactly', () => {
+  assert.equal(fs.readFileSync(require.resolve('../tag-panel.js'), 'utf8'), fs.readFileSync(require.resolve('../../public/tag-panel.js'), 'utf8'));
 });
