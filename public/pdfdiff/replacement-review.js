@@ -16,10 +16,8 @@
       let focus = null, range;
       if (!width || !height) return { count: hits.length, focus, boxes, notices };
       let cache = measurements.get(index);
-      if (!cache || cache.div !== div || cache.width !== width || cache.height !== height) {
-        cache = { div, width, height, ranges: new Map() };
-        measurements.set(index, cache);
-      }
+      if (!cache || cache.div !== div || cache.width !== width || cache.height !== height)
+        measurements.set(index, cache = { div, width, height, ranges: new Map() });
       const relative = box => ({
         x: (box.left - page.left - div.clientLeft * sx) / width,
         y: (box.top - page.top - div.clientTop * sy) / height,
@@ -30,7 +28,7 @@
         return { left, top, right, width: right - left, height: Math.max(a.top + a.height, b.top + b.height) - top };
       };
       for (const hit of hits) {
-        const caret = hit.start === hit.end || !!hit.difference && !index.raw.slice(hit.start, hit.end).trim();
+        const caret = !index.raw.slice(hit.start, hit.end).trim();
         const key = `${hit.start}:${hit.end}:${Number(caret)}:${Number(!!hit.endBias)}`;
         let measured = cache.ranges.get(key);
         if (!measured) {
@@ -69,11 +67,7 @@
       const previous = store.get(div);
       if (previous?.node.isConnected && previous.boxes.length === boxes.length
         && previous.boxes.every((box, i) => box === boxes[i])) return previous;
-      if (!boxes.length) {
-        previous?.node.remove();
-        store.delete(div);
-        return;
-      }
+      if (!boxes.length) { previous?.node.remove(); store.delete(div); return; }
       const overlay = previous?.node.isConnected ? previous.node : document.createElement("div");
       if (!overlay.isConnected) {
         overlay.className = selectionClass + (pointer ? ' ' + pointerClass : '');
@@ -82,12 +76,8 @@
       }
       for (let i = 0; i < boxes.length; i++) {
         const box = boxes[i];
-        let mark = overlay.children[i];
-        if (!mark) {
-          mark = document.createElement("div");
-          mark.setAttribute("aria-hidden", "true");
-          overlay.append(mark);
-        }
+        const mark = overlay.children[i] || overlay.appendChild(document.createElement('div'));
+        mark.setAttribute('aria-hidden', 'true');
         mark.style.cssText = `position:absolute;left:${box.x * 100}%;top:${box.y * 100}%;width:${box.w * 100}%;height:${box.h * 100}%;border-radius:2px;pointer-events:none;`;
         mark.style.background = color;
         mark.classList.toggle(caretClass, box.caret);
@@ -99,20 +89,17 @@
     }
     function clearHighlights(pointer = false, visible = new Set()) {
       const areas = pointer ? pointerAreas : selectionAreas;
-      for (const [div, painted] of areas) if (!visible.has(div)) {
-        painted.node.remove(); areas.delete(div);
-      }
+      for (const [div, painted] of areas) if (!visible.has(div)) { painted.node.remove(); areas.delete(div); }
     }
     function clearMarks() {
-      for (const state of marks.values()) { state.collection.clear(); state.dispose?.(); }
+      for (const state of marks.values()) { state.collection.clear(); state.subscription?.dispose(); }
       marks.clear();
     }
     function updateSource(editor, key, decorations) {
       let state = marks.get(editor);
       if (!state) {
         state = { collection: editor.createDecorationsCollection() };
-        const subscription = editor.onDidChangeModel?.(() => { state.key = null; state.collection.clear(); });
-        state.dispose = () => subscription?.dispose();
+        state.subscription = editor.onDidChangeModel?.(() => { state.key = null; state.collection.clear(); });
         marks.set(editor, state);
       }
       if (state.key?.length === key.length && key.every((value, i) => value === state.key[i])) return;
@@ -148,15 +135,13 @@
   const providers = new Map();
   const previewKey = 'mew-review-preview';
   const editorSuggestions = new Map();
-  let session = null, generation = 0, view = null, previewModels = [], disposals = [], lastRequest = null;
+  let session = null, generation = 0, view = null, disposals = [], lastRequest = null;
   let widget = null, noticeLayout = null, manualTimer = null, composing = false;
   let placementFrame = null, returningToWindow = !document.hasFocus();
   let panelMoved = false;
   const revisionMarks = window.ReviewHighlights.create({ document });
   const menu = document.getElementById('replacementFeatures');
-  const panel = document.createElement('section');
-  panel.className = 'replacement-review'; panel.hidden = true;
-  panel.tabIndex = -1;
+  const panel = element('section', { className: 'replacement-review', hidden: true, tabIndex: -1 });
   panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', '审阅与批量替换');
   panel.innerHTML = `<div class="review-heading"><strong data-title></strong><span data-position></span><button type="button" data-switch hidden></button><button type="button" data-close aria-label="关闭审阅">×</button></div>
     <p data-status role="status"></p><div data-comparison></div><div data-options class="review-options"></div>
@@ -165,6 +150,11 @@
   document.body.append(panel);
   const fields = Object.create(null);
   const get = name => fields[name] ||= panel.querySelector(`[data-${name}]`);
+  function element(tag, properties = {}, ...children) {
+    const node = Object.assign(document.createElement(tag), properties);
+    node.append(...children);
+    return node;
+  }
   function workspace() {
     const owner = session?.context.editor.getDomNode()?.ownerDocument.defaultView;
     return owner?.mewWorkbench || owner?.readerMonaco;
@@ -190,7 +180,7 @@
     const state = { provide, actions: [] }, listeners = [];
     editorSuggestions.set(editor, state);
     updateMenu();
-    const plans = (model, range, source = model.getValue()) => {
+    const plans = (model, range) => {
       if (editor.getModel() !== model || editor.getOption(api.editor.EditorOption.readOnly)) return [];
       const active = session?.context.editor === editor && valid();
       const values = state.provide?.(model) || (active ? session.items.flatMap(item => item.options) : []);
@@ -213,20 +203,20 @@
       paintRevision(editor, editor.getModel(), [session, active], active ? selectedEdits() : [], active ? session.content.previewDecorations : []);
     };
     controller._actionWidgetService = {
-      get isVisible() { return widgets.isVisible; }, hide: widgets.hide.bind(widgets)
-    };
-    controller._actionWidgetService.show = (id, supportsPreview, items, delegate, ...args) => {
-      if (items.some(item => item.item?.action.reviewPreview)) items = [{ kind: 'header', label: '替换与预览' },
-        ...items.filter(item => item.kind !== 'header' || item.group?.kind?.value !== '')];
-      widgets.show(id, supportsPreview, items, { ...delegate, onHover(action, token) {
-        if (action.action.reviewPreview) { hovering = true; action.action.reviewPreview(); }
-        else clearHover();
-        return delegate.onHover?.(action, token);
-      }, onHide(didCancel) { clearHover(); delegate.onHide?.(didCancel); } }, ...args);
-      const node = editor.getDomNode()?.querySelector('.action-widget');
-      if (node) node.onmouseout = event => {
-        if (!node.contains(event.relatedTarget) || !event.relatedTarget?.closest?.('.action')) clearHover();
-      };
+      get isVisible() { return widgets.isVisible; }, hide: widgets.hide.bind(widgets),
+      show: (id, supportsPreview, items, delegate, ...args) => {
+        if (items.some(item => item.item?.action.reviewPreview)) items = [{ kind: 'header', label: '替换与预览' },
+          ...items.filter(item => item.kind !== 'header' || item.group?.kind?.value !== '')];
+        widgets.show(id, supportsPreview, items, { ...delegate, onHover(action, token) {
+          if (action.action.reviewPreview) { hovering = true; action.action.reviewPreview(); }
+          else clearHover();
+          return delegate.onHover?.(action, token);
+        }, onHide(didCancel) { clearHover(); delegate.onHide?.(didCancel); } }, ...args);
+        const node = editor.getDomNode()?.querySelector('.action-widget');
+        if (node) node.onmouseout = event => {
+          if (!node.contains(event.relatedTarget) || !event.relatedTarget?.closest?.('.action')) clearHover();
+        };
+      }
     };
     const applyCodeAction = controller.applyCodeAction;
     controller.applyCodeAction = function(action, retrigger, preview, reason) {
@@ -235,31 +225,27 @@
         : applyCodeAction.call(this, action, retrigger, preview, reason);
     };
     listeners.push({ dispose: () => { controller.applyCodeAction = applyCodeAction; controller._actionWidgetService = widgets; } });
-    const codeActions = {
-      provideCodeActions(model, range) {
-        return { actions: plans(model, range).map(value => ({
-          title: value.title || value.edits.map(edit => edit.text || '删除此处文字').join('、'), kind: 'replace',
-          reviewPreview() {
-            if (editor.getModel() === model && model.getVersionId() === this.edit.edits[0].versionId
-              && !editor.getOption(api.editor.EditorOption.readOnly)) paintRevision(editor, model, [this], value.edits);
-          },
-          edit: { edits: value.edits.map(edit => ({ resource: model.uri, versionId: model.getVersionId(),
-            textEdit: { range: editor.document.rangeAt(edit.start, edit.end), text: edit.text } })) }
-        })), dispose() {} };
-      }
-    };
-    let actionRegistration;
+    const codeActions = { provideCodeActions: (model, range) => ({
+      actions: plans(model, range).map(value => ({
+        title: value.title || value.edits.map(edit => edit.text || '删除此处文字').join('、'), kind: 'replace',
+        reviewPreview() {
+          if (editor.getModel() === model && model.getVersionId() === this.edit.edits[0].versionId
+            && !editor.getOption(api.editor.EditorOption.readOnly)) paintRevision(editor, model, [this], value.edits);
+        },
+        edit: { edits: value.edits.map(edit => ({ resource: model.uri, versionId: model.getVersionId(),
+          textEdit: { range: editor.document.rangeAt(edit.start, edit.end), text: edit.text } })) }
+      })), dispose() {}
+    }) };
     state.refreshActions = () => {
-      actionRegistration?.dispose();
-      actionRegistration = api.languages.registerCodeActionProvider('*', codeActions, { providedCodeActionKinds: ['replace'] });
+      state.codeActions?.dispose();
+      state.codeActions = api.languages.registerCodeActionProvider('*', codeActions, { providedCodeActionKinds: ['replace'] });
     };
     state.refreshActions();
-    listeners.push({ dispose: () => actionRegistration.dispose() });
     // Match built-in language providers' priority so HTML completions cannot hide review suggestions.
     listeners.push(api.languages.registerCompletionItemProvider(api.languages.getLanguages().map(language => language.id), {
       provideCompletionItems(model, position) {
         const source = model.getValue();
-        return { suggestions: plans(model, new api.Range(position.lineNumber, position.column, position.lineNumber, position.column), source).flatMap(value => {
+        return { suggestions: plans(model, api.Range.fromPositions(position)).flatMap(value => {
           const start = Math.min(value.range?.start ?? Infinity, ...value.edits.map(edit => edit.start)),
             end = Math.max(value.range?.end ?? 0, ...value.edits.map(edit => edit.end));
           const replacementRange = editor.document.rangeAt(start, end);
@@ -282,7 +268,7 @@
       timer = setTimeout(() => {
         const model = editor.getModel(), position = editor.getPosition();
         if (!inComposition && editor.hasTextFocus() && model && position
-          && plans(model, new api.Range(position.lineNumber, position.column, position.lineNumber, position.column)).length)
+          && plans(model, api.Range.fromPositions(position)).length)
           editor.trigger('replacement-review', 'editor.action.triggerSuggest', {});
       }, 180);
     };
@@ -292,7 +278,7 @@
       editor.onDidCompositionStart(() => { inComposition = true; clearTimeout(timer); }),
       editor.onDidCompositionEnd(() => { inComposition = false; suggest(); }),
       editor.onDidDispose(() => state.dispose()));
-    state.dispose = () => { clearTimeout(timer); state.actions.forEach(action => action.dispose()); listeners.forEach(listener => listener.dispose()); editorSuggestions.delete(editor);
+    state.dispose = () => { clearTimeout(timer); state.codeActions.dispose(); state.actions.forEach(action => action.dispose()); listeners.forEach(listener => listener.dispose()); editorSuggestions.delete(editor);
       editor.getDomNode()?.classList.remove('mew-review-suggestions'); };
   }
   function paintRevision(editor, model, key, edits, decorations = []) {
@@ -319,71 +305,63 @@
     const peer = state.provider.presentation({ ...state.context, request }, state.items[state.position]);
     return peer?.host && peer.host !== window.ReplacementReview ? { ...peer, request } : null;
   }
+  function contextCurrent(provider, context) {
+    return context.snapshot === context.documentModel.snapshot && (!provider.isCurrent || provider.isCurrent(context));
+  }
   function valid() {
     return session && !session.stale && session.context.editor.document === session.context.documentModel
-      && session.context.snapshot === session.context.documentModel.snapshot
-      && (!session.provider.isCurrent || session.provider.isCurrent(session.context));
+      && contextCurrent(session.provider, session.context);
   }
   function validateCandidates(result, previous) {
     const choices = new Map(), items = result.items || result;
     for (const item of items) {
       if (typeof item.id !== 'string' || choices.has(item.id) || !item.options?.length) throw new Error('候选必须有唯一 id 和修改选项');
       choices.set(item.id, result.choices?.get(item.id) || previous?.get(item.id) || item.options[0].id);
-      const options = new Set();
-      for (const value of item.options) {
-        if (typeof value.id !== 'string' || options.has(value.id)) throw new Error('修改选项必须有唯一 id');
-        options.add(value.id);
-      }
+      const ids = item.options.map(value => value.id);
+      if (ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length) throw new Error('修改选项必须有唯一 id');
     }
     return { items, choices };
   }
+  function toggle(provider, enabled) {
+    if (provider.available?.() === false) return;
+    provider.setEnabled(enabled);
+    if (!enabled && (session?.provider === provider || lastRequest?.id === provider.id)) close();
+    updateMenu();
+  }
   function updateMenu() {
-    const toggle = (provider, enabled) => {
-      if (provider.available?.() === false) return;
-      provider.setEnabled(enabled);
-      if (!enabled && (session?.provider === provider || lastRequest?.id === provider.id)) close();
-      updateMenu();
-    };
+    const toggles = [...providers.values()].filter(provider => provider.setEnabled && provider.available?.() !== false);
     for (const [editor, state] of editorSuggestions) {
       state.actions.forEach(action => action.dispose());
-      state.actions = [];
-      for (const provider of providers.values()) {
-        if (!provider.setEnabled || provider.available?.() === false) continue;
-        state.actions.push(editor.addAction({
-          id: `replacement-review.toggle.${provider.id}`,
-          label: `${provider.isEnabled?.() !== false ? '关闭' : '启用'}${provider.label}`,
-          contextMenuGroupId: 'replacement-review.settings',
-          contextMenuOrder: state.actions.length + 1,
-          run: () => toggle(provider, provider.isEnabled?.() === false)
-        }));
-      }
+      state.actions = toggles.map((provider, index) => editor.addAction({
+        id: `replacement-review.toggle.${provider.id}`,
+        label: `${provider.isEnabled?.() !== false ? '关闭' : '启用'}${provider.label}`,
+        contextMenuGroupId: 'replacement-review.settings', contextMenuOrder: index + 1,
+        run: () => toggle(provider, provider.isEnabled?.() === false)
+      }));
     }
     if (!menu) return;
     menu.replaceChildren();
-    if (!providers.size) { const hint = document.createElement('span'); hint.textContent = '暂无可用的审阅功能'; menu.append(hint); }
+    if (!providers.size) menu.append(element('span', { textContent: '暂无可用的审阅功能' }));
     for (const provider of providers.values()) {
-      const row = document.createElement('div'); row.className = 'review-feature';
+      const row = element('div', { className: 'review-feature' });
       if (provider.setEnabled) {
-        const label = document.createElement('label'), input = document.createElement('input');
-        input.type = 'checkbox'; input.checked = provider.isEnabled?.() !== false;
-        input.disabled = provider.available?.() === false;
+        const input = element('input', { type: 'checkbox', checked: provider.isEnabled?.() !== false,
+          disabled: provider.available?.() === false, onchange: () => toggle(provider, input.checked) });
         input.setAttribute('aria-label', `启用${provider.label}`);
-        input.onchange = () => toggle(provider, input.checked);
-        label.append(input);
-        if (provider.toggleOnly) label.append(document.createTextNode(provider.label));
-        row.append(label);
+        row.append(element('label', {}, input, ...(provider.toggleOnly ? [provider.label] : [])));
       }
-      if (provider.toggleOnly) { menu.append(row); continue; }
-      const button = document.createElement((provider.locator || provider.provide) ? 'button' : 'span'); button.textContent = provider.label;
-      if (provider.locator || provider.provide) { button.type = 'button'; button.onclick = () => { const overflow = menu.closest('details'); if (overflow) overflow.open = false; void open(provider.id); }; }
-      row.append(button); menu.append(row);
+      if (!provider.toggleOnly) row.append(element(provider.locator || provider.provide ? 'button' : 'span', {
+        textContent: provider.label, ...(provider.locator || provider.provide ? { type: 'button', onclick: () => {
+          const overflow = menu.closest('details'); if (overflow) overflow.open = false; void open(provider.id);
+        } } : {}) }));
+      menu.append(row);
     }
   }
   function clearPreview() {
+    const previous = view?.getModel();
     view?.setModel(null);
-    const previous = previewModels.splice(0);
     // Monaco releases the previous diff view model on the next event-loop turn.
-    if (previous.length) setTimeout(() => previous.forEach(model => model.dispose()), 0);
+    if (previous) setTimeout(() => { previous.original.dispose(); previous.modified.dispose(); }, 0);
   }
   function mount(target) {
     const api = target?.getDomNode()?.ownerDocument.defaultView.monaco;
@@ -428,23 +406,22 @@
   }
   function stale(event) {
     if (!session) return;
-    session.stale = true; ++generation; clearPreview(); revisionMarks.clearMarks();
     const saved = session;
-    if (!saved.manualPending) saved.resumeOffset = saved.anchorOffset ?? 0;
+    if (!saved.stale) saved.resumeOffset = saved.anchorOffset ?? 0;
+    saved.stale = true; ++generation; clearPreview(); revisionMarks.clearMarks();
     // Monaco change offsets refer to the source before this event.
     const offset = saved.resumeOffset ?? saved.anchorOffset ?? 0;
     saved.resumeOffset = offset + (event?.changes || []).reduce((delta, change) => delta + (
       change.rangeOffset >= offset ? 0 : change.rangeOffset + change.rangeLength <= offset
         ? change.text.length - change.rangeLength : change.rangeOffset - offset
     ), 0);
-    saved.manualPending = true;
     clearTimeout(manualTimer);
     message('正在自动重新计算差异…'); controls();
     if (!composing) manualTimer = setTimeout(() => void refreshAfterEdit(saved), 350);
   }
   function refreshAfterEdit(saved, priority = false) {
     if (saved.refreshTask) return saved.refreshTask;
-    if (session !== saved || !saved.manualPending || composing || saved.context.editor.getModel() !== saved.context.model || saved.provider.available?.(saved.context.editor) === false) return Promise.resolve();
+    if (session !== saved || !saved.stale || composing || saved.context.editor.getModel() !== saved.context.model || saved.provider.available?.(saved.context.editor) === false) return Promise.resolve();
     const request = ++generation, snapshot = saved.context.documentModel.snapshot, { source, version } = snapshot;
     const context = { ...saved.context, source, version, snapshot, request: { side: saved.context.request?.side } };
     let resolveReady;
@@ -454,8 +431,7 @@
       resolveReady();
     };
     const accept = result => {
-      if (session !== saved || request !== generation || saved.context.model.getValue() !== source
-        || saved.context.model.getVersionId?.() !== version || (saved.provider.isCurrent && !saved.provider.isCurrent(context))) return false;
+      if (session !== saved || request !== generation || !contextCurrent(saved.provider, context)) return false;
       const { items, choices } = validateCandidates(result, saved.choices);
       const selectedId = !saved.stale && saved.items[saved.position]?.id;
       let found = selectedId ? items.findIndex(item => item.id === selectedId) : -1;
@@ -465,13 +441,11 @@
           || saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset);
       });
       Object.assign(saved, { items, choices, position: found < 0 ? items.length : found,
-        context, stale: false, manualPending: false, partial: !!result.partial });
+        context, stale: false, partial: !!result.partial });
       render(true);
       return true;
     };
-    void (async () => {
-    try {
-      const result = saved.provider.locator ? await saved.provider.locator.reviewItems({ ...context,
+    const provide = async () => saved.provider.locator ? saved.provider.locator.reviewItems({ ...context,
         priority: priority ? { offset: saved.resumeOffset } : undefined,
         onProgress: partial => {
           if (!accept(partial)) return false;
@@ -482,12 +456,12 @@
             else requestAnimationFrame(painted);
           });
         }
-      }) : await saved.provider.provide(context);
-      accept(result);
-    } catch (error) { if (session === saved && request === generation) message(error.message); }
-    })().finally(() => {
+      }) : saved.provider.provide(context);
+    void provide().then(accept).catch(error => {
+      if (session === saved && request === generation) message(error.message);
+    }).finally(() => {
       ready();
-      if (session === saved && saved.manualPending && !composing && request !== generation && !saved.refreshTask)
+      if (session === saved && saved.stale && !composing && request !== generation && !saved.refreshTask)
         manualTimer = setTimeout(() => void refreshAfterEdit(saved), 0);
     });
     return task;
@@ -499,15 +473,11 @@
     get('apply').disabled = !currentVersion || !item || busy;
     for (const name of ['advance', 'all']) get(name).disabled = !canApply;
     get('save').disabled = !workspace()?.save || !canApply;
-    get('save').textContent = session?.manualPending ? '更新中....' : '替换&保存';
+    get('save').textContent = session?.stale ? '更新中....' : '替换&保存';
     const blocked = !currentVersion || !!session?.applying;
     get('prev').disabled = blocked || session.position <= 0;
     get('next').disabled = blocked || session.position >= session.items.length - 1;
     get('position').textContent = session ? `${Math.min(session.position + 1, session.items.length)} / ${session.items.length}${session.partial ? '+' : ''}` : '';
-  }
-  function subscribe(target, event, callback) {
-    const listener = target[event]?.(callback);
-    if (listener) disposals.push(() => listener.dispose());
   }
   async function open(id, suppliedEditor, focusId, fallbackPosition = 0, requestData = null) {
     const provider = providers.get(id), target = suppliedEditor || window.mewWorkbench?.editor || window.readerMonaco?.editor;
@@ -533,22 +503,22 @@
     const model = target.getModel(), snapshot = target.document.snapshot, { source, version } = snapshot;
     const context = { ...requestData?.snapshot?.context, editor: target, model, source, version,
       signal: controller.signal, documentModel: target.document, snapshot, request: requestData };
-    subscribe(target, 'onDidChangeModel', () => close());
-    subscribe(target, 'onDidDispose', () => close(false, false));
-    subscribe(target, 'onDidChangeModelContent', event => {
-      if (!session?.applying) stale(event);
-    });
-    subscribe(target, 'onDidCompositionStart', () => { composing = true; clearTimeout(manualTimer); });
-    subscribe(target, 'onDidCompositionEnd', () => {
-      composing = false;
-      if (session?.manualPending) { const saved = session; manualTimer = setTimeout(() => void refreshAfterEdit(saved), 0); }
-    });
+    for (const [event, callback] of Object.entries({
+      onDidChangeModel: () => close(), onDidDispose: () => close(false, false),
+      onDidChangeModelContent: event => { if (!session?.applying) stale(event); },
+      onDidCompositionStart: () => { composing = true; clearTimeout(manualTimer); },
+      onDidCompositionEnd: () => {
+        composing = false;
+        if (session?.stale) { const saved = session; manualTimer = setTimeout(() => void refreshAfterEdit(saved), 0); }
+      },
+      // Monaco tracks content widgets while scrolling; only fallback positioning needs this.
+      ...(!widget && { onDidScrollChange: queuePlace }), onDidLayoutChange: queuePlace
+    })) {
+      const listener = target[event]?.(callback);
+      if (listener) disposals.push(() => listener.dispose());
+    }
     // Keep an opening session so typing while extraction runs schedules a fresh calculation.
-    session = { provider, context, items: [], position: 0,
-      choices: new Map() };
-    // Monaco tracks content widgets while scrolling; only fallback positioning needs this.
-    if (!widget) subscribe(target, 'onDidScrollChange', queuePlace);
-    subscribe(target, 'onDidLayoutChange', queuePlace);
+    session = { provider, context, items: [], position: 0, choices: new Map() };
     if (placement?.container) {
       const container = placement.container;
       container.addEventListener('scroll', queuePlace); disposals.push(() => container.removeEventListener('scroll', queuePlace));
@@ -561,8 +531,7 @@
       const result = snapshot?.context.model === model && snapshot.context.source === source && snapshot.context.version === version
         ? snapshot.items : provider.locator ? await provider.locator.reviewItems(context) : await provider.provide(context);
       if (request !== generation || providers.get(id) !== provider) return;
-      if (target.getModel() !== model || model.getValue() !== source || model.getVersionId?.() !== version
-        || (provider.isCurrent && !provider.isCurrent(context))) { stale(); return; }
+      if (target.getModel() !== model || !contextCurrent(provider, context)) { stale(); return; }
       const { items, choices } = validateCandidates(result, snapshot?.choices);
       let found = items.findIndex(item => item.id === focusId);
       if (found < 0) found = provider.focusIndex?.(items, requestData) ?? -1;
@@ -596,12 +565,10 @@
     get('title').textContent = content.title || session.provider.label;
     for (const name of ['advance', 'expanded', 'all']) get(name).hidden = content[name] === false;
     if (item) {
-      for (const value of content.options || []) {
-        const label = document.createElement('label'), input = document.createElement('input');
-        input.type = 'radio'; input.name = 'review-choice'; input.checked = session.choices.get(item.id) === value.id;
-        input.onchange = () => { session.choices.set(item.id, value.id); render(); };
-        label.append(input, document.createTextNode(value.label)); get('options').append(label);
-      }
+      get('options').append(...(content.options || []).map(value => element('label', {}, element('input', {
+        type: 'radio', name: 'review-choice', checked: session.choices.get(item.id) === value.id,
+        onchange: () => { session.choices.set(item.id, value.id); render(); }
+      }), value.label)));
       const range = preserveSelection && editor.getSelection() || content.range;
       session.anchor = content.range ? model.validateRange(content.range) : range;
       if (range && !session.stale) {
@@ -619,18 +586,11 @@
     if (!mirrored && peer) peer.host.mirror(session, { ...peer.request, mirror: true, snapshot: { ...session } });
   }
   function comparison(rows = []) {
-    get('comparison').replaceChildren();
-    for (const row of rows) {
-      const line = document.createElement('div');
-      if (row.label) line.append(`${row.label}: `);
-      for (const part of row.parts || []) {
-        const span = document.createElement(part.changed ? 'mark' : 'span'); span.textContent = part.text; line.append(span);
-        if (part.changed && part.source && session?.provider.selectComparison) {
-          span.style.cursor = 'pointer'; span.onclick = () => { if (valid()) session.provider.selectComparison(session.context, part); };
-        }
-      }
-      get('comparison').append(line);
-    }
+    get('comparison').replaceChildren(...rows.map(row => element('div', {}, ...(row.label ? [`${row.label}: `] : []),
+      ...(row.parts || []).map(part => element(part.changed ? 'mark' : 'span', {
+        textContent: part.text, ...(part.changed && part.source && session?.provider.selectComparison ? {
+          style: 'cursor:pointer', onclick: () => { if (valid()) session.provider.selectComparison(session.context, part); }
+        } : {}) })))));
   }
   function showNotice({ title = '', message: text, comparison: rows, anchor, layout }) {
     if (layout?.host && layout.host !== window.ReplacementReview) return layout.host.showNotice({ title, message: text, comparison: rows, anchor, layout });
@@ -642,14 +602,13 @@
   }
   function openForSelection(id, target, focusId, request) {
     if (session?.applying || session?.saving) return;
-    if (session?.manualPending && session.provider.id === id && session.context.editor === target) return;
+    if (session?.stale && session.provider.id === id && session.context.editor === target) return;
     if (session?.provider.id === id && session.context.editor === target && valid()) {
       const sameInteraction = request?.interactionId !== undefined && request.interactionId === session.context.request?.interactionId;
       // Selection synchronization after our own navigation is not a new review request.
       if (sameInteraction && target.getSelection()?.equalsRange(session.anchor)) { place(target); return; }
       const previousSource = session.context.request?.notice?.source, source = request?.notice?.source;
-      const sameSelection = source && previousSource && source.index === previousSource.index
-        && source.start === previousSource.start && source.end === previousSource.end;
+      const sameSelection = source && previousSource && ['index', 'start', 'end'].every(key => source[key] === previousSource[key]);
       session.context.request = { ...session.context.request, ...request, side: session.context.request?.side };
       if (sameInteraction && (sameSelection || session.provider.containsSelection?.(current(), request))) { place(target); return; }
       const at = session.items.findIndex(item => item.id === focusId);
@@ -675,14 +634,13 @@
       clearPreview();
       const modified = saved.provider.preview ? after
         : new window.MewEditorCore.DocumentModel({ text: after }).applyEdits(selectedEdits(get('file').checked)).source;
-      previewModels = [api.editor.createModel(before, language), api.editor.createModel(modified, language)];
-      view.setModel({ original: previewModels[0], modified: previewModels[1] });
+      view.setModel({ original: api.editor.createModel(before, language), modified: api.editor.createModel(modified, language) });
     } catch (error) { if (session === saved && request === generation) { clearPreview(); message(error.message); } }
   }
   async function apply(all) {
     const saved = session, model = saved?.context.model, position = saved?.position;
     if (saved?.waitingApply) return;
-    if (saved?.refreshTask || saved?.manualPending && !composing)
+    if (saved?.refreshTask || saved?.stale && !composing)
       await (saved.waitingApply = refreshAfterEdit(saved)).finally(() => { saved.waitingApply = null; });
     if (session !== saved || !valid()) return;
     if (!current() || !saved.provider.apply || saved.applying) return;
@@ -692,7 +650,7 @@
       const result = await saved.provider.apply({ ...saved, context: { ...saved.context } }, all);
       if (session !== saved) return true;
       if (result.offset !== undefined) {
-        saved.resumeOffset = result.offset; saved.stale = saved.manualPending = true;
+        saved.resumeOffset = result.offset; saved.stale = true;
         if (result.position !== undefined) { saved.position = result.position; panelMoved = false; }
         render(true);
         if (panel.dataset.side === 'pdf') await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
@@ -710,7 +668,7 @@
       return true;
     } catch (error) {
       if (session !== saved) return;
-      saved.position = position; saved.stale = saved.manualPending = false;
+      saved.position = position; saved.stale = false;
       if (model.getValue() !== saved.context.source) stale();
       else render(true);
       message(error.message);
@@ -860,7 +818,7 @@
         ++generation; clearTimeout(manualTimer);
         Object.assign(session, { items: saved.items, position: saved.position,
           choices: new Map(saved.choices),
-          context: { ...saved.context, request }, stale: !!saved.stale, manualPending: !!saved.manualPending, partial: !!saved.partial });
+          context: { ...saved.context, request }, stale: !!saved.stale, partial: !!saved.partial });
         if (saved.stale) panelMoved = false;
         render(true, true);
       } else void open(saved.provider.id, saved.context.editor, saved.items[saved.position]?.id, saved.position, request);
