@@ -4,7 +4,6 @@ class PdfConnections {
   connections = new WeakMap();
   prepared = null;
   pairs = [];
-  targets = null;
   constructor({ environment, documents, document, pdf, options }, values) {
     if (typeof values === 'string') values = new window.MewEditorCore.DocumentModel({ text: values });
     Object.assign(this, { environment, documents, document, pdf, options }, values?.parse?.(document) ?? values);
@@ -124,11 +123,11 @@ class PdfConnections {
     }
     return this.prepared.differences;
   }
-  update(pages = this.targets || [], pdf = this.environment.getPdf?.() || this.prepared?.pdf) {
-    this.targets = pages;
-    const targets = new Set([...pages, ...(this.environment.getTargets?.() || [])].filter(Boolean));
-    pages = [...targets];
+  update(pages = []) {
+    const pdf = this.pdf;
     const full = documentIndex(this.documents, pdf, this.environment.getSourcePages?.());
+    const targets = new Set([full, ...pages, ...(this.environment.getTargets?.() || [])].filter(Boolean));
+    pages = [...targets];
     if (!this.prepared || this.prepared.pdf !== pdf || this.prepared.full !== full || this.prepared.pages?.length !== pages.length
       || this.prepared.pages.some((page, i) => !targets.has(page) || this.connections.get(page)?.ranges !== this.prepared.connections[i])) {
       if (full && !full.sourcePages && this.prepared?.document !== full) full.scope(this, true);
@@ -169,8 +168,7 @@ class PdfConnections {
     return this.prepared;
   }
   get livePairs() {
-    return (this.prepared?.ordered || (this.targets || []).filter(Boolean)
-      .sort((x, y) => Number(!!x.pages) - Number(!!y.pages) || Number(!!y.layer) - Number(!!x.layer)))
+    return (this.prepared?.ordered || [])
       .flatMap(target => this.connections.get(target)?.ranges || []);
   }
   compare(connection, diff = connection?.editorDiff) {
@@ -481,13 +479,13 @@ class PdfConnections {
     return candidates.concat(formats).sort((a, b) => (a.reviewStart ?? a.sourceStart) - (b.reviewStart ?? b.sourceStart) || Number(!!a.font) - Number(!!b.font));
   }
   missingRange(target, start) {
-    const index = target.layer ? this.prepared?.full : target;
+    const index = target.layer ? this.prepared?.full || documentIndex(this.documents, this.pdf, this.environment.getSourcePages?.()) : target;
     const page = target.layer && index?.pages.find(page => page.number === Number(target.layer.closest('.page')?.dataset.pageNumber));
     if (!index || target.layer && (!page || index.raw.slice(page.start, page.end) !== target.raw)) return null;
     let a = 0, before = -1, matched = false;
-    // Use the candidate queue's connection priority, including confirmed rendered-page mappings.
-    const connections = this.pairs.length ? this.pairs
-      : this.connections.get(index)?.preparedRanges || this.connections.get(index)?.ranges || [];
+    // Inherited connections already retain PDF coordinates before queue preparation.
+    const connections = this.pairs.length ? this.pairs : this.livePairs;
+    if (!connections.length) connections.push(...(this.connections.get(index)?.preparedRanges || this.connections.get(index)?.ranges || []));
     for (const connection of connections) {
       const mapped = connection.target;
       const mappedPage = mapped !== index && mapped.layer && index.pages?.find(page =>
@@ -531,7 +529,7 @@ class PdfConnections {
   }
   // Search within this index without creating a source/target connection.
   search(entry, scope = null) {
-    const offset = scope?.start || 0, haystack = scope ? scope.normalized ||= normalized(this, { start: offset, end: scope.end }) : this.normalized;
+    const offset = scope?.start || 0, haystack = scope ? normalized(this, { start: offset, end: scope.end }) : this.normalized;
     const before = normalized(entry.before).text.trim(), after = normalized(entry.after).text.trim();
     for (let fuzzy = 0; fuzzy < 2; fuzzy++) {
       const hits = this.matches([entry.text], haystack, { fuzzy: !!fuzzy, before, after });
@@ -552,9 +550,9 @@ class PdfConnections {
     }
     return null;
   }
-  locateSource(chunks, pdf) {
+  locateSource(chunks) {
     const first = chunks[0], last = chunks.at(-1);
-    this.update(chunks.map(chunk => chunk.index), pdf);
+    this.update(chunks.map(chunk => chunk.index));
     const entry = first.index.entry(first.start, first.end, undefined,
       chunks.map(({ index, start, end }) => index.raw.slice(start, end)).join("\n"));
     entry.after = last.index.raw.slice(last.end, last.end + 160);
@@ -596,15 +594,15 @@ class PdfConnections {
     const { start, oldEnd, newEnd } = changedRange(previous.raw, this.raw), change = newEnd - oldEnd;
     const shift = range => range && (range.end <= start ? 0 : range.start >= oldEnd ? change : null);
     // Keep confirmed, unchanged passages; only edited passages need a new diff.
-    for (const target of new Set([...this.targets, ...(this.environment.getTargets?.() || []),
-      documentIndex(this.documents, this.environment.getPdf?.() || this.pdf, this.environment.getSourcePages?.())].filter(Boolean))) {
+    for (const target of new Set([...(this.environment.getTargets?.() || []),
+      documentIndex(this.documents, this.pdf, this.environment.getSourcePages?.())].filter(Boolean))) {
       const cached = previous.connections.get(target), original = cached?.ranges || [];
       const state = this.connections.get(target) || {};
       this.connections.set(target, state);
       const retain = item => {
         const delta = start === oldEnd && item.end === start && item.start < start ? null : shift(item);
         if (delta !== null) {
-          const kept = Object.defineProperty({ ...item, start: item.start + delta, end: item.end + delta }, 'target', { value: target }), diff = item.editorDiff;
+          const kept = Object.defineProperty({ ...item, gap: undefined, start: item.start + delta, end: item.end + delta }, 'target', { value: target }), diff = item.editorDiff;
           if (diff?.context?.[0] === previous.formats && this.formats.slice(kept.start, kept.end).every((style, i) => {
             const at = item.start + i, old = previous.formats[at];
             return style.italic === old.italic && style.bold === old.bold && style.name === old.name
@@ -630,13 +628,13 @@ class PdfConnections {
       const reverseScope = target.connections.get(previous);
       const reverse = (reverseScope?.ranges || []).flatMap(item => {
         const delta = shift({ start: item.targetStart, end: item.targetEnd });
-        return delta === null ? [] : [Object.defineProperty({ ...item, targetStart: item.targetStart + delta, targetEnd: item.targetEnd + delta }, 'target', { value: this })];
+        return delta === null ? [] : [Object.defineProperty({ ...item, gap: undefined, targetStart: item.targetStart + delta, targetEnd: item.targetEnd + delta }, 'target', { value: this })];
       });
       if (reverse.length || previous.raw === this.raw && reverseScope?.scope !== undefined)
         target.connections.set(this, { ...(previous.raw === this.raw ? reverseScope : {}), ranges: reverse.length ? reverse : undefined });
       const delta = shift(cached?.scope);
-      if (cached?.scope && delta !== null) Object.assign(state, { matches: cached.matches, prepared: cached.prepared,
-        scope: { ...cached.scope, start: cached.scope.start + delta, end: cached.scope.end + delta },
+      if (cached?.scope && delta !== null) Object.assign(state, { prepared: cached.prepared,
+        scope: { start: cached.scope.start + delta, end: cached.scope.end + delta },
         preparedRanges: cached.preparedRanges === original ? retained : cached.preparedRanges?.map(item => migrated.has(item) ? migrated.get(item) : retain(item)).filter(Boolean)
       });
       else if (retained.length && retained.length === original.length

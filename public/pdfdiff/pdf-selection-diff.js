@@ -75,8 +75,9 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
       const at = k + score - 1;
       const replace = previous[at], remove = previous[at - 1], insert = previous[at + 1];
       let x = substitutions && replace >= 0 && replace < n && replace - k < m ? replace + 1 : -1, move = 0;
-      if (remove >= 0 && remove < n && remove + 1 > x) { x = remove + 1; move = 1; }
-      if (insert >= 0 && insert - k - 1 < m && insert > x) { x = insert; move = 2; }
+      // At equal cost, retain the insertion/deletion path and its exact character matches.
+      if (remove >= 0 && remove < n && remove + 1 >= x) { x = remove + 1; move = 1; }
+      if (insert >= 0 && insert - k - 1 < m && insert >= x) { x = insert; move = 2; }
       if (x < 0) continue;
       let y = x - k;
       while (x < n && y < m && equal(a[x], b[y])) { x++; y++; }

@@ -54,9 +54,8 @@
     getTargets() {
       const pdf = viewer?.pdfDocument, numbers = sourcePages();
       if (window.ReaderUI?.getSourceEditor && !currentEditor()) return [];
-      return [...new Set([...layers.values()].filter(page => page.pdf === pdf
-        && (!numbers || numbers.includes(Number(page.layer.closest('.page')?.dataset.pageNumber)))).concat(
-        review.locator.getDocumentIndex(pdf, numbers) || []))];
+      return [...layers.values()].filter(page => page.pdf === pdf
+        && (!numbers || numbers.includes(Number(page.layer.closest('.page')?.dataset.pageNumber))));
     },
     getVisiblePages: (numbers = sourcePages()) => visiblePages().filter(number => !numbers || numbers.includes(number)).map(number => ({ number, index: layerIndex(viewer.getPageView(number - 1)?.div) })),
     isCurrent: pdf => selectionHighlight && !stopped && viewer?.pdfDocument === pdf,
@@ -178,7 +177,7 @@
   }
   function currentPointer(pointer) {
     return pointer.pdf === viewer?.pdfDocument && pointer.editor === currentEditor() && pointer.model === pointer.editor.getModel()
-      && (pointer === reviewPointer || pointer.version === pointer.model.getVersionId?.());
+      && pointer.version === pointer.model.getVersionId?.();
   }
   function resetPdf() {
     defaultPointer = null;
@@ -264,8 +263,10 @@
       const entries = ranges.map(range => {
         const start = model.getOffsetAt(range.getStartPosition()), end = model.getOffsetAt(range.getEndPosition());
         const index = review.locator.index, a = window.PdfSelectionDiff.lowerBound(index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(index.starts, end);
-        return { index, start: a, end: b, marked, text: end > start ? index.raw.slice(a, b) : "",
-          before: index.raw.slice(Math.max(0, a - 160), a), after: index.raw.slice(b, b + 160) };
+        // HTML tags split decorations, but every fragment selects the complete difference.
+        const item = marked && (index.prepared?.differences || index.getDifferences()).items
+          .find(item => item.sourceStart <= a && item.sourceEnd >= b);
+        return index.entry(item?.sourceStart ?? a, item?.sourceEnd ?? b, marked);
       });
       select(entries, true);
 
@@ -373,7 +374,7 @@
     if (performance.now() - lastEdit < editIdleDelay) return;
     const editor = currentEditor();
     window.dispatchEvent(new CustomEvent('pdf-selection-sources', { detail: {
-      editor: editor || activeEditor, pdf: viewer?.pdfDocument, targets: review.locator.environment.getTargets(),
+      editor: editor || activeEditor, pdf: viewer?.pdfDocument,
       enabled: sourceDiffHighlight, diffEnabled: diffHighlight
     } }));
   }
@@ -491,6 +492,7 @@
       if (!layer || !range.intersectsNode(layer)) continue;
       if (scope && !scope.includes(Number(div.dataset.pageNumber))) return;
       const index = layerIndex(div);
+      if (!index) continue;
       let start = 0, end = index.raw.length;
       for (const part of index.parts) {
         if (range.startContainer === part.node) start = part.start + range.startOffset;
@@ -506,7 +508,7 @@
     const model = editor?.getModel();
     if (!model || !editor.setSelection) return;
     activeEditor = editor;
-    const index = review.locator.editorSourceIndex(editor.document), { hit, difference } = index.locateSource(chunks, viewer?.pdfDocument);
+    const index = review.locator.editorSourceIndex(editor.document), { hit, difference } = index.locateSource(chunks);
     select([]);
     for (const chunk of chunks) {
       const result = nativeBoxes(chunk.div, [], [{ range: { start: chunk.start, end: chunk.end }, difference }]);
@@ -541,7 +543,7 @@
     const cached = layers.get(div);
     if (cached?.layer === layer && cached.pdf === viewer?.pdfDocument && cached.width === div.clientWidth && cached.height === div.clientHeight && !clearLayer(div, cached.observer.takeRecords())) return cached;
     clearLayer(div);
-    const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT), parts = [];
+    const parts = [];
     const number = Number(div.dataset.pageNumber) || viewer?.currentPageNumber;
     const view = viewer?.getPageView(number - 1);
     const pdf = viewer?.pdfDocument;
@@ -551,31 +553,19 @@
       if (!document.getSelection()?.isCollapsed) selectFromPdf();
       else if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
-    const spanSet = new Set(fontAt.spans);
-    const measurement = document.createRange(), elementFonts = new Map(), nodes = [];
-    let raw = "", previous = null, previousElement = null, node;
-    while ((node = walker.nextNode())) {
-      // Keep OCR space spans; rendered glyph widths cannot reconstruct every word gap.
-      if (!node.textContent || !node.textContent.trim() && node.parentElement === layer) continue;
-      let element = node;
-      while (element !== layer && !spanSet.has(element)) element = element.parentNode;
-      if (element === layer) element = node.parentElement;
-      measurement.selectNodeContents(node);
-      const item = fontAt.items?.get(element);
-      const box = item ? { bottom: -review.textItemBaseline(item), height: item.height,
-        left: item.transform[4], right: item.transform[4] + item.width } : measurement.getBoundingClientRect();
-      nodes.push({ node, element, box });
-    }
-    for (const { node, element, box } of nodes.sort((a, b) =>
-      Math.round((a.box.bottom - b.box.bottom) / Math.max(a.box.height, b.box.height)) || a.box.left - b.box.left)) {
-      if (previous && element !== previousElement) {
-        const lineBreak = Math.abs(box.bottom - previous.bottom) > Math.max(box.height, previous.height) * 0.5;
-        if (lineBreak) raw += "\n";
-        else if (box.left - previous.right > Math.max(box.height, previous.height) * 0.08) raw += " ";
+    if (!fontAt.text || fontAt.items.size !== fontAt.text.parts.length) return null;
+    const { raw } = fontAt.text;
+    const spans = new Map([...fontAt.items].map(([span, item]) => [item, span]));
+    // The DOM supplies nodes and fonts; PDF text owns ordering, spaces and offsets.
+    for (const part of fontAt.text.parts) {
+      const span = spans.get(part.item), font = fontAt(span);
+      const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+      let start = part.start, node;
+      while ((node = walker.nextNode())) {
+        const end = start + node.textContent.length;
+        if (end > start) parts.push({ node, start, end, font });
+        start = end;
       }
-      if (!elementFonts.has(element)) elementFonts.set(element, fontAt?.(element));
-      parts.push({ node, start: raw.length, end: raw.length + node.textContent.length, font: elementFonts.get(element) });
-      raw += node.textContent; previous = box; previousElement = element;
     }
     const observer = new MutationObserver(records => {
       if (!clearLayer(div, records)) return;
@@ -592,7 +582,7 @@
     const documentIndex = review.locator.getDocumentIndex(pdf, scope);
     const visible = review.locator.environment.getVisiblePages?.() || [], pageIndexes = visible.map(page => page.index);
     for (const source of new Set(entries.map(entry => entry.index).filter(Boolean)))
-      source?.update(pageIndexes, pdf);
+      source.update(pageIndexes);
     entries = entries.flatMap(entry => {
       if (!visibleOnly && !entry.marked) return [entry];
       const connections = entry.index?.livePairs.filter(connection => pageIndexes.includes(connection.target) || connection.target === documentIndex);
@@ -724,8 +714,7 @@
       const anchor = box && { left: page.left + box.x * page.width, top: page.top + box.y * page.height,
         bottom: page.top + (box.y + box.h) * page.height };
       window.dispatchEvent(new CustomEvent('pdf-selection-difference', { detail: {
-        editor, model, pdf: viewer?.pdfDocument, notices, anchor, anchorElement: div, anchorBox: box, interactionId, side,
-        targets: review.locator.environment.getTargets()
+        editor, model, pdf: viewer?.pdfDocument, notices, anchor, anchorElement: div, anchorBox: box, interactionId, side
       } }));
     }, 0);
   }
