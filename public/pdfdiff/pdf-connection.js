@@ -118,8 +118,8 @@ class PdfConnections {
       expected: this.source.slice(segment.start, segment.end) }));
   }
   // Compare this snapshot; the caller selects the current editor index explicitly.
-  getDifferences() {
-    this.update();
+  getDifferences(pages = []) {
+    this.update(pages);
     const versions = this.prepared.fontVersions;
     if (!this.prepared.differences || !versions || this.formats !== versions[0] || this.prepared.pages.some((page, i) =>
       page.parts !== versions[1 + i * 3] || page.pages !== versions[2 + i * 3] || page.fontVersion !== versions[3 + i * 3])) {

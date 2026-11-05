@@ -28,18 +28,18 @@ try {
   assert.equal(await page.locator('#preview').isHidden(), true, 'no blank iframe covers the empty preview pane');
   await page.goto('http://127.0.0.1:41874/?file=a.html');
   await page.waitForFunction(() => window.mewWorkbench?.editor.getModel());
-  const editorScaleInput = page.locator('#editorScaleInput');
+  const editorScaleInput = page.locator('.float-panel[data-panel="tagBar"] [data-scale-input="editor"]');
   await editorScaleInput.fill('120'); await editorScaleInput.press('Enter');
   assert.equal(await page.evaluate(() => mewWorkbench.editor.getOption(monaco.editor.EditorOption.fontSize)), 16.8, 'editor zoom input changes Monaco font size');
   await page.locator('#monacoEditor').hover(); await page.keyboard.down('Control'); await page.mouse.wheel(0, -100); await page.keyboard.up('Control');
   assert.equal(await editorScaleInput.inputValue(), '130%', 'Ctrl+wheel over index editor changes editor zoom');
   await page.evaluate(() => mewWorkbench.editor.focus()); await page.keyboard.press('Control+-');
   assert.equal(await editorScaleInput.inputValue(), '120%', 'Ctrl+- changes index editor zoom');
-  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('mew-editor-layout-v1')).editorScale), 1.2, 'index editor zoom is persisted with layout');
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('mewMonacoTagPanel.v1')).editorScale), 1.2, 'index editor zoom is persisted with layout');
   await editorScaleInput.fill('100'); await editorScaleInput.press('Enter');
   assert.equal(await page.locator('#preview').isVisible(), true, 'opening a file displays the preview iframe');
   const value = () => page.evaluate(() => mewWorkbench.editor.getValue());
-  await page.waitForFunction(() => document.querySelector('#fileName').textContent === 'a.html');
+  await page.waitForFunction(() => document.querySelector('#tabs .tab.active .tabName').textContent === 'a.html');
   assert.deepEqual(await page.evaluate(() => ({
     language: mewWorkbench.editor.getModel().getLanguageId(),
     decorators: mewWorkbench.editor.getOption(monaco.editor.EditorOption.colorDecorators),
@@ -50,7 +50,7 @@ try {
   assert.equal(await page.locator('#monacoEditor .colorpicker-color-decoration').count(), 2, 'only style attribute and style block colors are decorated; href is ignored');
   for (const [file, language] of [['theme.css', 'css'], ['logic.js', 'javascript'], ['data.json', 'json'], ['README', 'plaintext']]) {
     await page.evaluate(file => mewWorkbench.openFile(file), file);
-    await page.waitForFunction(([file, language]) => document.querySelector('#fileName').textContent === file
+    await page.waitForFunction(([file, language]) => document.querySelector('#tabs .tab.active .tabName').textContent === file
       && mewWorkbench.editor.getModel().getLanguageId() === language, [file, language]);
   }
   assert.equal(await page.evaluate(() => mewWorkbench.editor.getOption(monaco.editor.EditorOption.colorDecorators)), false, 'plain text has no color decorators');
@@ -84,7 +84,7 @@ try {
   assert.doesNotMatch(await value(), /<b>/, 'undo survives switching');
   await page.keyboard.press('Control+y');
   await page.keyboard.press('Control+s');
-  await page.waitForFunction(() => document.querySelector('#fileName').textContent === 'a.html');
+  await page.waitForFunction(() => document.querySelector('#tabs .tab.active .tabName').textContent === 'a.html');
   assert.match(await readFile(path.join(fixture, 'a.html'), 'utf8'), /<b>Alpha<\/b>/);
   await page.evaluate(() => mewWorkbench.openFile('b.html'));
   await page.waitForFunction(() => mewWorkbench.editor.getModel()?.uri.path === '/b.html');

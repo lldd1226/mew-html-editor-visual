@@ -21,14 +21,14 @@ try {
   await combined.goto('http://127.0.0.1:41896/?volume=1&page=1&mode=source');
   await combined.waitForFunction(() => window.readerMonaco?.model?.getValue().includes('Page 1'));
   await combined.evaluate(async () => {
-    window.originalModel = readerMonaco.model;
+    window.originalModel = readerMonaco.editor.getModel();
     readerMonaco.editor.executeEdits('model-test', [{ range: originalModel.getFullModelRange(), text: originalModel.getValue() + '<p>Saved edit with undo history</p>' }]);
     await readerMonaco.save();
     await readerMonaco.reviewFiles().open(2);
   });
-  assert.equal(await combined.evaluate(() => readerMonaco.model !== originalModel && readerMonaco.model.getValue().includes('Page 2')), true);
+  assert.equal(await combined.evaluate(() => readerMonaco.editor.getModel() !== originalModel && readerMonaco.editor.getModel().getValue().includes('Page 2')), true);
   await combined.evaluate(() => readerMonaco.reviewFiles().open(1));
-  assert.equal(await combined.evaluate(() => readerMonaco.model === originalModel && originalModel.canUndo()), true);
+  assert.equal(await combined.evaluate(() => readerMonaco.editor.getModel() === originalModel && originalModel.canUndo()), true);
   await combined.close();
   const reader = await context.newPage();
   await reader.addInitScript(() => {

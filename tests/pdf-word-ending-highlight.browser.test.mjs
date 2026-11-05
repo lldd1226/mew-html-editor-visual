@@ -26,18 +26,19 @@ test('ME08-432 paints both missing word endings on first preparation without sel
     const result = await page.evaluate(async fixture => {
       await PdfSelectionDiff.ready;
       const locator = new PdfReviewProvider.PdfLocator({}, { document });
-      const index = locator.sourceIndex(fixture.source), target = new PdfSelectionDiff.PdfSourceIndex(locator, { raw: fixture.pdf });
-      index?.diff([target]);
+      const index = new window.PdfSelectionDiff.PdfConnections(locator, fixture.source), target = new PdfSelectionDiff.PdfConnections(locator, { raw: fixture.pdf });
+      index?.update([target]);
       const editor = monaco.editor.create(document.getElementById('editor'), { value: fixture.source, wordWrap: 'on' });
-      const marks = index.sourceDecorations(index.reviewCandidates(null, true, false, true, [], index.connectionPairs([target])), true, true, undefined, editor.getModel());
+      editor.document = new window.MewEditorCore.DocumentModel({ model: editor.getModel() });
+      const marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, editor.getModel());
       editor.createDecorationsCollection(marks); editor.render(true);
-      const candidates = index.reviewCandidates(null, false, true, true, [target]), endings = [];
+      const candidates = index.candidates(null, false, true, true, [target]), endings = [];
       for (const [word, letter] of [['sag', 't'], ['Stiebe', 'r']]) {
         const at = index.raw.indexOf('sag Stiebe') + (word === 'sag' ? 3 : 10);
         const candidate = candidates.find(c => c.sourceStart === at && c.sourceEnd === at && c.comparison.pdf === letter);
         const offset = index.starts[at];
         const mark = marks.find(m => editor.getModel().getOffsetAt({ lineNumber: m.range.startLineNumber, column: m.range.startColumn }) === offset && m.options.before);
-        const hit = index.connectedRange(target, at, at, false, undefined, true);
+        const hit = index.range(target, at, at, false, undefined, true);
         endings.push({ word, letter, candidate: !!candidate, marked: !!mark,
           collapsed: mark && mark.range.startColumn === mark.range.endColumn,
           mapped: hit && target.raw.slice(hit.start, hit.end),

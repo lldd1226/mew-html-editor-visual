@@ -19,16 +19,16 @@ try {
     await page.evaluate(() => {
       const editor = readerMonaco.editor, locator = PdfSelection.locator;
       window.samples = [];
-      for (const name of ['diff']) {
-        const original = PdfSelectionDiff.PdfSourceIndex.prototype[name];
-        PdfSelectionDiff.PdfSourceIndex.prototype[name] = function (...args) {
+      for (const name of ['prepare', 'remember', 'scope', 'candidates']) {
+        const original = PdfSelectionDiff.PdfConnections.prototype[name];
+        PdfSelectionDiff.PdfConnections.prototype[name] = function (...args) {
           const start = performance.now();
           try { return original.apply(this, args); }
           finally { samples.push([name, performance.now() - start]); }
         };
       }
-      const proto = PdfSelectionDiff.PdfSourceIndex.prototype;
-      for (const name of ['sourceDecorations', 'reviewCandidates', 'rememberConnection', 'sourcePageScope']) {
+      const proto = PdfSelectionDiff.PdfConnections.prototype;
+      for (const name of ['sourceDecorations']) {
         const original = proto[name];
         proto[name] = function (...args) {
           const start = performance.now();
@@ -43,20 +43,20 @@ try {
       editor.getModel().onDidChangeDecorations(() => { if (marks() !== initialMarks) markChanges++; });
     });
     const items = await page.evaluate(() => {
-      const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
-      return index.reviewCandidates(null, false, true, true, PdfSelection.locator.environment.getTargets()).slice(0, 5)
+      const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
+      return index.candidates(null, false, true, true, PdfSelection.locator.environment.getTargets()).slice(0, 5)
         .map(item => ({ start: item.sourceStart, end: item.sourceEnd, html: item.comparison.html }));
     });
     for (const item of items) {
       await page.evaluate(item => {
-        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
-        const range = window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[item.start] ?? index.source.length,
+        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
+        const range = editor.document.rangeAt(index.starts[item.start] ?? index.source.length,
           (item.end > item.start ? index.ends[(item.end) - 1] : index.starts[item.start]) ?? index.source.length);
         editor.revealRangeInCenter(range);
       }, item);
       const box = await page.evaluate(item => {
-        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
-        const range = window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[item.start] ?? index.source.length,
+        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
+        const range = editor.document.rangeAt(index.starts[item.start] ?? index.source.length,
           (item.end > item.start ? index.ends[(item.end) - 1] : index.starts[item.start]) ?? index.source.length);
         const at = editor.getScrolledVisiblePosition({ lineNumber: range.startLineNumber, column: range.startColumn }), rect = editor.getDomNode().getBoundingClientRect();
         return { x: rect.left + at.left + 1, y: rect.top + at.top + at.height / 2 };
@@ -75,11 +75,11 @@ try {
     assert.equal(result.costs.sourceDecorations, undefined, 'clicks reuse the prepared decorations');
     const drag = await page.evaluate(() => {
       const editor = readerMonaco.editor, locator = PdfSelection.locator;
-      const source = locator.editorSourceIndex(editor.getModel());
+      const source = locator.editorSourceIndex(editor.document);
       for (const target of locator.environment.getTargets().filter(target => target.layer)) {
         for (const part of target.parts) {
           const length = Math.min(16, part.node.length - 1);
-          if (length < 4 || !source.connectedRange(target, part.start + 1, part.start + length, true)) continue;
+          if (length < 4 || !source.range(target, part.start + 1, part.start + length, true)) continue;
           const range = document.createRange();
           range.setStart(part.node, 1); range.setEnd(part.node, length);
           const rect = range.getBoundingClientRect();

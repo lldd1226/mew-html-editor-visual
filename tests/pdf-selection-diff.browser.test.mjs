@@ -3,8 +3,48 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
 import { launchBrowser } from './support/browser.mjs';
-import { reviewFile, popupSource, diffSource, engineSource, highlightSource, providerSource, providerSource as runtimeProviderSource, fullReviewSource, fullProviderSource, source, readerMenu, engine } from './support/pdf-harness.mjs';
+import { coreSource, reviewFile, popupSource, diffSource, engineSource, highlightSource, providerSource, providerSource as runtimeProviderSource, fullReviewSource, fullProviderSource, source, readerMenu, engine } from './support/pdf-harness.mjs';
 const PdfReviewProvider = engine();
+
+test('mapped first and last PDF words show edge carets and anchor at the same edge', async () => {
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div id="layer" style="font:20px monospace"><span>same </span><span>text</span></div>');
+    await page.addScriptTag({ content: engineSource + '\n' + highlightSource });
+    const results = await page.evaluate(() => {
+      const layer = document.getElementById('layer'), nodes = [...layer.children].map(span => span.firstChild);
+      let target;
+      const locator = new PdfReviewProvider.PdfLocator({}, { document, getVisiblePages: () => [{ index: target }] });
+      target = new PdfSelectionDiff.PdfConnections(locator, { raw: 'same text', layer,
+        parts: [{ node: nodes[0], start: 0, end: 5 }, { node: nodes[1], start: 5, end: 9 }] });
+      const highlights = ReviewHighlights.create({ document });
+      return ['extra same text', 'same text extra'].map(html => {
+        const index = new window.PdfSelectionDiff.PdfConnections(locator, html);
+        index.byTarget.set(target, [{ start: 0, end: html.length, targetStart: 0, targetEnd: 9 }]);
+        const item = index.candidates(null, false, true, true, [target]).find(item => item.missing);
+        const hit = index.missingRange(target, item.sourceStart, item.sourceEnd);
+        item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
+        const anchor = locator.reviewAnchor(item, index);
+        const div = { clientLeft: 0, clientTop: 0, clientWidth: 100, clientHeight: 100,
+          offsetWidth: 100, offsetHeight: 100, getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+        const measured = highlights.measureHighlights(div, target, [hit], hit);
+        const edge = document.createRange(), node = html.startsWith('extra') ? nodes[0] : nodes[1];
+        edge.setStart(node, html.startsWith('extra') ? 0 : node.length); edge.collapse(true);
+        return { collapsed: hit.start === hit.end, boxes: measured.boxes,
+          anchorLeft: anchor.left, expectedLeft: edge.getBoundingClientRect().left };
+      });
+    });
+    for (const result of results) {
+      assert.equal(result.collapsed, true);
+      assert.equal(result.boxes.length, 1);
+      assert.equal(result.boxes[0].caret, true);
+      assert.equal(result.boxes[0].w, .04, 'only a four-pixel caret is highlighted');
+      assert.ok(Math.abs(result.anchorLeft - result.expectedLeft) < 1, 'popup anchor follows the word edge');
+      assert.ok(Math.abs(result.boxes[0].x * 100 + 2 - result.expectedLeft) < 1);
+    }
+  } finally { await browser.close(); }
+});
 
 test('ME08-350 ready page highlights survive a raw diff dominated by OCR whitespace', async () => {
   const fixture = JSON.parse(await readFile(new URL('./fixtures/pdf-selection-me08-350.json', import.meta.url), 'utf8'));
@@ -28,18 +68,19 @@ test('ME08-350 ready page highlights survive a raw diff dominated by OCR whitesp
       if (!await PdfSelectionDiff.ready) throw new Error('Monaco diff must load');
       const locator = new PdfReviewProvider.PdfLocator({}, { document });
       locator.indexDocument = () => { throw new Error('ready-page highlighting must not index the volume'); };
-      const index = locator.sourceIndex(fixture.source), target = new PdfSelectionDiff.PdfSourceIndex(locator, { raw: fixture.pdf });
-      index?.diff([target]);
-      const connection = index.connections.get(target)[0], diff = index.connectionDiff(target, connection);
+      const index = new window.PdfSelectionDiff.PdfConnections(locator, fixture.source), target = new PdfSelectionDiff.PdfConnections(locator, { raw: fixture.pdf });
+      index?.update([target]);
+      const connection = index.byTarget.get(target)[0], diff = index.compare(target, connection);
       if (!diff) throw new Error('OCR whitespace discarded the confirmed page diff');
       const editor = monaco.editor.create(document.getElementById('editor'), { value: fixture.source });
-      const items = index.reviewCandidates(null, false, true, true, [target]), marks = index.sourceDecorations(index.reviewCandidates(null, true, false, true, [], index.connectionPairs([target])), true, true, undefined, editor.getModel());
+      editor.document = new window.MewEditorCore.DocumentModel({ model: editor.getModel() });
+      const items = index.candidates(null, false, true, true, [target]), marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, editor.getModel());
       const collection = editor.createDecorationsCollection(marks); editor.render(true);
       const corrected = PdfSelectionDiff.applyTextEdits(fixture.source, items.flatMap(item => item.options[0].edits));
       // An unresolved whole-passage fallback must still be rejected.
       const broad = { ...connection, editorDiff: { distance: 129,
         parts: [{ html: index.raw, pdf: fixture.pdf, changed: true }] } };
-      const rejected = index.connectionDiff(target, broad) === null;
+      const rejected = index.compare(target, broad) === null;
       const result = { rawDistance: diff.distance, comparisons: items.map(item => item.comparison),
         marks: marks.length, applied: collection.length, corrected, rejected };
       editor.dispose(); return result;
@@ -73,6 +114,7 @@ test('Monaco selection matches share PDF review pointers, popup navigation and o
     await page.evaluate(() => {
       localStorage.setItem('mew.pdf-review.font-enabled', 'false');
       window.editor = monaco.editor.create(document.getElementById('editor'));
+      window.editor.document = new window.MewEditorCore.DocumentModel({ model: window.editor.getModel() });
       window.pdf = {};
       window.locator = new PdfReviewProvider.PdfLocator({}, { document });
       locator.reviewAnchor = () => ({ left: 720, top: 100, bottom: 120 });
@@ -90,7 +132,7 @@ test('Monaco selection matches share PDF review pointers, popup navigation and o
         const capital = text => text[0].toUpperCase() + text.slice(1);
         const source = `<p title="${html.replaceAll('"', '&quot;')}">First ${screenshot ? capital(html) : html} here.</p>\n<p>Second ${html}${screenshot ? 'äre' : ''} elsewhere.</p>\n<p>Third ${html} correct.</p>\n<p>Fourth ${html} other fault.</p>\n<p>Fifth ${html}${screenshot ? 'ären' : ''}!</p>`;
         const model = editor.getModel(); model.setValue(source);
-        const index = locator.editorSourceIndex(model), query = locator.sourceIndex(html).raw;
+        const index = locator.editorSourceIndex(editor.document), query = new window.PdfSelectionDiff.PdfConnections(locator, html).raw;
         const starts = [...index.raw.matchAll(new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'))].map(match => match.index);
         let raw = '', offset = 0;
         for (const [at, start] of starts.entries()) {
@@ -98,11 +140,11 @@ test('Monaco selection matches share PDF review pointers, popup navigation and o
           offset = start + query.length;
         }
         raw += index.raw.slice(offset);
-        const target = new PdfSelectionDiff.PdfSourceIndex(locator, { raw });
-        index.rememberConnection(0, index.raw.length, target, { start: 0, end: raw.length });
+        const target = new PdfSelectionDiff.PdfConnections(locator, { raw });
+        index.remember(0, index.raw.length, target, { start: 0, end: raw.length });
         const start = starts[1], end = start + query.length;
         const notice = { html: query, pdf: replacement, source: { index, start, end }, target: { index: target } };
-        editor.setSelection(window.PdfSelectionDiff.rangeAt(model, index.starts[start] ?? index.source.length,
+        editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length));
         window.dispatchEvent(new CustomEvent('pdf-selection-difference', { detail: {
           editor, model, pdf, notices: [notice], targets: [target], interactionId: start
@@ -141,11 +183,11 @@ test('Monaco selection matches share PDF review pointers, popup navigation and o
         ReplacementReview.close();
         const source = `<p>${letter}elcher ${letter}eit ${letter}aren ${letter}ollte ${letter}eit</p>`;
         const model = editor.getModel(); model.setValue(source);
-        const index = locator.editorSourceIndex(model);
-        const target = new PdfSelectionDiff.PdfSourceIndex(locator, { raw: index.raw.replaceAll(letter, 'W') });
-        index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+        const index = locator.editorSourceIndex(editor.document);
+        const target = new PdfSelectionDiff.PdfConnections(locator, { raw: index.raw.replaceAll(letter, 'W') });
+        index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
         const start = index.raw.indexOf(letter, letter.length), end = start + letter.length;
-        editor.setSelection(window.PdfSelectionDiff.rangeAt(model, index.starts[start] ?? index.source.length,
+        editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length));
         let searches = 0;
         const findMatches = model.findMatches;
@@ -195,9 +237,9 @@ test('Monaco selection matches share PDF review pointers, popup navigation and o
     });
     await page.waitForSelector('.mew-ocr-diff-text');
     await page.evaluate(() => {
-      const locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.getModel());
+      const locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.document);
       const target = locator.environment.getTargets().find(target => target.layer);
-      index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+      index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
       PdfSelection.setDiffHighlight(true, 'source');
     });
     assert.equal(await page.locator('#patternPdf .mew-pdf-review-pointer').count(), 0, 'default PDF highlights are off');
@@ -266,16 +308,16 @@ test('review popup navigates immediately without full model reads and coalesces 
       const node = document.getElementById('pdf'), rect = node.getBoundingClientRect.bind(node);
       window.modelReads = 0; window.layoutReads = 0;
       node.getBoundingClientRect = () => { layoutReads++; return rect(); };
-      const model = { getValue: () => { modelReads++; return value; }, getVersionId: () => version,
-        getOffsetAt: position => position.column - 1 };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => { modelReads++; return value; }, getVersionId: () => version,
+        getOffsetAt: position => position.column - 1 } }), model = documentModel.model;
       const subscriptions = new Map();
       const listen = name => callback => { subscriptions.set(name, callback); return { dispose: () => subscriptions.delete(name) }; };
-      window.testEditor = { getDomNode: () => node, getModel: () => model, getSelection: () => selection,
+      window.testEditor = { getDomNode: () => node, document: documentModel, getModel: () => model, getSelection: () => selection,
         setSelection: range => { selection = range; }, revealRangeInCenterIfOutsideViewport() {}, focus() {},
         onDidChangeModel: listen('model'), onDidChangeModelContent: listen('content'), onDidScrollChange: listen('scroll') };
       window.readerMonaco = { editor: testEditor };
       window.burstScroll = () => { for (let i = 0; i < 40; i++) subscriptions.get('scroll')?.(); };
-      window.editSource = () => { value += '!'; version++; subscriptions.get('content')?.({ changes: [{ rangeOffset: 10, rangeLength: 0, text: '!' }] }); };
+      window.editSource = () => { value += '!'; version++; documentModel.update(documentModel.content); subscriptions.get('content')?.({ changes: [{ rangeOffset: 10, rangeLength: 0, text: '!' }] }); };
     });
     await page.addScriptTag({ content: fullProviderSource });
     await page.evaluate(async () => {
@@ -343,9 +385,9 @@ test('native selections suppress page-uniform styles without checking other page
       const viewer = { pdfDocument: { numPages: 2, getPage: async n => pages[n - 1] }, viewer: div.parentElement,
         container: document.getElementById('stage'), currentPageNumber: 1, getPageView: () => ({ div, pdfPage: pages[0] }),
         _getVisiblePages: () => ({ views: [{ id: 1 }] }), eventBus: { on() {}, off() {} } };
-      const model = { getValue: () => '<p>Uniform text</p>', getVersionId: () => 1, getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => '<p>Uniform text</p>', getVersionId: () => 1, getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
       PdfSelection.attachViewer(viewer);
-      PdfSelection.attachEditor({ getModel: () => model, getDomNode: () => document.body, setSelection() {},
+      PdfSelection.attachEditor({ document: documentModel, getModel: () => model, getDomNode: () => document.body, setSelection() {},
         hasTextFocus: () => false, onDidChangeCursorSelection: () => ({ dispose() {} }), getSelection: () => null });
       window.selectUniform = () => {
         const range = document.createRange(); range.selectNodeContents(div.querySelector('span'));
@@ -408,18 +450,18 @@ test('PDF.js detects four actual PDF faces in file review and native selections'
       new Function(providerSource)();
       const html = '<p>' + words.join('\n') + '</p>';
       let liveHtml = html, version = 1;
-      const model = { getValue: () => liveHtml, getVersionId: () => version, getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => liveHtml, getVersionId: () => version, getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
       const context = { model, source: html, signal: new AbortController().signal };
       const items = (await providers.get('pdf-font').locator.reviewItems(context)).items;
       const content = providers.get('pdf-font').content({ context, model: context.model, items, choices: new Map(items.map(item => [item.id, item.options[0].id])) }, items[0]);
-      liveHtml = '<p>Regular\n<i>Italic</i>\n<b>Bold</b>\n<b><i>Both</i></b></p>'; version++;
+      liveHtml = '<p>Regular\n<i>Italic</i>\n<b>Bold</b>\n<b><i>Both</i></b></p>'; version++; documentModel.update(documentModel.content);
       const correct = (await providers.get('pdf-font').locator.reviewItems({ ...context, source: liveHtml })).items;
-      liveHtml = '<p>Regular\n<i>Italic</i>\n<b>Bold</b>\n<b>Both</b></p>'; version++;
+      liveHtml = '<p>Regular\n<i>Italic</i>\n<b>Bold</b>\n<b>Both</b></p>'; version++; documentModel.update(documentModel.content);
       const partial = (await providers.get('pdf-font').locator.reviewItems({ ...context, source: liveHtml })).items;
-      liveHtml = html; version++;
+      liveHtml = html; version++; documentModel.update(documentModel.content);
       new Function(highlightSource)();
       for (let i = 0; i < 100 && !window.PdfSelection; i++) await new Promise(resolve => setTimeout(resolve, 10));
-      const editor = { getModel: () => model, getDomNode: () => document.body, setSelection() {}, hasTextFocus: () => false, onDidChangeCursorSelection: () => ({ dispose() {} }),
+      const editor = { document: documentModel, getModel: () => model, getDomNode: () => document.body, setSelection() {}, hasTextFocus: () => false, onDidChangeCursorSelection: () => ({ dispose() {} }),
         createDecorationsCollection: () => ({ clear() {}, set(marks) { fontMarks = marks; } }), getSelection: () => null };
       PdfSelection.attachViewer(viewer); PdfSelection.attachEditor(editor);
       const notice = new Promise(resolve => window.addEventListener('pdf-selection-difference', event => resolve(event.detail.notices[0]), { once: true }));
@@ -475,23 +517,23 @@ test('format notices suppress matching and unknown styles and stay compact over 
     await page.addScriptTag({ content: engineSource });
     await page.evaluate(async () => {
       let sourceValue = '<p>Word</p>', sourceVersion = 1;
-      const model = { getValue: () => sourceValue, getVersionId: () => sourceVersion, getPositionAt: n => ({ lineNumber: 1, column: n + 1 }), getOffsetAt: p => p.column - 1 };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => sourceValue, getVersionId: () => sourceVersion, getPositionAt: n => ({ lineNumber: 1, column: n + 1 }), getOffsetAt: p => p.column - 1 } }), model = documentModel.model;
       const subscription = () => ({ dispose() {} });
-      const editor = { getModel: () => model, getDomNode: () => document.getElementById('editor'), getSelection: () => window.selectedRange || null,
+      const editor = { document: documentModel, getModel: () => model, getDomNode: () => document.getElementById('editor'), getSelection: () => window.selectedRange || null,
         getOption: () => false, getTargetAtClientPoint: () => null, setSelection(range) { if (window.passageSelection) window.selectedRange = range; }, revealRangeInCenterIfOutsideViewport() {}, focus() {},
         executeEdits(origin, edits) {
           for (const edit of edits.slice().reverse()) {
             const start = model.getOffsetAt({ column: edit.range.startColumn }), end = model.getOffsetAt({ column: edit.range.endColumn });
             sourceValue = sourceValue.slice(0, start) + edit.text + sourceValue.slice(end);
           }
-          sourceVersion++; return true;
+          sourceVersion++; documentModel.update(documentModel.content); return true;
         },
         onDidChangeModel: subscription, onDidChangeModelContent: subscription, onDidScrollChange: subscription };
       const pdf = {};
       window.readerMonaco = { editor };
       window.ReaderUI = { getPdfViewer: () => ({ pdfDocument: pdf, container: document.getElementById('pdf') }) };
       let visibleTarget;
-      const locator = new PdfReviewProvider.PdfLocator({}, { getVisiblePages: () => [{ index: visibleTarget }] }), index = locator.editorSourceIndex(model);
+      const locator = new PdfReviewProvider.PdfLocator({}, { getVisiblePages: () => [{ index: visibleTarget }] }), index = locator.editorSourceIndex(documentModel);
       window.PdfSelection = { locator, showReviewPointer() {}, clearReviewPointer() {} };
       const renderTarget = target => {
         target.normalized = window.PdfSelectionDiff.normalized(target.raw);
@@ -503,14 +545,14 @@ test('format notices suppress matching and unknown styles and stay compact over 
         }
         visibleTarget = target;
       };
-      const target = new PdfSelectionDiff.PdfSourceIndex(new PdfReviewProvider.PdfLocator(), { raw: index.raw, parts: [{ start: 0, end: index.raw.length, font: { bold: false, italic: false } }] });
-      index.rememberConnection(0, index.raw.length, target, { start: 0, end: index.raw.length });
+      const target = new PdfSelectionDiff.PdfConnections(new PdfReviewProvider.PdfLocator(), { raw: index.raw, parts: [{ start: 0, end: index.raw.length, font: { bold: false, italic: false } }] });
+      index.remember(0, index.raw.length, target, { start: 0, end: index.raw.length });
       window.addEventListener('pdf-selection-difference', event => { window.lastReviewNotice = event.detail; });
       window.sendNotice = (bold, italic, unmapped = false, textMismatch = false) => {
         target.raw = textMismatch ? index.raw.replace('Word', 'WxrX') : index.raw;
         renderTarget(target);
-        index.connections.delete(target);
-        index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+        index.byTarget.delete(target);
+        index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
         target.parts[0].font = { bold, italic };
         window.dispatchEvent(new CustomEvent('pdf-selection-difference', { detail: {
           editor, model, pdf, interactionId: Math.random(), targets: [target], anchor: { left: 0, top: 500, bottom: 520 },
@@ -518,16 +560,16 @@ test('format notices suppress matching and unknown styles and stay compact over 
         } }));
       };
       window.selectFormatPassage = (normal = false, mismatch = false) => {
-        sourceValue = normal ? '<p><i>Vorträge <a href="/keep">über</a> die Grundlagen</i></p>' : '<p>„Nur die Arbeit</p>'; sourceVersion++;
-        const index = locator.editorSourceIndex(model);
-        const target = new PdfSelectionDiff.PdfSourceIndex(new PdfReviewProvider.PdfLocator(), { raw: mismatch ? index.raw.replace('Vorträge', 'Vortrage') : index.raw, parts: normal
+        sourceValue = normal ? '<p><i>Vorträge <a href="/keep">über</a> die Grundlagen</i></p>' : '<p>„Nur die Arbeit</p>'; sourceVersion++; documentModel.update(documentModel.content);
+        const index = locator.editorSourceIndex(documentModel);
+        const target = new PdfSelectionDiff.PdfConnections(new PdfReviewProvider.PdfLocator(), { raw: mismatch ? index.raw.replace('Vorträge', 'Vortrage') : index.raw, parts: normal
           ? [{ start: 0, end: index.raw.length, font: { bold: false, italic: false } }] : [
           { start: 0, end: 4, font: { bold: false, italic: true } },
           { start: 4, end: index.raw.length, font: { bold: false, italic: false } }
         ] });
-        index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+        index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
         renderTarget(target);
-        window.passageSelection = window.selectedRange = Object.assign(PdfSelectionDiff.rangeAt(model, 4, 18),
+        window.passageSelection = window.selectedRange = Object.assign(editor.document.rangeAt(4, 18),
           { selectionStartColumn: 19, positionColumn: 5, isEmpty: () => false });
         window.dispatchEvent(new CustomEvent('pdf-selection-difference', { detail: {
           editor, model, pdf, interactionId: Math.random(), targets: [target],
@@ -635,10 +677,11 @@ test('Monaco standalone renders native character and insertion decorations', asy
     await page.evaluate(async () => {
       await PdfReviewReady;
       window.editor = monaco.editor.create(document.getElementById('editor'), { value: 'first\naX&𠀀Z', wordWrap: 'on' });
+      window.editor.document = new window.MewEditorCore.DocumentModel({ model: window.editor.getModel() });
       const model = editor.getModel(), raw = model.getValue();
-      const index = new PdfSelectionDiff.PdfSourceIndex(new PdfReviewProvider.PdfLocator(),
+      const index = new PdfSelectionDiff.PdfConnections(new PdfReviewProvider.PdfLocator(),
         { raw, model, starts: [...Array(raw.length).keys()], ends: Array.from({ length: raw.length }, (_, i) => i + 1) });
-      window.marks = editor.createDecorationsCollection(index.sourceDecorations(index.reviewCandidates(null, true, false, true, [],
+      window.marks = editor.createDecorationsCollection(window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [],
         [[{ start: 0, end: raw.length, targetStart: 0, targetEnd: raw.length + 1 }, { raw: 'first\naY!𠀀Z+' }]])));
     });
     assert.equal(await page.locator('.mew-ocr-diff-line').count(), 0, 'native decorations omit unused gutter marks');
@@ -712,8 +755,7 @@ test('Monaco standalone renders native character and insertion decorations', asy
     await page.waitForFunction(() => window.lastNotice);
     await page.evaluate(() => {
       const { editor, model, notices } = lastNotice, notice = notices[0], source = notice.source;
-      PdfSelectionDiff.applyEdits(editor, model, model.getVersionId(), model.getValue(),
-        source.index.textEdits(source.start, source.end, notice.pdf));
+      editor.document.applyEdits(source.index.textEdits(source.start, source.end, notice.pdf), { editor: editor });
     });
     assert.equal(await page.evaluate(() => editor.getValue()), '<p>' + await page.evaluate(() => passage.replace('an X', 'an Y')) + '</p>');
     await page.waitForFunction(() => !window.lastNotice);
@@ -739,8 +781,7 @@ test('Monaco standalone renders native character and insertion decorations', asy
     assert.equal(await page.evaluate(() => lastNotice.notices[0].html || lastNotice.notices[0].pdf), 'X');
     await page.evaluate(() => {
       const { editor, model, notices } = lastNotice, notice = notices[0], source = notice.source;
-      PdfSelectionDiff.applyEdits(editor, model, model.getVersionId(), model.getValue(),
-        source.index.textEdits(source.start, source.end, notice.pdf));
+      editor.document.applyEdits(source.index.textEdits(source.start, source.end, notice.pdf), { editor: editor });
     });
     assert.ok((await page.evaluate(() => editor.getValue())).includes('an <b></b>'), 'deletion preserves HTML wrappers');
     await page.evaluate(() => editor.trigger('test', 'undo'));
@@ -772,8 +813,7 @@ test('Monaco standalone renders native character and insertion decorations', asy
     assert.equal(await page.evaluate(() => lastNotice.notices[0].html || lastNotice.notices[0].pdf), 'a');
     await page.evaluate(() => {
       const { editor, model, notices } = lastNotice, notice = notices[0], source = notice.source;
-      PdfSelectionDiff.applyEdits(editor, model, model.getVersionId(), model.getValue(),
-        source.index.textEdits(source.start, source.end, notice.pdf));
+      editor.document.applyEdits(source.index.textEdits(source.start, source.end, notice.pdf), { editor: editor });
     });
     assert.equal(await page.evaluate(() => editor.getValue()), '<p>' + await page.evaluate(() => passage) + '</p>', 'missing PDF character is inserted');
     await page.evaluate(() => editor.trigger('test', 'undo'));
@@ -810,8 +850,7 @@ test('Monaco standalone renders native character and insertion decorations', asy
     await page.waitForFunction(() => window.lastNotice);
     await page.evaluate(() => {
       const { editor, model, notices } = lastNotice, notice = notices[0], source = notice.source;
-      PdfSelectionDiff.applyEdits(editor, model, model.getVersionId(), model.getValue(),
-        source.index.textEdits(source.start, source.end, notice.pdf));
+      editor.document.applyEdits(source.index.textEdits(source.start, source.end, notice.pdf), { editor: editor });
     });
     assert.equal(await page.evaluate(() => editor.getValue()), '<p>' + await page.evaluate(() => passage.replace('an X', 'an "')) + '</p>', 'quote correction replaces the complete HTML entity');
     const fixture = JSON.parse(await readFile(new URL('./fixtures/pdf-selection-me04.json', import.meta.url), 'utf8'));
@@ -837,8 +876,7 @@ test('Monaco standalone renders native character and insertion decorations', asy
       'the rendered page popup excludes matching prose and the footnote');
     await page.evaluate(() => {
       const { editor, model, notices } = lastNotice, notice = notices[0], source = notice.source;
-      PdfSelectionDiff.applyEdits(editor, model, model.getVersionId(), model.getValue(),
-        source.index.textEdits(source.start, source.end, notice.pdf));
+      editor.document.applyEdits(source.index.textEdits(source.start, source.end, notice.pdf), { editor: editor });
     });
     assert.equal(await page.evaluate(() => editor.getValue()), fixture.html.replace('entwickeln.“', 'entwickeln."'),
       'only the closing quote changes; paragraphs, formatting and footnote remain intact');
@@ -881,7 +919,8 @@ test('provider loads font/text and popup scripts before selection consumes its m
       if (path === '/pdfdiff/pdf-review-provider.js') return route.fulfill({ contentType: 'text/javascript', body: reviewFile });
       if (path === '/pdfdiff/replacement-review.js') return route.fulfill({ contentType: 'text/javascript', body: popupSource });
       if (path === '/') return route.fulfill({ contentType: 'text/html', body: '<!doctype html>' });
-      if (path === '/pdfdiff/pdf-selection-diff.js') return route.fulfill({ contentType: 'text/javascript', body: diffSource });
+      if (path === '/editor-core.js') return route.fulfill({ contentType: 'text/javascript', body: coreSource });
+      if (path === '/pdfdiff/pdf-connection.js') return route.fulfill({ contentType: 'text/javascript', body: diffSource });
       return route.abort();
     });
     await page.goto('http://fallback.test/');
@@ -912,8 +951,9 @@ test('provider loads font/text and popup scripts before selection consumes its m
     });
     assert.equal(extracted.raw, 'Original OCR\n');
     assert.equal(extracted.readerLoaded, false);
+    assert.ok(requests.includes('/editor-core.js'));
     assert.deepEqual(requests.filter(path => path.startsWith('/pdfdiff/')), [
-      '/pdfdiff/pdf-review-provider.js', '/pdfdiff/pdf-selection-diff.js',
+      '/pdfdiff/pdf-review-provider.js', '/pdfdiff/pdf-connection.js',
       '/pdfdiff/replacement-review.js'
     ]);
     assert.equal(await page.locator('.replacement-review').count(), 1);

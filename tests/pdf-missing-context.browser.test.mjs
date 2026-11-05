@@ -31,6 +31,7 @@ test('real ME08 corrupted OCR uses normal text additions, warnings and no missin
     }));
     await page.evaluate(() => {
       window.testEditor = monaco.editor.create(document.getElementById('editor'), { value: '', wordWrap: 'on' });
+      window.testEditor.document = new window.MewEditorCore.DocumentModel({ model: window.testEditor.getModel() });
       window.mewWorkbench = { editor: testEditor };
       const div = document.querySelector('.page');
       window.mockViewer = { container: document.getElementById('pdf'), viewer: document.querySelector('.pdfViewer'), currentPageNumber: 1,
@@ -65,15 +66,15 @@ test('real ME08 corrupted OCR uses normal text additions, warnings and no missin
         PdfSelection.attachViewer(mockViewer); PdfSelection.attachEditor(testEditor); PdfSelection.refresh();
       }, fixture);
       await page.waitForFunction(() => {
-        const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.getModel());
+        const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
         const target = locator.getDocumentIndex(mockViewer.pdfDocument, [mockViewer.currentPageNumber]);
-        return target && index.pageScopes.get(target)?.prepared
-          && (!index.reviewCandidates(null, false, true, true, locator.environment.getTargets()).some(item => item.missing)
+        return target && index.scopes.get(target)?.prepared
+          && (!index.candidates(null, false, true, true, locator.environment.getTargets()).some(item => item.missing)
             || testEditor.getModel().getAllDecorations().some(mark => mark.options.inlineClassName === 'mew-ocr-diff-text' && !mark.options.before));
       }, null, { timeout: 5000 });
       const gaps = await page.evaluate(() => {
-        const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.getModel());
-        return index.reviewCandidates(null, false, true, true, locator.environment.getTargets()).filter(item => item.missing)
+        const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
+        return index.candidates(null, false, true, true, locator.environment.getTargets()).filter(item => item.missing)
           .map(item => [item.sourceStart, item.sourceEnd]);
       });
       if (!gaps.length) continue;
@@ -81,8 +82,8 @@ test('real ME08 corrupted OCR uses normal text additions, warnings and no missin
         const selectedText = await page.evaluate(([start, end]) => {
           ReplacementReview.close();
           window.selectedNotices = [];
-          const index = PdfSelection.locator.editorSourceIndex(testEditor.getModel());
-          testEditor.setSelection(window.PdfSelectionDiff.rangeAt(testEditor.getModel(), index.starts[start + 1] ?? index.source.length,
+          const index = PdfSelection.locator.editorSourceIndex(testEditor.document);
+          testEditor.setSelection(testEditor.document.rangeAt(index.starts[start + 1] ?? index.source.length,
             (end - 1 > start + 1 ? index.ends[(end - 1) - 1] : index.starts[start + 1]) ?? index.source.length));
           return index.raw.slice(start + 1, end - 1);
         }, [start, end]);
@@ -137,15 +138,15 @@ test('real ME08 corrupted OCR uses normal text additions, warnings and no missin
     await page.getByLabel('启用PDF 文字差异审阅', { exact: true }).check();
     // Click inside the actual HTML addition, rather than either boundary.
     await page.evaluate(() => {
-      const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.getModel());
-      const item = index.reviewCandidates(null, false, true, true, locator.environment.getTargets()).find(item => item.missing);
+      const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
+      const item = index.candidates(null, false, true, true, locator.environment.getTargets()).find(item => item.missing);
       window.addition = item;
     });
     const addition = await page.evaluate(() => window.addition && [addition.sourceStart, addition.sourceEnd]);
     assert.ok(addition, 'the final fixture has a missing-OCR addition to click');
     if (addition) {
       const point = await page.evaluate(([start, end]) => {
-        const index = PdfSelection.locator.editorSourceIndex(testEditor.getModel());
+        const index = PdfSelection.locator.editorSourceIndex(testEditor.document);
         const position = testEditor.getModel().getPositionAt(index.starts[Math.floor((start + end) / 2)]);
         testEditor.revealPositionInCenter(position);
         const at = testEditor.getScrolledVisiblePosition(position), rect = testEditor.getDomNode().getBoundingClientRect();

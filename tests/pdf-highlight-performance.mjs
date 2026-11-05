@@ -1,3 +1,4 @@
+import { PdfConnections as FixtureConnections } from './support/pdf-harness.mjs';
 // Manual real-page benchmark: node tests/pdf-highlight-performance.mjs [--cold] [--baseline=path] [--report=path]
 // HTML snapshots: MEW_BRIEF; PDF text: original mew_band08/23.pdf, PyMuPDF sorted extraction.
 // Default: PDF text indexing/model loading precede timing. --cold includes fresh editor/model/PDF text indices.
@@ -12,7 +13,7 @@ const fixtures = JSON.parse(await readFile(new URL('./fixtures/pdf-highlight-per
 const stress = { ...fixtures.find(f => f.name === 'ME23-316'), name: 'ME23-316 + 220 controlled substitutions' };
 // Generate stress input outside every browser realm so it cannot warm the measured code.
 const locator = new (engine().PdfLocator)({}, { document: { createElement: () => ({}) } });
-const index = locator.sourceIndex(stress.html), chars = stress.html.split('');
+const index = new FixtureConnections(locator, stress.html), chars = stress.html.split('');
 let changed = 0;
 for (let at = 25; at < index.raw.length && changed < 220; at += 50) {
   while (at < index.raw.length && !/[a-zA-Z]/.test(index.raw[at])) at++;
@@ -49,6 +50,7 @@ try {
       const rows = [], editor = monaco.editor.create(document.getElementById('editor'), {
         value: '', language: 'html', minimap: { enabled: false }, automaticLayout: false
       });
+      editor.document = new window.MewEditorCore.DocumentModel({ model: editor.getModel() });
       const highlights = ReviewHighlights.create({ document });
       const create = editor.createDecorationsCollection.bind(editor);
       let collection;
@@ -61,21 +63,21 @@ try {
       };
       for (const f of fixtures) {
         const locator = new PdfReviewProvider.PdfLocator({}, { document });
-        const targets = f.pages.map(p => new PdfSelectionDiff.PdfSourceIndex(locator, { raw: p.raw }));
+        const targets = f.pages.map(p => new PdfSelectionDiff.PdfConnections(locator, { raw: p.raw }));
         editor.setValue(f.html); if (!cold) editor.render(true);
         const times = [], renderTimes = [];
         let marks, candidates;
         for (let round = 0; round < 31; round++) {
-          const start = cold && !round ? opened : performance.now(), index = locator.sourceIndex(f.html);
-          index?.diff(targets, {});
+          const start = cold && !round ? opened : performance.now(), index = new window.PdfSelectionDiff.PdfConnections(locator, f.html);
+          index?.update(targets, {});
           const prepared = performance.now();
-          highlights.updateSource(editor, [index], () => marks = index.sourceDecorations(index.reviewCandidates(null, true, false, true, [], index.connectionPairs(targets)), true, true, undefined, editor.getModel()),
+          highlights.updateSource(editor, [index], () => marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, editor.getModel()),
             '.mew-ocr-diff-text{background:rgba(255,166,40,.3);border-bottom:1px solid #d58b24}.mew-ocr-diff-line{border-left:3px solid #d58b24}.mew-ocr-diff-insert{border-left:2px solid #d58b24}');
           editor.render(true);
           const end = performance.now();
           times.push(end-start); renderTimes.push(end-prepared);
           if (collection.length !== marks.length) throw new Error('Not all decorations were applied');
-          candidates = index.reviewCandidates(null, false, true, true, targets);
+          candidates = index.candidates(null, false, true, true, targets);
           for (const candidate of candidates) {
             const segments = index.sourceSegments(candidate.sourceStart, candidate.sourceEnd);
             if (!segments.length) {

@@ -25,8 +25,8 @@ try {
     const range = await page.evaluate(word => {
       ReplacementReview.close(); PdfSelection.clear();
       const editor = readerMonaco.editor, model = editor.getModel();
-      const index = PdfSelection.locator.editorSourceIndex(model), start = index.raw.indexOf(word);
-      const range = PdfSelectionDiff.rangeAt(model, start, start + word.length, index);
+      const index = PdfSelection.locator.editorSourceIndex(editor.document), start = index.raw.indexOf(word);
+      const range = editor.document.rangeAt(start, start + word.length, true);
       const decorations = model.getDecorationsInRange(range).filter(d =>
         /mew-ocr-diff-(text|insert)/.test((d.options.inlineClassName || '') + (d.options.before?.inlineClassName || '')));
       if (decorations.some(d => d.range.startLineNumber !== d.range.endLineNumber || d.range.startColumn !== d.range.endColumn))

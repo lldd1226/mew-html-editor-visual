@@ -166,10 +166,10 @@ try {
         assert.equal(await editorScaleInput.inputValue(), '120%', 'Ctrl+wheel over editor changes editor zoom');
         await editorScaleInput.fill('100'); await editorScaleInput.press('Enter');
         const colorFixture = '<p style="color:#0f0">styled</p><a href="#F10">linked</a>';
-        await page.evaluate(text => readerMonaco.model.setValue(text), colorFixture);
+        await page.evaluate(text => readerMonaco.editor.getModel().setValue(text), colorFixture);
         await page.waitForFunction(() => document.querySelectorAll('#monacoEditor .colorpicker-color-decoration').length === 1);
         assert.equal(await page.locator('#monacoEditor .colorpicker-color-decoration').count(), 1, 'reader decorates style color but not href');
-        await page.evaluate(text => readerMonaco.model.setValue(text), original.replace(/\r\n?/g, '\n'));
+        await page.evaluate(text => readerMonaco.editor.getModel().setValue(text), original.replace(/\r\n?/g, '\n'));
         await page.waitForFunction(() => !document.querySelector('#saveBtn').classList.contains('dirty'));
       }
       await click(page, 'saveBtn');

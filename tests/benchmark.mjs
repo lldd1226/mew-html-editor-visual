@@ -1,3 +1,4 @@
+import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
@@ -21,21 +22,21 @@ for (const name of (await readdir(new URL('./fixtures/', import.meta.url))).sort
       const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) },
         isCurrent: () => true, waitForIdle: async () => {} });
       const start = performance.now();
-      const source = locator.sourceIndex(fixture.html);
-      const target = typeof fixture.layerRaw === 'string' ? locator.sourceIndex(fixture.layerRaw)
+      const source = new api.PdfConnections(locator, fixture.html);
+      const target = typeof fixture.layerRaw === 'string' ? new api.PdfConnections(locator, fixture.layerRaw)
         : await locator.indexDocument({ numPages: fixture.pages.length, async getPage(n) {
           const page = fixture.pages[n - 1];
           const items = page.items || [{ str: typeof page === 'string' ? page : page.raw,
             transform: [1, 0, 0, 1, 0, 10], width: 500, height: 10 }];
           return { getTextContent: async () => ({ items }) };
         } });
-      source.sourcePageScope(target, true);
-      const pairs = (source.connections.get(target) || []).map(connection => [connection, target]);
-      const marks = source.sourceDecorations(source.reviewCandidates(null, true, false, true, [], pairs), true, true, undefined, { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) });
+      source.scope(target, true);
+      const pairs = (source.byTarget.get(target) || []).map(connection => [connection, target]);
+      const marks = sourceDecorations(source, source.candidates(null, true, false, true, [], pairs), true, true, undefined, new window.MewEditorCore.DocumentModel({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
       const elapsed = performance.now() - start;
       assert.ok(pairs.length, `${name}: no source/PDF mappings`);
       for (const [connection] of pairs) {
-        const diff = source.connectionDiff(target, connection);
+        const diff = source.compare(target, connection);
         assert.ok(diff, `${name}: mapped passage exceeds the comparison budget`);
         assert.equal(diff.parts.map(part => part.html).join(''), source.raw.slice(connection.start, connection.end));
         assert.equal(diff.parts.map(part => part.pdf).join(''), target.raw.slice(connection.targetStart, connection.targetEnd));

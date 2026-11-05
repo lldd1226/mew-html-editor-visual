@@ -17,14 +17,14 @@ try {
     && document.querySelector('.mew-pdf-review-pointer'), null, { timeout: 20000 });
   if (number === 432) {
     const result = await page.evaluate(() => {
-      const editor = readerMonaco.editor, locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.getModel());
+      const editor = readerMonaco.editor, locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.document);
       const targets = locator.environment.getTargets();
-      index?.diff(targets);
-      const target = targets.find(t => t.layer), candidates = index.reviewCandidates(null, false, true, true, targets);
+      index?.update(targets);
+      const target = targets.find(t => t.layer), candidates = index.candidates(null, false, true, true, targets);
       const sentence = 'Beweise der Wahrheit und Beweise der Zuverlässigkeit!', at = index.raw.indexOf(sentence);
-      const hit = index.connectedRange(target, at, at + sentence.length, false, undefined, true);
+      const hit = index.range(target, at, at + sentence.length, false, undefined, true);
       const item = candidates.find(c => c.sourceStart >= at && c.comparison.pdf === 'aftigk');
-      const insertion = item && index.connectedRange(target, item.sourceStart, item.sourceEnd, false, undefined, true);
+      const insertion = item && index.range(target, item.sourceStart, item.sourceEnd, false, undefined, true);
       const marks = editor.getModel().getAllDecorations().filter(d => d.options.inlineClassName?.includes('mew-ocr-diff'));
       return { missingDer: candidates.some(c => c.sourceStart >= at && c.comparison.pdf.trim() === 'der'),
         sentence: hit && PdfSelectionDiff.significantText(target.raw.slice(hit.start, hit.end)),
@@ -40,7 +40,7 @@ try {
     assert.equal(result.whitespaceMarker, false, 'no false missing-der marker after the existing der');
     assert.equal(result.collapsed, true);
     await page.evaluate(() => {
-      const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+      const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
       const text = 'Man verstehe wohl!', start = index.raw.indexOf(text);
       window.openingText = text;
       window.openingNotice = null;
@@ -48,7 +48,7 @@ try {
         const notice = event.detail.notices?.find(n => n.html === openingText);
         if (notice) window.openingNotice = notice;
       });
-      const range = window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+      const range = editor.document.rangeAt(index.starts[start] ?? index.source.length,
         (start + text.length > start ? index.ends[(start + text.length) - 1] : index.starts[start]) ?? index.source.length);
       editor.revealRangeInCenter(range);
       editor.setSelection(range);
@@ -72,10 +72,10 @@ try {
   }
   const before = await page.evaluate(() => {
     const editor = readerMonaco.editor, model = editor.getModel(), locator = PdfSelection.locator;
-    const index = locator.editorSourceIndex(model), targets = locator.environment.getTargets();
-    const candidates = index.reviewCandidates(null, false, true, true, targets), at = index.raw.indexOf('597–601') + 3;
+    const index = locator.editorSourceIndex(editor.document), targets = locator.environment.getTargets();
+    const candidates = index.candidates(null, false, true, true, targets), at = index.raw.indexOf('597–601') + 3;
     const item = candidates.find(c => c.sourceStart === at && c.sourceEnd === at + 1);
-    const range = window.PdfSelectionDiff.rangeAt(model, index.starts[at] ?? index.source.length,
+    const range = editor.document.rangeAt(index.starts[at] ?? index.source.length,
       (at + 1 > at ? index.ends[(at + 1) - 1] : index.starts[at]) ?? index.source.length);
     const marks = model.getAllDecorations().filter(d => d.options.inlineClassName?.includes('mew-ocr-diff'));
     const des = index.raw.indexOf('des deutschen');

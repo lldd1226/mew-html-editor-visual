@@ -160,7 +160,10 @@
     return owner?.mewWorkbench || owner?.readerMonaco;
   }
   function message(text) { get('status').textContent = text; get('status').hidden = !text; }
-  function current() { return session?.items[session.position]; }
+  function current(state = session) {
+    const selected = state?.selection, range = selected?.queueRange;
+    return range && state.position >= range[0] && state.position <= range[1] ? selected : state?.items[state.position];
+  }
   function selectedEdits(all = false) {
     return session.content?.[all ? 'allEdits' : 'edits'] || (all ? session.items : session.provider.matchingItems?.(current(), session.context, session.items) || [current()])
       .flatMap(item => item?.options.find(value => value.id === session.choices.get(item.id))?.edits || []);
@@ -299,10 +302,10 @@
     })), ...decorations]);
   }
   function opposite(state) {
-    const layout = state.provider.presentation?.(state.context, state.items[state.position]);
+    const layout = state.provider.presentation?.(state.context, current(state));
     if (!layout?.switchable) return null;
     const request = { ...state.context.request, side: layout.side === 'pdf' ? 'html' : 'pdf' };
-    const peer = state.provider.presentation({ ...state.context, request }, state.items[state.position]);
+    const peer = state.provider.presentation({ ...state.context, request }, current(state));
     return peer?.host && peer.host !== window.ReplacementReview ? { ...peer, request } : null;
   }
   function contextCurrent(provider, context) {
@@ -320,7 +323,7 @@
       const ids = item.options.map(value => value.id);
       if (ids.some(id => typeof id !== 'string') || new Set(ids).size !== ids.length) throw new Error('修改选项必须有唯一 id');
     }
-    return { items, choices };
+    return { items, choices, selection: result.selection };
   }
   function toggle(provider, enabled) {
     if (provider.available?.() === false) return;
@@ -432,7 +435,7 @@
     };
     const accept = result => {
       if (session !== saved || request !== generation || !contextCurrent(saved.provider, context)) return false;
-      const { items, choices } = validateCandidates(result, saved.choices);
+      const { items, choices, selection } = validateCandidates(result, saved.choices);
       const selectedId = !saved.stale && saved.items[saved.position]?.id;
       let found = selectedId ? items.findIndex(item => item.id === selectedId) : -1;
       if (found < 0) found = items.findIndex(item => {
@@ -440,7 +443,7 @@
         return range && (saved.context.model.getOffsetAt({ lineNumber: range.endLineNumber, column: range.endColumn }) > saved.resumeOffset
           || saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset);
       });
-      Object.assign(saved, { items, choices, position: found < 0 ? items.length : found,
+      Object.assign(saved, { items, choices, selection, position: found < 0 ? items.length : found,
         context, stale: false, partial: !!result.partial });
       render(true);
       return true;
@@ -475,9 +478,10 @@
     get('save').disabled = !workspace()?.save || !canApply;
     get('save').textContent = session?.stale ? '更新中....' : '替换&保存';
     const blocked = !currentVersion || !!session?.applying;
-    get('prev').disabled = blocked || session.position <= 0;
-    get('next').disabled = blocked || session.position >= session.items.length - 1;
-    get('position').textContent = session ? `${Math.min(session.position + 1, session.items.length)} / ${session.items.length}${session.partial ? '+' : ''}` : '';
+    const range = current()?.queueRange || [session?.position ?? 0, session?.position ?? 0];
+    get('prev').disabled = blocked || range[0] <= 0;
+    get('next').disabled = blocked || range[1] >= session.items.length - 1;
+    get('position').textContent = session ? `${range[0] === range[1] ? Math.min(range[0] + 1, session.items.length) : `${range[0] + 1}–${range[1] + 1}`} / ${session.items.length}${session.partial ? '+' : ''}` : '';
   }
   async function open(id, suppliedEditor, focusId, fallbackPosition = 0, requestData = null) {
     const provider = providers.get(id), target = suppliedEditor || window.mewWorkbench?.editor || window.readerMonaco?.editor;
@@ -529,13 +533,13 @@
     try {
       const snapshot = requestData?.snapshot;
       const result = snapshot?.context.model === model && snapshot.context.source === source && snapshot.context.version === version
-        ? snapshot.items : provider.locator ? await provider.locator.reviewItems(context) : await provider.provide(context);
+        ? snapshot : provider.locator ? await provider.locator.reviewItems(context) : await provider.provide(context);
       if (request !== generation || providers.get(id) !== provider) return;
       if (target.getModel() !== model || !contextCurrent(provider, context)) { stale(); return; }
-      const { items, choices } = validateCandidates(result, snapshot?.choices);
+      const { items, choices, selection } = validateCandidates(result, snapshot?.choices);
       let found = items.findIndex(item => item.id === focusId);
-      if (found < 0) found = provider.focusIndex?.(items, requestData) ?? -1;
-      Object.assign(session, { items,
+      if (selection && !requestData?.candidateId) found = selection.queueRange[0];
+      Object.assign(session, { items, selection,
         position: found >= 0 ? found : Math.max(0, Math.min(fallbackPosition, items.length - 1)),
         choices, partial: !!(result.partial || snapshot?.partial) });
       render(!!requestData, !!requestData?.mirror);
@@ -550,7 +554,6 @@
     const item = current(), { editor, model, source, version } = session.context;
     if (session.stale) {
       clearPreview(); revisionMarks.clearMarks();
-      session.context.highlightedItems = item ? [item] : [];
     }
     const peer = opposite(session);
     panel.hidden = false;
@@ -610,11 +613,9 @@
       const previousSource = session.context.request?.notice?.source, source = request?.notice?.source;
       const sameSelection = source && previousSource && ['index', 'start', 'end'].every(key => source[key] === previousSource[key]);
       session.context.request = { ...session.context.request, ...request, side: session.context.request?.side };
-      if (sameInteraction && (sameSelection || session.provider.containsSelection?.(current(), request))) { place(target); return; }
-      const at = session.items.findIndex(item => item.id === focusId);
+      if (sameSelection && (sameInteraction || current()?.selection) || sameInteraction && session.provider.containsSelection?.(current(), request)) { place(target); return; }
+      const at = request?.candidateId ? session.items.findIndex(item => item.id === focusId) : -1;
       if (at >= 0) { if (at !== session.position) { session.position = at; render(true); } else place(target); return; }
-      // A broader selected passage can contain the current character candidate.
-      if (session.provider.containsSelection?.(current(), request)) { place(target); return; }
     }
     if (lastRequest?.controller && lastRequest.id === id && lastRequest.editor === target && lastRequest.focusId === focusId) return;
     return open(id, target, focusId, 0, request);
@@ -647,7 +648,7 @@
     saved.applying = true; controls();
     try {
       // Providers receive candidate data; session lifecycle remains owned here.
-      const result = await saved.provider.apply({ ...saved, context: { ...saved.context } }, all);
+      const result = await saved.provider.apply({ ...saved, item: current(saved), context: { ...saved.context } }, all);
       if (session !== saved) return true;
       if (result.offset !== undefined) {
         saved.resumeOffset = result.offset; saved.stale = true;
@@ -676,7 +677,8 @@
   }
   function navigate(direction) {
     if (!valid() || session.applying) return;
-    const next = session.position + direction;
+    const range = current()?.queueRange;
+    const next = (range ? range[direction > 0 ? 1 : 0] : session.position) + direction;
     if (next >= 0 && next < session.items.length) { session.position = next; render(); }
   }
   function queuePlace() {

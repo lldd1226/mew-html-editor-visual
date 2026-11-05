@@ -344,7 +344,10 @@ if (typeof module === 'object' && module.exports) {
   const fields = Object.create(null);
   const get = name => fields[name] ||= panel.querySelector(`[data-${name}]`);
   function message(text) { get('status').textContent = text; get('status').hidden = !text; }
-  function current() { return session?.items[session.position]; }
+  function current(state = session) {
+    const selected = state?.selection, range = selected?.queueRange;
+    return range && state.position >= range[0] && state.position <= range[1] ? selected : state?.items[state.position];
+  }
   function selectedEdits(all = false) {
     return session.content?.[all ? 'allEdits' : 'edits'] || (all ? session.items : session.provider.matchingItems?.(current(), session.context, session.items) || [current()])
       .flatMap(item => item?.options.find(value => value.id === session.choices.get(item.id))?.edits || []);
@@ -385,7 +388,7 @@ if (typeof module === 'object' && module.exports) {
         options.add(value.id);
       }
     }
-    return { items, choices };
+    return { items, choices, selection: result.selection };
   }
   function toggle(provider, enabled) {
     if (!provider?.setEnabled || provider.available?.() === false) return;
@@ -468,7 +471,7 @@ if (typeof module === 'object' && module.exports) {
     const accept = result => {
       if (session !== saved || request !== generation || saved.context.model.getValue() !== source
         || saved.context.model.getVersionId?.() !== version || (saved.provider.isCurrent && !saved.provider.isCurrent(context))) return false;
-      const { items, choices } = validateCandidates(result, saved.choices);
+      const { items, choices, selection } = validateCandidates(result, saved.choices);
       const selectedId = !saved.stale && saved.items[saved.position]?.id;
       let found = selectedId ? items.findIndex(item => item.id === selectedId) : -1;
       if (found < 0) found = items.findIndex(item => {
@@ -476,7 +479,7 @@ if (typeof module === 'object' && module.exports) {
         return range && (saved.context.model.getOffsetAt({ lineNumber: range.endLineNumber, column: range.endColumn }) > saved.resumeOffset
           || saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset);
       });
-      Object.assign(saved, { items, choices, position: found < 0 ? items.length : found,
+      Object.assign(saved, { items, choices, selection, position: found < 0 ? items.length : found,
         context, stale: false, manualPending: false, partial: !!result.partial });
       render(true);
       return true;
@@ -514,9 +517,10 @@ if (typeof module === 'object' && module.exports) {
     get('save').disabled = !window.readerMonaco?.save || !canApply;
     get('save').textContent = session?.manualPending ? '更新中....' : '替换&保存';
     const blocked = !currentVersion || !!session?.applying;
-    get('prev').disabled = blocked || session.position <= 0;
-    get('next').disabled = blocked || session.position >= session.items.length - 1;
-    get('position').textContent = session ? `${Math.min(session.position + 1, session.items.length)} / ${session.items.length}${session.partial ? '+' : ''}` : '';
+    const range = current()?.queueRange || [session?.position ?? 0, session?.position ?? 0];
+    get('prev').disabled = blocked || range[0] <= 0;
+    get('next').disabled = blocked || range[1] >= session.items.length - 1;
+    get('position').textContent = session ? `${range[0] === range[1] ? Math.min(range[0] + 1, session.items.length) : `${range[0] + 1}–${range[1] + 1}`} / ${session.items.length}${session.partial ? '+' : ''}` : '';
   }
   function subscribe(target, event, callback) {
     const listener = target[event]?.(callback);
@@ -561,14 +565,14 @@ if (typeof module === 'object' && module.exports) {
     try {
       const snapshot = requestData?.snapshot;
       const result = snapshot?.context.model === model && snapshot.context.source === source && snapshot.context.version === version
-        ? snapshot.items : provider.locator ? await provider.locator.reviewItems(context) : await provider.provide(context);
+        ? snapshot : provider.locator ? await provider.locator.reviewItems(context) : await provider.provide(context);
       if (request !== generation || providers.get(id) !== provider) return;
       if (target.getModel() !== model || model.getValue() !== source || model.getVersionId?.() !== version
         || (provider.isCurrent && !provider.isCurrent(context))) { stale(); return; }
-      const { items, choices } = validateCandidates(result, snapshot?.choices);
+      const { items, choices, selection } = validateCandidates(result, snapshot?.choices);
       let found = items.findIndex(item => item.id === focusId);
-      if (found < 0) found = provider.focusIndex?.(items, requestData) ?? -1;
-      Object.assign(session, { items,
+      if (selection && !requestData?.candidateId) found = selection.queueRange[0];
+      Object.assign(session, { items, selection,
         position: found >= 0 ? found : Math.max(0, Math.min(fallbackPosition, items.length - 1)),
         choices, partial: !!(result.partial || snapshot?.partial) });
       render(!!requestData);
@@ -583,7 +587,6 @@ if (typeof module === 'object' && module.exports) {
     const item = current(), { editor, model, source, version } = session.context;
     if (session.stale) {
       revisionMarks.clearMarks();
-      session.context.highlightedItems = item ? [item] : [];
     }
     panel.hidden = false;
     session.content = session.provider.content?.(session, item) || {};
@@ -636,8 +639,8 @@ if (typeof module === 'object' && module.exports) {
   }
   function showHover(provider, context, item, items, source = { start: item.sourceStart, end: item.sourceEnd }, focus = false) {
     const content = provider.content({ context, items }, item);
-    const hover = items.filter(value => value === item || value.font
-      && value.sourceStart < source.end && value.sourceEnd > source.start)
+    const hover = [item, ...items.filter(value => value !== item && value.font
+      && value.sourceStart < source.end && value.sourceEnd > source.start)]
       .map(value => hoverContent(provider, context, value, items));
     context.editor.showReviewHover(content.range, hover, focus);
   }
@@ -674,10 +677,10 @@ if (typeof module === 'object' && module.exports) {
         && source.start === previousSource.start && source.end === previousSource.end;
       session.context.request = { ...session.context.request, ...request, side: session.context.request?.side };
       if (sameInteraction && (sameSelection || session.provider.containsSelection?.(current(), request))) { place(target); return; }
-      const at = session.items.findIndex(item => item.id === focusId);
+      const at = sameSelection && session.selection || request?.candidateId ? session.items.findIndex(item => item.id === focusId) : -1;
       if (at >= 0) { if (at !== session.position) { session.position = at; render(true); } else place(target); return; }
       // A broader selected passage can contain the current character candidate.
-      if (session.provider.containsSelection?.(current(), request)) { place(target); return; }
+      if (sameSelection && session.selection && session.provider.containsSelection?.(current(), request)) { place(target); return; }
     }
     if (lastRequest?.controller && lastRequest.id === id && lastRequest.editor === target && lastRequest.focusId === focusId) return;
     return open(id, target, focusId, 0, request);
@@ -703,7 +706,7 @@ if (typeof module === 'object' && module.exports) {
     saved.applying = true; controls();
     try {
       // Providers receive candidate data; session lifecycle remains owned here.
-      const result = await saved.provider.apply({ ...saved, context: { ...saved.context } }, all);
+      const result = await saved.provider.apply({ ...saved, item: current(saved), context: { ...saved.context } }, all);
       if (session !== saved) return true;
       if (result.offset !== undefined) {
         saved.resumeOffset = result.offset; saved.stale = saved.manualPending = true;
@@ -732,7 +735,8 @@ if (typeof module === 'object' && module.exports) {
   }
   function navigate(direction) {
     if (!valid() || session.applying) return;
-    const next = session.position + direction;
+    const range = current()?.queueRange;
+    const next = (range ? range[direction > 0 ? 1 : 0] : session.position) + direction;
     if (next >= 0 && next < session.items.length) { session.position = next; render(); }
   }
   function queuePlace() {

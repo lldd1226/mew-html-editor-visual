@@ -4,7 +4,7 @@
   "ink": "#2b2925",
   "invert": false,
   "horizontal": false,
-  "splitView": true,
+  "splitView": false,
   "scale": "1.25",
   "editorScale": 1,
   "tagScale": 1,

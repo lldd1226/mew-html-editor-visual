@@ -1,12 +1,12 @@
-"""FastAPI translation of reader-server.js. Run with Python; requires fastapi and uvicorn."""
+"""FastAPI translation of reader-server.js. Requires fastapi, uvicorn and watchfiles."""
 import argparse
+import atexit
 import asyncio
 from contextlib import asynccontextmanager
 import json
 import math
 import os
 from pathlib import Path
-import queue
 import re
 import signal
 import sys
@@ -14,6 +14,7 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from watchfiles import Change, awatch
 import uvicorn
 from urllib.parse import quote, unquote, urlsplit
 from urllib.request import urlopen, url2pathname
@@ -86,11 +87,69 @@ def settings(value=None):
                 boldDetection=value.get('boldDetection') is not False)
 
 
-def load_settings():
+def load_settings(config_file=None):
     try:
-        return settings(json.loads(SETTINGS_FILE.read_text('utf-8')))
+        value = json.loads(SETTINGS_FILE.read_text('utf-8'))
     except (OSError, ValueError):
-        return settings()
+        value = {}
+    value = value if isinstance(value, dict) else {}
+    if config_file:
+        config = json.loads(config_file.read_text('utf-8-sig'))
+        if isinstance(config.get('settings'), dict):
+            value = {**value, **config['settings']}
+    return settings(value)
+
+
+def claim_config(config_file, port):
+    lock_file = Path(str(config_file.resolve()) + '.lock')
+    owner = dict(pid=os.getpid(), port=port)
+    while True:
+        try:
+            with lock_file.open('x', encoding='utf-8') as target:
+                json.dump(owner, target)
+            break
+        except FileExistsError:
+            try:
+                previous = json.loads(lock_file.read_text('utf-8'))
+                pid = previous['pid']
+                if not isinstance(pid, int) or pid <= 0:
+                    raise ValueError('Invalid lock owner')
+                # Windows os.kill(pid, 0) can terminate a process; query its handle instead.
+                if os.name == 'nt':
+                    import ctypes
+                    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                    kernel.OpenProcess.restype = ctypes.c_void_p
+                    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+                    handle = kernel.OpenProcess(0x1000, False, pid)
+                    if handle:
+                        kernel.CloseHandle(handle)
+                        alive = True
+                    else:
+                        alive = ctypes.get_last_error() != 87
+                else:
+                    try:
+                        os.kill(pid, 0)
+                        alive = True
+                    except ProcessLookupError:
+                        alive = False
+                    except PermissionError:
+                        alive = True
+                if not alive:
+                    lock_file.unlink(missing_ok=True)
+                    continue
+                address = f"http://localhost:{previous.get('port', '?')}"
+            except (OSError, ValueError, KeyError, TypeError):
+                address = '（实例正在启动或占用记录无法读取）'
+            raise ValueError(f'同一个 config 已经打开过了，无需重复启动：{config_file}\n请使用已有实例：{address}')
+
+    def release():
+        try:
+            if json.loads(lock_file.read_text('utf-8')) == owner:
+                lock_file.unlink()
+        except (OSError, ValueError):
+            pass
+    atexit.register(release)
+    return release
 
 
 def finite(value):
@@ -99,10 +158,12 @@ def finite(value):
 
 def page_number(value):
     try:
-        number = float(value or 0)
-        return (int(number) if number.is_integer() else number) if math.isfinite(number) else None
+        if value is None or not str(value).strip():
+            return None
+        number = float(value)
+        return int(number) if math.isfinite(number) and number.is_integer() and abs(number) <= 9007199254740991 else str(value).strip()
     except (ValueError, TypeError):
-        return None
+        return str(value).strip()
 
 
 def read_text(file):
@@ -139,7 +200,7 @@ class Library:
                         shortTitle=str(volume.get('shortTitle', volume.get('title', config.get('shortTitle', config.get('title', identity))))),
                         pageLabel=str(volume.get('pageLabel', config.get('pageLabel', '{page}'))),
                         toc=volume.get('toc') if isinstance(volume.get('toc'), list) else [],
-                        pattern=re.compile(pattern, re.I), explicitPages={number for p in explicit if (number := page_number(p)) is not None},
+                        pattern=re.compile(pattern, re.I), explicitPages=list(dict.fromkeys(number for p in explicit if (number := page_number(p)) is not None)),
                         pageDir=resource(options.get('directory', volume.get('htmlRoot', config.get('htmlRoot', '.'))), base),
                         pdf=resource(pdf, base))
             self.scan(item)
@@ -157,17 +218,18 @@ class Library:
                 if entry.is_dir() or not match:
                     continue
                 try:
-                    page = float(match.groupdict().get('page') if match.groupdict().get('page') is not None else match.group(1))
-                    if not math.isfinite(page):
+                    page = page_number(match.groupdict().get('page') if match.groupdict().get('page') is not None else match.group(1))
+                    if page is None:
                         continue
-                    page = int(page) if page.is_integer() else page
                 except (ValueError, TypeError, IndexError):
                     continue
                 if not volume['explicitPages'] or page in volume['explicitPages']:
                     files[page] = entry.name
         elif directory['kind'] == 'url':
             files = dict.fromkeys(volume['explicitPages'])
-        volume['pageFiles'], volume['pages'] = files, sorted(files)
+        if volume['explicitPages']:
+            files = {page: files[page] for page in volume['explicitPages'] if page in files}
+        volume['pageFiles'], volume['pages'] = files, sorted(files, key=lambda page: (1, page) if isinstance(page, int) else (0, 0))
 
     def volume(self, identity):
         for volume in self.volumes:
@@ -199,33 +261,21 @@ class Library:
 
     def publish(self, event, path):
         with self.clients_lock:
-            for client in self.clients:
-                client.put(dict(event=event, path=path))
+            for loop, client in self.clients:
+                loop.call_soon_threadsafe(client.put_nowait, dict(event=event, path=path))
 
-    def watch(self, stop):
-        # Native fs.watch is replaced by one shared poller, including external HTML edits.
-        previous = None
-        while not stop.wait(0.3):
-            current = {}
-            roots = {self.editor_root} if self.editor_root else set()
-            roots.update(v['pageDir']['path'] for v in self.volumes if v['pageDir']['kind'] == 'file'
-                         and (not self.editor_root or not inside(v['pageDir']['path'], self.editor_root)))
-            for root in roots:
-                try:
-                    entries = root.rglob('*') if root == self.editor_root else root.iterdir()
-                    for file in entries:
-                        if file.is_file() or file.is_dir():
-                            stat = file.stat()
-                            relative = file.relative_to(self.editor_root).as_posix() if self.editor_root and inside(file, self.editor_root) else ''
-                            current[str(file)] = (stat.st_mtime_ns, stat.st_size, relative)
-                except OSError:
-                    continue
-            if previous is not None:
-                for name in current.keys() | previous.keys():
-                    if current.get(name) != previous.get(name):
-                        relative = (current.get(name) or previous[name])[2]
-                        self.publish('rename' if not relative or name not in current or name not in previous else 'change', relative)
-            previous = current
+    async def watch(self, stop):
+        roots = {self.editor_root} if self.editor_root else set()
+        roots.update(v['pageDir']['path'] for v in self.volumes if v['pageDir']['kind'] == 'file'
+                     and (not self.editor_root or not inside(v['pageDir']['path'], self.editor_root)))
+        if not roots:
+            return
+        async for changes in awatch(*roots, stop_event=stop, watch_filter=None,
+                                    debounce=60, step=10, force_polling=False):
+            for change, name in changes:
+                file = Path(name)
+                relative = file.relative_to(self.editor_root).as_posix() if self.editor_root and inside(file, self.editor_root) else ''
+                self.publish('change' if change == Change.modified and relative else 'rename', relative)
 
 
 def reply(status, value, content_type='application/json; charset=utf-8'):
@@ -235,19 +285,19 @@ def reply(status, value, content_type='application/json; charset=utf-8'):
 
 
 def create_app(library, legacy=False):
+    settings_lock = threading.Lock()
     public = HERE / ('public_legacy' if legacy else 'public')
     monaco = HERE / 'monaco' if (HERE / 'monaco/min/vs/loader.js').exists() else HERE / 'node_modules/monaco-editor'
 
     @asynccontextmanager
     async def lifespan(app):
-        stop = threading.Event()
-        worker = threading.Thread(target=library.watch, args=(stop,), daemon=True)
-        worker.start()
+        stop = asyncio.Event()
+        worker = asyncio.create_task(library.watch(stop))
         try:
             yield
         finally:
             stop.set()
-            await run_in_threadpool(worker.join)
+            await worker
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -264,24 +314,21 @@ def create_app(library, legacy=False):
             return 'body { background: #fff; color: #1d2430; font-family: serif; line-height: 1.5; }\n'
 
     async def events():
-        client = queue.Queue()
+        client = asyncio.Queue()
+        subscription = (asyncio.get_running_loop(), client)
         with library.clients_lock:
-            library.clients.add(client)
+            library.clients.add(subscription)
         try:
             yield 'data: {"event":"ready","path":""}\n\n'
-            heartbeat = asyncio.get_running_loop().time() + 25
             while True:
                 try:
-                    message = client.get_nowait()
+                    message = await asyncio.wait_for(client.get(), timeout=25)
                     yield 'data: ' + json.dumps(message, ensure_ascii=False) + '\n\n'
-                except queue.Empty:
-                    if asyncio.get_running_loop().time() >= heartbeat:
-                        yield ': keep-alive\n\n'
-                        heartbeat = asyncio.get_running_loop().time() + 25
-                    await asyncio.sleep(0.1)
+                except asyncio.TimeoutError:
+                    yield ': keep-alive\n\n'
         finally:
             with library.clients_lock:
-                library.clients.discard(client)
+                library.clients.discard(subscription)
 
     def dispatch(request, data):
         path = request.url.path
@@ -300,10 +347,18 @@ def create_app(library, legacy=False):
                 editorAvailable=bool(library.editor_root), volumes=volumes))
         if path == '/api/reader/settings':
             if method == 'GET':
-                return reply(200, load_settings())
+                return reply(200, load_settings(library.config_file))
             if method == 'PUT':
-                value = settings({**load_settings(), **data})
-                SETTINGS_FILE.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', 'utf-8')
+                with settings_lock:
+                    value = settings({**load_settings(library.config_file), **data})
+                    config = json.loads(library.config_file.read_text('utf-8-sig'))
+                    config['settings'] = value
+                    temporary = library.config_file.with_name(library.config_file.name + f'.{os.getpid()}.tmp')
+                    try:
+                        temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2) + '\n', 'utf-8')
+                        temporary.replace(library.config_file)
+                    finally:
+                        temporary.unlink(missing_ok=True)
                 return reply(200, value)
             return reply(405, dict(error='Only GET or PUT supported'))
         if path == '/api/reader/locate':
@@ -406,7 +461,7 @@ def create_app(library, legacy=False):
         if path.startswith('/api/'):
             return reply(404, dict(error='Unknown API'))
         if path in ('/', '/reader.html'):
-            mode = param('view') or ('reader' if load_settings()['splitView'] else 'combined')
+            mode = param('view') or ('reader' if load_settings(library.config_file)['splitView'] else 'combined')
             html = (public / 'reader.html').read_bytes().decode('utf-8')
             return reply(200, html.replace('<body>', '<body class="reader-only">') if mode == 'reader' else html, MIME['.html'])
         root, relative = public, path.lstrip('/') or 'reader.html'
@@ -451,17 +506,29 @@ def main():
         parser.exit(1, f'加载配置失败（{config}）：{error}\n')
     if not library.volumes:
         parser.exit(1, f'配置 {config} 没有扫描到任何卷。请检查 htmlRoot 与 pagePattern。\n')
+    try:
+        release_config = claim_config(library.config_file, args.port)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'{error}\n')
     server = uvicorn.Server(uvicorn.Config(create_app(library, args.legacy), host='0.0.0.0', port=args.port))
     handle_exit = server.handle_exit
     # Ctrl+C must not wait for open SSE connections or background work.
-    server.handle_exit = lambda sig, frame: os._exit(0) if sig == signal.SIGINT else handle_exit(sig, frame)
+    def exit_server(sig, frame):
+        if sig == signal.SIGINT:
+            release_config()
+            os._exit(0)
+        handle_exit(sig, frame)
+    server.handle_exit = exit_server
     if os.environ.get('MEW_READER_LAUNCHER') == '1':
         def launcher_closed():
             sys.stdin.buffer.read()
             server.should_exit = True
         threading.Thread(target=launcher_closed, daemon=True).start()
     print(f'配置：{config}\n编辑根：{library.editor_root or "（无）"}\n阅读器：http://localhost:{args.port}（{len(library.volumes)} 卷）', flush=True)
-    server.run()
+    try:
+        server.run()
+    finally:
+        release_config()
 
 
 if __name__ == '__main__':

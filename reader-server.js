@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createReadStream, existsSync, watch } from "node:fs";
+import { createReadStream, existsSync, watch, openSync, writeFileSync, readFileSync, unlinkSync, closeSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,7 +46,7 @@ function findDefaultConfig() {
   ].find(existsSync) || path.join(HERE, ".mew-reader.json");
 }
 
-const CONFIG_FILE = findDefaultConfig();
+let CONFIG_FILE = findDefaultConfig();
 const PORT = Number(valueOf(["-p", "--port"]) || process.env.PORT || 49100);
 
 const MIME = {
@@ -96,9 +96,44 @@ function readerSettings(value = {}) {
 }
 
 async function loadReaderSettings() {
-  try { return readerSettings(JSON.parse(await fs.readFile(SETTINGS_FILE, "utf8"))); }
-  catch { return readerSettings(); }
+  let fallback = {};
+  try { fallback = JSON.parse(await fs.readFile(SETTINGS_FILE, "utf8")); }
+  catch {}
+  const config = JSON.parse((await fs.readFile(CONFIG_FILE, "utf8")).replace(/^\uFEFF/, ""));
+  return readerSettings({ ...fallback, ...config.settings });
 }
+
+function claimConfig() {
+  const lockFile = `${CONFIG_FILE}.lock`;
+  const owner = JSON.stringify({ pid: process.pid, port: PORT });
+  while (true) {
+    let descriptor;
+    try { descriptor = openSync(lockFile, "wx"); }
+    catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      let previous;
+      try { previous = JSON.parse(readFileSync(lockFile, "utf8")); } catch {}
+      if (Number.isInteger(previous?.pid) && previous.pid > 0) {
+        try { process.kill(previous.pid, 0); }
+        catch (error) {
+          if (error.code === "ESRCH") { unlinkSync(lockFile); continue; }
+        }
+      }
+      throw new Error(`同一个 config 已经打开过了，无需重复启动：${CONFIG_FILE}\n请使用已有实例：${previous?.port ? `http://localhost:${previous.port}` : "（实例正在启动或占用记录无法读取）"}`);
+    }
+    try { writeFileSync(descriptor, owner); }
+    finally { closeSync(descriptor); }
+    break;
+  }
+  process.on("exit", () => {
+    try {
+      if (readFileSync(lockFile, "utf8") === owner) unlinkSync(lockFile);
+    } catch {}
+  });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => process.exit(0));
+}
+
+let settingsUpdates = Promise.resolve();
 
 function resolveResource(raw, base) {
   const value = String(raw || ".");
@@ -143,13 +178,18 @@ async function scanPageFiles(pageDir, pattern, explicitPages = []) {
   } else if (pageDir.kind === "url") {
     for (const page of explicitPages) pageFiles.set(page, null);
   }
-  return pageFiles;
+  return explicitPages.length ? new Map(explicitPages.filter(page => pageFiles.has(page)).map(page => [page, pageFiles.get(page)])) : pageFiles;
+}
+
+function normalizePage(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const text = String(value).trim(), number = Number(text);
+  return Number.isSafeInteger(number) ? number : text;
 }
 
 function pageFromName(name, pattern) {
   const match = new RegExp(pattern, "i").exec(name);
-  const page = Number(match?.groups?.page ?? match?.[1]);
-  return Number.isFinite(page) ? page : null;
+  return normalizePage(match?.groups?.page ?? match?.[1]);
 }
 
 function isInside(candidate, root) {
@@ -175,20 +215,21 @@ function normalizedVolumes(config) {
       pattern: String(pattern), pdf: String(pdf),
       pageLabel: String(volume.pageLabel ?? config.pageLabel ?? "{page}"),
       toc: Array.isArray(volume.toc) ? volume.toc : [],
-      explicitPages: [...new Set(explicitPages.map(Number).filter(Number.isFinite))].sort((a, b) => a - b)
+      explicitPages: [...new Set(explicitPages.map(normalizePage).filter(page => page != null))].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : typeof a === "number" ? 1 : typeof b === "number" ? -1 : 0)
     };
   });
 }
 
 async function loadLibrary() {
-  const config = JSON.parse(await fs.readFile(CONFIG_FILE, "utf8"));
+  CONFIG_FILE = await fs.realpath(CONFIG_FILE);
+  const config = JSON.parse((await fs.readFile(CONFIG_FILE, "utf8")).replace(/^\uFEFF/, ""));
   const base = path.dirname(CONFIG_FILE);
   const volumes = [];
 
   for (const item of normalizedVolumes(config)) {
     const pageDir = resolveResource(item.directory, base);
     const pageFiles = await scanPageFiles(pageDir, item.pattern, item.explicitPages);
-    const pages = [...pageFiles.keys()].sort((a, b) => a - b);
+    const pages = [...pageFiles.keys()].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : typeof a === "number" ? 1 : typeof b === "number" ? -1 : 0);
     if (!pages.length) continue;
     volumes.push({
       ...item,
@@ -212,7 +253,7 @@ function getVolume(id) {
 }
 
 function getPage(volume, raw) {
-  const page = Number(raw);
+  const page = normalizePage(decodeURIComponent(raw));
   if (!volume.pages.includes(page)) throw new Error(`第 ${raw} 页不存在`);
   return page;
 }
@@ -389,7 +430,7 @@ async function api(req, res, url) {
       if (volume.pageDir.kind !== "file") return;
       const refreshed = await scanPageFiles(volume.pageDir, volume.pattern, volume.explicitPages);
       volume.pageFiles = refreshed;
-      volume.pages = [...refreshed.keys()].sort((a, b) => a - b);
+      volume.pages = [...refreshed.keys()].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : typeof a === "number" ? 1 : typeof b === "number" ? -1 : 0);
     }));
     return reply(res, 200, {
       title: library.config.title || "阅读器",
@@ -419,8 +460,19 @@ async function api(req, res, url) {
     if (req.method === "GET") return reply(res, 200, await loadReaderSettings());
     if (req.method === "PUT") {
       const patch = await jsonBody(req);
-      const settings = readerSettings({ ...await loadReaderSettings(), ...patch });
-      await fs.writeFile(SETTINGS_FILE, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+      const update = settingsUpdates.then(async () => {
+        const settings = readerSettings({ ...await loadReaderSettings(), ...patch });
+        const config = JSON.parse((await fs.readFile(CONFIG_FILE, "utf8")).replace(/^\uFEFF/, ""));
+        config.settings = settings;
+        const temporary = `${CONFIG_FILE}.${process.pid}.tmp`;
+        try {
+          await fs.writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+          await fs.rename(temporary, CONFIG_FILE);
+        } finally { await fs.rm(temporary, { force: true }); }
+        return settings;
+      });
+      settingsUpdates = update.catch(() => {});
+      const settings = await update;
       return reply(res, 200, settings);
     }
     return reply(res, 405, { error: "仅支持 GET 或 PUT" });
@@ -497,6 +549,12 @@ try {
 
 if (!library.volumes.length) {
   console.error(`配置 ${CONFIG_FILE} 没有扫描到任何卷。请检查顶层 htmlRoot、每卷 htmlRoot 与 pagePattern。`);
+  process.exit(1);
+}
+
+try { claimConfig(); }
+catch (error) {
+  console.error(error.message);
   process.exit(1);
 }
 

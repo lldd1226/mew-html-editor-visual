@@ -88,7 +88,7 @@
       const pointer = { editor, model, version: model.getVersionId?.(), pdf: viewer?.pdfDocument, entries, key };
       if (key) defaultPointer = pointer;
       else reviewPointer = pointer;
-      if (!key && selectionHighlight && !entries.every(entry => contexts.some(context => context.index === entry.index && context.start <= entry.start && context.end >= entry.end)))
+      if (!key && !entries.every(entry => contexts.some(context => context.index === entry.index && context.start <= entry.start && context.end >= entry.end)))
         return select(entries, true);
       schedule();
     },
@@ -236,10 +236,9 @@
       const interact = () => { lastInteraction = performance.now(); };
       for (const name of ["wheel", "touchstart", "pointerdown", "keydown"]) listen(node, name, interact, { passive: true });
     }
-    let readTimer = null, selectionTimer = null;
-    cleanup.push(() => { clearTimeout(readTimer); clearTimeout(selectionTimer); });
+    let readTimer = null;
+    cleanup.push(() => clearTimeout(readTimer));
     const read = event => {
-      clearTimeout(selectionTimer);
       if (syncingPdf || window.ReaderUI?.getSourceEditor && editor !== currentEditor()) return;
       if (event?.changes || readTimer !== null) {
         if (event?.changes) lastEdit = event.isFlush ? -Infinity : performance.now();
@@ -251,34 +250,29 @@
       if (!selectionHighlight) { queueWarm(); return; }
       activeEditor = editor;
       const model = editor.getModel();
-      let marked = false;
-      const ranges = model ? (editor.getSelections() || []).map(range => {
+      let index, differences;
+      const entries = model ? (editor.getSelections() || []).flatMap(range => {
         const mark = review.highlights.selectionRange(editor, event, range);
-        if (mark) { marked = true; return mark; }
-        return range;
-      }) : [];
-      if (!marked && !ranges.some(range => model.getOffsetAt(range.getEndPosition()) > model.getOffsetAt(range.getStartPosition()))) { select([]); if (viewer) queueWarm(); return; }
-      review.locator.editorSourceIndex(editor.document);
-      if (viewer && review.locator.index.prepared?.pdf !== viewer.pdfDocument) queueWarm();
-      const entries = ranges.map(range => {
+        range = mark || range;
         const start = model.getOffsetAt(range.getStartPosition()), end = model.getOffsetAt(range.getEndPosition());
-        const index = review.locator.index, a = window.PdfSelectionDiff.lowerBound(index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(index.starts, end);
+        if (!mark && start === end) return [];
+        index ||= review.locator.editorSourceIndex(editor.document);
+        const a = window.PdfSelectionDiff.lowerBound(index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(index.starts, end);
         // HTML tags split decorations, but every fragment selects the complete difference.
-        const item = marked && (index.prepared?.differences || index.getDifferences()).items
-          .find(item => !item.font && (!item.comparison.html.trim()
-            ? index.sourceSegments(item.sourceStart, item.sourceStart)[0].start === start
-            : item.sourceStart <= a && item.sourceEnd >= b));
-        return index.entry(item?.sourceStart ?? a, item?.sourceEnd ?? b, marked);
-      });
+        const item = mark && (differences ||= index.getDifferences().items).find(item => !item.font && (!item.comparison.html.trim()
+          ? index.sourceSegments(item.sourceStart, item.sourceStart)[0].start === start
+          : item.sourceStart <= a && item.sourceEnd >= b));
+        return [index.entry(item?.sourceStart ?? a, item?.sourceEnd ?? b, !!mark)];
+      }) : [];
+      if (viewer && (!index || index.prepared?.pdf !== viewer.pdfDocument)) queueWarm();
       select(entries, true);
 
     };
     for (const name of ["onDidChangeCursorSelection", "onDidChangeModel", "onDidChangeModelContent"]) {
       const subscription = editor[name]?.(event => {
         if (name !== "onDidChangeCursorSelection") { read(event); return; }
-        clearTimeout(selectionTimer);
         lastInteraction = performance.now();
-        selectionTimer = setTimeout(() => read(event), event.source === "mouse" ? 100 : 0);
+        read(event);
       });
       if (subscription) cleanup.push(() => subscription.dispose());
     }
@@ -331,7 +325,6 @@
         if (["pagesinit", "scalechanging", "rotationchanging"].includes(event)) { clearLayers(); review.highlights.clearHighlights(); }
         if (event === "textlayerrendered" && performance.now() - lastEdit >= editIdleDelay) {
           warm([data.pageNumber]);
-          void refreshReviewPointer().catch(error => console.warn('[PDF selection highlight] Pointer unavailable:', error));
         }
         else queueWarm(data?.pageNumber);
         if (contexts.length || reviewPointer || defaultPointer) schedule();
@@ -484,7 +477,7 @@
       }
       return;
     }
-    if (!selectionHighlight || event?.type === 'pointerup') return;
+    if (event?.type === 'pointerup') return;
     const range = native.getRangeAt(0), chunks = [], scope = sourcePages();
     const ancestor = range.commonAncestorContainer;
     const page = (ancestor.nodeType === Node.ELEMENT_NODE ? ancestor : ancestor.parentElement)?.closest(".page");
@@ -584,20 +577,20 @@
     const documentIndex = review.locator.getDocumentIndex(pdf, scope);
     const visible = review.locator.environment.getVisiblePages?.() || [], pageIndexes = visible.map(page => page.index);
     for (const source of new Set(entries.map(entry => entry.index).filter(Boolean)))
-      source.update(pageIndexes);
+      source.getDifferences(pageIndexes);
     entries = entries.flatMap(entry => {
       if (!visibleOnly && !entry.marked) return [entry];
       const connections = entry.index?.livePairs.filter(connection => pageIndexes.includes(connection.target) || connection.target === documentIndex);
       if (!connections?.length || connections.some(range => range.start <= entry.start && range.end >= entry.end)) return [entry];
       const ranges = [...connections,
-        ...(entry.index.prepared?.differences || entry.index.getDifferences()).items
+        ...entry.index.prepared.differences.items
           .filter(item => item.missing).map(item => ({ start: item.sourceStart, end: item.sourceEnd }))]
         .map(range => [Math.max(entry.start, range.start), Math.min(entry.end, range.end)]).filter(([start, end]) => end > start);
       return ranges.length ? ranges.map(([start, end]) => entry.index.entry(start, end, entry.marked)) : [entry];
     });
     const locations = entries.map(entry => {
       const absent = review.locator.textEnabled && entry.index
-        && (entry.index.prepared?.differences || entry.index.getDifferences()).items
+        && entry.index.prepared.differences.items
         .find(item => item.missing && (entry.start === entry.end ? entry.marked && entry.start >= item.sourceStart && entry.start <= item.sourceEnd
           : entry.start < item.sourceEnd && entry.end > item.sourceStart));
       if (absent) {
@@ -707,7 +700,7 @@
     // Publish mapping data only. The review adapter chooses where and how to show it.
     const editor = currentEditor(), model = editor?.getModel(), selected = selectionRevision;
     if (notices.length) setTimeout(function publish() {
-      if (!selectionHighlight || (!diffHighlight && !sourceDiffHighlight && !notices[0].missing) || !pointer && !selectionHighlight || stopped || selected !== selectionRevision || notifiedSelection === selected
+      if (!selectionHighlight || (!diffHighlight && !sourceDiffHighlight && !notices[0].missing) || stopped || selected !== selectionRevision || notifiedSelection === selected
         || div && !div.isConnected || painted && (!painted.node.isConnected || review.highlights.getHighlight(div, pointer) !== painted)) return;
       // Opening review selects its candidate; wait until the user's drag ends.
       if (selecting) { pendingDifference = publish; return; }

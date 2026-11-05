@@ -61,9 +61,13 @@ ReplacementReview.register({
 
 `ReviewHighlights.measureHighlights()` 通过索引的 `fontRuns(start, end, true)` 获取文字节点范围，复用弹窗锚点的坐标查找；`ReviewHighlights.create()` 不再接收 `lowerBound`。公共高亮模块只依赖这个索引接口，不导入 PDF 类。
 
-注册 PDF 审阅时，`locator` 直接提供共享 `PdfLocator` 实例，宿主调用其 `reviewItems(context)`，不经 `provide` 转接。当前 `model/index` 由 locator 持有，弹窗 context 不保存 `index/targets` 副本。队列准备时统一确定 `data.partial` 和候选列表，`cacheReview()` 共用组装流程；完整队列按 pattern 分组，快速结果按候选自身分组，分组策略在进入循环前选定。`prepareReview()` 只校验普通上下文并更新共享索引；provider 的 `onDifference()`、`onReviewClosed()` 分别处理弹窗事件和关闭状态，选中事件直接将整理好的 `request` 传给 `reviewItems(context)`，不再通过 locator 临时存取 `reviewRequest`，也不绑定或改写实例方法；携带 `source` 的 `reviewItems(context)` 继续复用 `indexDocument/indexFonts` 的读取缓存。无参 `reviewItems()` 也会显式取得当前模型版本的索引，独立模型入口传入 `model` 更新索引；`index.getDifferences()` 只计算所属索引快照，不再通过属性读取切换 locator 的当前索引。源码发布事件只传编辑器、PDF、目标和开关，由 provider 准备源码索引。其他 provider 保持 `provide(context)` 接口。
+注册 PDF 审阅时，`locator` 直接提供共享 `PdfLocator` 实例，宿主调用其 `reviewItems(context)`，不经 `provide` 转接。当前 `model/index` 由 locator 持有，弹窗 context 不保存 `index/targets` 副本。队列准备时统一确定 `data.partial` 和候选列表，`cacheReview()` 共用组装流程；完整队列按 pattern 分组，快速结果按候选自身分组。预览、高亮和替换直接从 `reviewLists` 读取准备好的分组，不经过转发包装或重新扫描候选。`prepareReview()` 只校验普通上下文并更新共享索引；provider 的 `onDifference()`、`onReviewClosed()` 分别处理弹窗事件和关闭状态，选中事件直接将整理好的 `request` 传给 `reviewItems(context)`，不再通过 locator 临时存取 `reviewRequest`，也不绑定或改写实例方法；携带 `source` 的 `reviewItems(context)` 继续复用 `indexDocument/indexFonts` 的读取缓存。无参 `reviewItems()` 也会显式取得当前模型版本的索引，独立模型入口传入 `model` 更新索引；`index.getDifferences()` 只计算所属索引快照，不再通过属性读取切换 locator 的当前索引。源码发布事件只传编辑器、PDF、目标和开关，由 provider 准备源码索引。其他 provider 保持 `provide(context)` 接口。
 
 `provide(context)` 接收 `editor/model/documentModel/source/version/signal/request`，返回候选数组或 `{ items }`。每个候选有唯一字符串 `id`，每个选项有唯一字符串 `id`。首项默认选中，选择保存于 `state.choices`。
+
+PDF 选区通过结果的 `selection` 独立提供，不替换、合并或重排 `items` 中的差异。非空选区以选中的片段本身作为上下文：即使处在不同词的词首、词尾或词中，词的其余部分不同也不影响分组。在索引的可见文本 `raw` 中精确查找选中片段，然后通过 `differencesIn(start, end)` 反查范围内已有的文字差异。该查询使用差异快照中的有序 `text` 和累计结束位置 `textEnds` 二分定位，不重新比较 PDF；`pattern()` 将内部差异的数量、相对位置、缺失标记及 HTML/PDF 文本纳入同组条件。只有选中片段和内部 pattern 都相同的位置才支持一键批量替换、同组预览和高亮；普通差异和无文本的插入光标仍使用原有词上下文规则。组内选区不插入导航队列。队列快照不变时，换选区复用原有 `items/entries/edits/plans`，只组装本次选区组；候选和数组的分组归属统一存入已有的 `reviewLists`，不保留第二份候选到分组的映射。普通选区复用已有编辑方案，切入差异内部或未进入默认队列的特殊选区仍沿用原有局部转换；其他命中位置只按索引生成对应编辑，不再运行局部 diff。`selection.queueRange` 保存当前选区在原始队列中覆盖的首末下标，弹窗显示 `3–5 / 20` 这样的序号范围；上一条从首项向前、下一条从末项向后。若选区差异没有进入默认队列，显示 `选区 / 总数`，以源码位置确定前后条。会话的 `selection` 仅在审阅选区时存在，导航或正文重算后清空；预览、分窗同步、替换保存和原生 Hover 共用该选区项及 provider 已准备的源码映射。
+
+选区定位按需取得当前页的 scope 和映射，选区命中、缺失项查询统一使用 `differencesIn()`，不主动刷新整份连接或生成完整差异队列。完整差异及装饰更新统一走已有的 `queueWarm()` 空闲调度；拖选期间暂停，松开后等待交互空闲，完成后重新定位、补齐缺失项。已有快照的选区请求直接查询缓存；异步返回后核对交互序号和选区，模型版本、编辑器及 PDF 归属复用 `prepareReview()` 校验，丢弃过期请求。普通源码刷新复用同一份差异结果，不清空当前选区分组。Monaco/原生编辑器的灯泡和补全回调只读取同版本、同 PDF、同探测设置的已准备方案，等待后台更新，不在每次选区变化时触发完整 diff。
 
 `content(state, item)` 定义弹窗内容；没有当前候选时 `item` 为 `undefined`。`comparison` 是行数组，每行包含 `label` 和 `parts: [{ text, changed }]`，由公共弹窗以纯文本渲染。`range` 控制源码选区。`options` 定义显示的单选项；`applyLabel` 定义操作文字；`advance/expanded/all: false` 可隐藏对应操作。`title` 可覆盖注册名称。公共模块不推导 HTML/PDF 对照、替换范围或裁剪方式。
 
@@ -73,7 +77,7 @@ ReplacementReview.register({
 
 预览开启时，Monaco 灯泡提供当前拟议方案的 quick fix，复用预览的所选 `edits`（包括同组替换），并携带模型版本；应用后可撤销。`ReplacementReview.bindSuggestions(editor, provide)` 接收返回 `{ label, edits }[]` 的同步回调，让差异处的参考建议在弹窗关闭或预览关闭时仍然可用。PDF provider 复用当前索引、候选缓存和 pattern 词边界，保留原始替换方案中的标签位置；缺失 OCR 与格式差异不生成输入补全。仅手动输入、粘贴后自动打开 Monaco 建议列表，移动光标及程序修改不触发；输入法组合期间等待组合结束。单行 pattern 以可接受的补全项显示，接受后替换当前位置的完整 pattern；跨行方案仍通过灯泡或审阅操作处理。两类入口都检查当前模型、只读状态和原文；编辑器释放时注销 provider。验证：`node tests/replacement-suggestions-browser.mjs`。
 
-可选接口保留 `isEnabled/setEnabled/available/isCurrent/onSelect/presentation`。`focusIndex(items, request)` 决定选区请求的候选回退位置，`containsSelection(item, request)` 判断选区是否属于当前候选。仅有 `setEnabled` 的功能注册为独立开关。`ReplacementReview.invalidate(id)` 使外部依赖变化后的会话失效并自动重新计算。
+可选接口保留 `isEnabled/setEnabled/available/isCurrent/onSelect/presentation`。审阅会话直接从结果的 `selection.queueRange` 确定选区起点，`containsSelection(item, request)` 判断选区是否属于当前候选。仅有 `setEnabled` 的功能注册为独立开关。`ReplacementReview.invalidate(id)` 使外部依赖变化后的会话失效并自动重新计算。
 
 双窗口切回阅读器或编辑器时，以 `document.hasFocus()` 配合窗口 `blur` 判断是否离开窗口：首次点击保留两边弹窗，随后点击其他位置才关闭。弹窗在后台打开或刷新也保留此状态；焦点进入内嵌 iframe 不算切换窗口。键盘开始操作后恢复普通关闭行为，窗口切换用的修饰键及 Alt+Tab 不消耗首次点击保护；关闭按钮始终生效。
 
@@ -88,3 +92,5 @@ ReplacementReview.register({
 独立 `html_pattern_review/` 页面及其 Python 保存接口保持原有工作流。
 
 验证入口：`node tests/replacement-review-browser.mjs`（编辑器、阅读器、当前文件前后条及边界、换文件关闭弹窗、共享弹窗、PDF 替换及分窗）；`node --test tests/pdf-selection-diff.test.mjs tests/pdf-selection-highlight.test.mjs`（定位与高亮）。浏览器 PDF 差异测试使用受控文字层，不代表整卷扫描 PDF 验证。
+
+候选归属：provider 的普通缓存只保存候选队列与分组；选区结果按通知对象在 `reviewLists` 中复用，不修改普通缓存。当前导航位置及选区候选由审阅会话维护，调用 `provider.apply(state, all)` 时通过 `state.item` 直接传入当前候选，provider 不再查询或决定当前项。编辑器实际选区通过 `getSelection()/getSelections()/setSelection()` 读取和修改；选区候选是本次比较结果，不是另一份编辑器选区。高亮分组直接从 `reviewLists` 读取，不再写入会话 context。

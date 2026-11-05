@@ -79,17 +79,17 @@ test('browser draws selected ranges and nearby diffs for tolerant matches', asyn
         });
         let currentSource = htmlSource, version = 1, a = sourceStart, b = sourceStart + selectedSource.length;
         window.sourceReads = 0;
-        const model = { getValue: () => { sourceReads++; return currentSource; }, getVersionId: () => version, getOffsetAt: position => position };
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => { sourceReads++; return currentSource; }, getVersionId: () => version, getOffsetAt: position => position } }), model = documentModel.model;
         PdfSelection.attachEditor({
           onDidChangeCursorSelection(callback) {
             window.selectSource = (start, end, source) => {
               a = start; b = end;
-              if (source !== undefined) { currentSource = source; version++; }
+              if (source !== undefined) { currentSource = source; version++; documentModel.update(documentModel.content); }
               callback();
             };
             return { dispose() {} };
           },
-          getModel: () => model,
+          document: documentModel, getModel: () => model,
           getSelections: () => [{ getStartPosition: () => a, getEndPosition: () => b }], hasTextFocus: () => true
         });
         // A continuous selection can be drawn as one rectangle per visual line.
@@ -166,9 +166,9 @@ test('review highlights all supplied occurrences across PDF pages and clears the
           async getTextContent() { return { items: [{ str: passages[number - 1], transform: [1, 0, 0, 1, 0, 100], width: 600, height: 20 }] }; }
         }; } } });
       const markup = passages.map(text => `<p>${text}</p>`).join('');
-      const model = { getValue: () => markup, getVersionId: () => 1 };
-      window.pointerEditor = { getModel: () => model };
-      const index = PdfSelection.locator.editorSourceIndex(model);
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => markup, getVersionId: () => 1 } }), model = documentModel.model;
+      window.pointerEditor = { document: documentModel, getModel: () => model };
+      const index = PdfSelection.locator.editorSourceIndex(documentModel);
       const items = [...index.raw.matchAll(/Word/g)].map(match => ({ sourceStart: match.index, sourceEnd: match.index + 4 }));
       PdfSelection.showReviewPointer(pointerEditor, items);
     }, passages);
@@ -206,13 +206,13 @@ test('clicking PDF whitespace clears linked review highlights without repainting
         eventBus: { on() {}, off() {} }, pdfDocument: { numPages: 1, async getPage() { return {
           async getTextContent() { return { items: [{ str: text, transform: [1, 0, 0, 1, 0, 100], width: 600, height: 20 }] }; }
         }; } } });
-      const model = { getValue: () => markup, getVersionId: () => 1, getOffsetAt: position => position };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => markup, getVersionId: () => 1, getOffsetAt: position => position } }), model = documentModel.model;
       const at = markup.indexOf('Word');
-      window.reviewEditor = { getModel: () => model, getDomNode: () => null,
+      window.reviewEditor = { document: documentModel, getModel: () => model, getDomNode: () => null,
         onDidChangeCursorSelection: () => ({ dispose() {} }),
         getSelections: () => [{ getStartPosition: () => at, getEndPosition: () => at + 4 }], hasTextFocus: () => true };
       PdfSelection.attachEditor(reviewEditor);
-      const index = PdfSelection.locator.editorSourceIndex(model), start = index.raw.indexOf('Word');
+      const index = PdfSelection.locator.editorSourceIndex(documentModel), start = index.raw.indexOf('Word');
       PdfSelection.showReviewPointer(reviewEditor, [{ sourceStart: start, sourceEnd: start + 4 }]);
     });
     await page.waitForFunction(() => PdfSelection.status.matches === 1);
@@ -248,14 +248,14 @@ test('browser draws HTML-only text as a visible PDF caret between text spans', a
         const box = range.getBoundingClientRect(), div = document.querySelector('.page');
         const originalRects = Range.prototype.getClientRects;
         Range.prototype.getClientRects = function () { return this.collapsed ? [] : originalRects.call(this); };
-        const model = { getValue: () => html, getVersionId: () => 1, getOffsetAt: value => value };
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => html, getVersionId: () => 1, getOffsetAt: value => value } }), model = documentModel.model;
         PdfSelection.attachViewer({
           container: document.getElementById('stage'), viewer: document.querySelector('.pdfViewer'), currentPageNumber: 1,
           _getVisiblePages: () => ({ views: [{ id: 1 }] }), getPageView: () => ({ div }), eventBus: { on() {}, off() {} },
           pdfDocument: { numPages: 1, async getPage() { return { async getTextContent() { return { items: [{ str: raw, transform: [1, 0, 0, 1, 0, 500], width: 800, height: 24 }] }; } }; } }
         });
         PdfSelection.attachEditor({
-          getModel: () => model, hasTextFocus: () => true,
+          document: documentModel, getModel: () => model, hasTextFocus: () => true,
           getSelections: () => [{ getStartPosition: () => at + 3, getEndPosition: () => at + 3 + surplus.length }],
           onDidChangeCursorSelection() { return { dispose() {} }; }
         });
@@ -309,17 +309,17 @@ test('Monaco decorations appear on open and on cached PDF page changes without a
         pdfDocument: { numPages: 2, getPage: () => new Promise(() => {}) }
       };
       let value = passages.map(text => `<p>${text}</p>`).join(''), version = 1;
-      const model = { getValue: () => value, getVersionId: () => version,
-        getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => value, getVersionId: () => version,
+        getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
       window.currentDecorations = [];
       const editor = {
-        getDomNode: () => root, getModel: () => model, hasTextFocus: () => false, getSelections: () => [],
+        getDomNode: () => root, document: documentModel, getModel: () => model, hasTextFocus: () => false, getSelections: () => [],
         onDidChangeCursorSelection() { return { dispose() {} }; },
         onDidChangeModel() { return { dispose() {} }; },
         onDidChangeModelContent(callback) { window.contentChanged = callback; return { dispose() {} }; },
         createDecorationsCollection: () => ({ set(values) { currentDecorations = values; }, clear() { currentDecorations = []; } })
       };
-      window.changeSource = () => { value = value.replace(' Q ', ' Z '); version++; contentChanged({ changes: [{}] }); };
+      window.changeSource = () => { value = value.replace(' Q ', ' Z '); version++; documentModel.update(documentModel.content); contentChanged({ changes: [{}] }); };
       PdfSelection.attachViewer(mockViewer); PdfSelection.attachEditor(editor);
     });
     await page.waitForFunction(() => currentDecorations.some(mark => mark.options.hoverMessage?.value.includes('"X"')));
@@ -338,8 +338,8 @@ test('browser prepares diffs before selection and rebuilds mappings after source
     const page = await browser.newPage();
     await page.setContent('<div id="stage" style="height:500px;width:800px;overflow:auto"><div class="pdfViewer"><div class="page" style="position:relative"><div class="textLayer" style="font:24px sans-serif"><span></span></div></div></div></div>');
     await page.addScriptTag({ content: countedEngineSource.replace(
-      'function rememberConnection(source, start, end, target, hit, alignment) {',
-      'function rememberConnection(source, start, end, target, hit, alignment) { window.preparedDiffs = (window.preparedDiffs || 0) + 1;') });
+      '  remember(start, end, target, hit, alignment) {',
+      '  remember(start, end, target, hit, alignment) { window.preparedDiffs = (window.preparedDiffs || 0) + 1;') });
     await page.addScriptTag({ content: source });
     await page.evaluate(() => {
       const before = 'Meine Ansicht ist, daß ohne alle ', after = ' rechneten auf Liebknechts ihnen wohlbekannte Schwäche.';
@@ -349,16 +349,16 @@ test('browser prepares diffs before selection and rebuilds mappings after source
       let version = 1, a = 0, b = 0;
       window.editorTargets = [];
       window.sourceReads = 0;
-      const callbacks = [], model = {
+      const callbacks = [], documentModel = new window.MewEditorCore.DocumentModel({ model: {
         getValue: () => { sourceReads++; return htmlText; }, getVersionId: () => version, getOffsetAt: position => position,
         getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 })
-      };
+      } }), model = documentModel.model;
       window.selectHtml = (text, replacement) => {
-        if (replacement) { htmlText = htmlText.replace(text, replacement); version++; text = replacement; }
+        if (replacement) { htmlText = htmlText.replace(text, replacement); version++; documentModel.update(documentModel.content); text = replacement; }
         a = htmlText.indexOf(text); b = a + text.length; callbacks.forEach(callback => callback());
       };
       window.editHtml = () => {
-        htmlText = '<!-- unsaved revision -->' + htmlText; version++;
+        htmlText = '<!-- unsaved revision -->' + htmlText; version++; documentModel.update(documentModel.content);
         contentChanged({ changes: [{ text: '<!-- unsaved revision -->' }] });
         a = htmlText.indexOf('ABCDEFGHIJ'); b = a + 10;
         callbacks.forEach(callback => callback());
@@ -377,7 +377,7 @@ test('browser prepares diffs before selection and rebuilds mappings after source
       PdfSelection.attachEditor({
         onDidChangeCursorSelection(callback) { callbacks.push(callback); return { dispose() {} }; },
         onDidChangeModelContent(callback) { window.contentChanged = callback; return { dispose() {} }; },
-        getModel: () => model, getSelections: () => [{ getStartPosition: () => a, getEndPosition: () => b }], hasTextFocus: () => false, getDomNode: () => div,
+        document: documentModel, getModel: () => model, getSelections: () => [{ getStartPosition: () => a, getEndPosition: () => b }], hasTextFocus: () => false, getDomNode: () => div,
         setSelection(range) { editorTargets.push(htmlText.slice(range.startColumn - 1, range.endColumn - 1)); callbacks.forEach(callback => callback()); }
       });
     });
@@ -472,7 +472,7 @@ test('browser reveals a bottom-of-page selection without exposing the next page'
       PdfSelection.attachViewer(mockViewer);
       PdfSelection.attachEditor({
         onDidChangeCursorSelection() { return { dispose() {} }; },
-        getModel: () => ({ getValue: () => text, getValueInRange: () => 'bottom', getOffsetAt: position => position }),
+        document: new window.MewEditorCore.DocumentModel({ model: { getValue: () => text, getValueInRange: () => 'bottom', getOffsetAt: position => position } }), getModel() { return this.document.model; },
         getSelections: () => [{ getStartPosition: () => selected, getEndPosition: () => selected + 6 }],
         hasTextFocus: () => true
       });
@@ -531,7 +531,7 @@ test('browser selects one contextual occurrence, scrolls offscreen, and retains 
       const selected = text[1].indexOf('work before');
       window.mockEditor = {
         onDidChangeCursorSelection(callback) { window.callbacks.push(callback); return { dispose() {} }; },
-        getModel: () => ({ getValue: () => text[1], getValueInRange: () => 'work', getOffsetAt: position => position }),
+        document: new window.MewEditorCore.DocumentModel({ model: { getValue: () => text[1], getValueInRange: () => 'work', getOffsetAt: position => position } }), getModel() { return this.document.model; },
         getSelections: () => [{ getStartPosition: () => selected, getEndPosition: () => selected + 4 }],
         hasTextFocus: () => true
       };
@@ -630,8 +630,8 @@ test('PDF selection uses the same visual endpoints in either direction despite i
       const div = document.querySelector('.page');
       window.html = ['profit', 'when', 'footnote'].map(id => `<p>${document.getElementById(id).textContent}</p>`).join('');
       window.targets = [];
-      const model = { getValue: () => html, getVersionId: () => 1, getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) };
-      PdfSelection.attachEditor({ getDomNode: () => div, getModel: () => model, hasTextFocus: () => false, getSelections: () => [],
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => html, getVersionId: () => 1, getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
+      PdfSelection.attachEditor({ getDomNode: () => div, document: documentModel, getModel: () => model, hasTextFocus: () => false, getSelections: () => [],
         onDidChangeCursorSelection: () => ({ dispose() {} }), setSelection: range => targets.push(range) });
       PdfSelection.attachViewer({ container: document.getElementById('stage'), viewer: document.querySelector('.pdfViewer'),
         currentPageNumber: 1, getPageView: () => ({ div }), eventBus: { on() {}, off() {} }, pdfDocument: { numPages: 0 } });
@@ -697,17 +697,17 @@ test('PDF selection reveals matching Monaco source without stealing focus or fee
       await page.addScriptTag({ content: source });
       await page.evaluate(fixture => {
         window.targets = []; window.selectionReads = 0; window.reveals = []; window.sourceReads = 0;
-        const model = {
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: {
           getValue: () => { sourceReads++; return fixture.source; }, getVersionId: () => 1,
           getPositionAt(offset) {
             const lines = fixture.source.slice(0, offset).split(/\r\n|\r|\n/);
             return { lineNumber: lines.length, column: lines.at(-1).length + 1 };
           }
-        };
+        } }), model = documentModel.model;
         const callbacks = [];
         window.mockEditor = {
           onDidChangeCursorSelection(callback) { callbacks.push(callback); return { dispose() {} }; },
-          hasTextFocus: () => false, getDomNode: () => document.getElementById('stage'), getModel: () => model,
+          hasTextFocus: () => false, getDomNode: () => document.getElementById('stage'), document: documentModel, getModel: () => model,
           getSelections() { selectionReads++; return []; },
           setSelection(range) { targets.push(range); callbacks.forEach(callback => callback()); },
           revealRangeInCenterIfOutsideViewport(range) { reveals.push(range); }
@@ -809,10 +809,10 @@ test('ready OCR layer highlights partial words through full-file selections with
         });
         window.sourceReads = 0;
         const html = damaged ? source.replace(/Token(\d+)/g, (token, number) => Number(number) % 37 === 20 ? token.replace('o', '0') : token) : source;
-        const model = { getValue: () => { sourceReads++; return html; }, getVersionId: () => 1, getOffsetAt: position => position };
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => { sourceReads++; return html; }, getVersionId: () => 1, getOffsetAt: position => position } }), model = documentModel.model;
         PdfSelection.attachEditor({
           onDidChangeCursorSelection(callback) { window.selectWord = (i, size) => { selected = i * 10; length = size; callback(); }; return { dispose() {} }; },
-          getModel: () => model,
+          document: documentModel, getModel: () => model,
           getSelections: () => [{ getStartPosition: () => selected, getEndPosition: () => selected + length }], hasTextFocus: () => true
         });
       }, damaged);
@@ -928,8 +928,8 @@ test('ME34-010 and ME34-014 prepared OCR differences highlight before whole-PDF 
         }
         window.sourceReads = 0; window.extractions = 0; window.reverseTargets = [];
         let a = 0, b = 0;
-        const model = { getValue: () => { sourceReads++; return html; }, getVersionId: () => 1,
-          getOffsetAt: pos => pos, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => { sourceReads++; return html; }, getVersionId: () => 1,
+          getOffsetAt: pos => pos, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
         PdfSelection.attachViewer({
           container: document.getElementById('stage'), viewer: document.querySelector('.pdfViewer'), currentPageNumber: pages[0].number,
           _getVisiblePages: () => ({ views: pages.map(({ number: id }) => ({ id })) }),
@@ -938,7 +938,7 @@ test('ME34-010 and ME34-014 prepared OCR differences highlight before whole-PDF 
           pdfDocument: { numPages: 38, async getPage() { return new Promise(() => {}); } }
         });
         PdfSelection.attachEditor({
-          getModel: () => model, getSelections: () => [{ getStartPosition: () => a, getEndPosition: () => b }],
+          document: documentModel, getModel: () => model, getSelections: () => [{ getStartPosition: () => a, getEndPosition: () => b }],
           hasTextFocus: () => false, getDomNode: () => document.getElementById('stage'),
           setSelection(range) { reverseTargets.push(html.slice(range.startColumn - 1, range.endColumn - 1)); },
           onDidChangeCursorSelection(callback) {
@@ -1031,7 +1031,7 @@ test('native PDF and text scrolling stays free and cancels late automatic positi
       window.events = new Map();
       const scrollBy = container.scrollBy.bind(container);
       container.scrollBy = options => { automaticMoves++; scrollBy(options); };
-      const model = { getValue: () => { sourceReads++; return html; }, getVersionId: () => 1, getOffsetAt: pos => pos };
+      const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => { sourceReads++; return html; }, getVersionId: () => 1, getOffsetAt: pos => pos } }), model = documentModel.model;
       window.mockViewer = {
         container, viewer: container.firstElementChild, currentPageNumber: 1,
         eventBus: { on(name, callback) { events.set(name, callback); }, off() {} },
@@ -1048,7 +1048,7 @@ test('native PDF and text scrolling stays free and cancels late automatic positi
       PdfSelection.attachViewer(mockViewer);
       PdfSelection.attachEditor({
         onDidChangeCursorSelection(callback) { window.selectAgain = callback; return { dispose() {} }; },
-        getModel: () => model, getSelections: () => [{ getStartPosition: () => html.indexOf('schöpliche'), getEndPosition: () => html.indexOf('schöpliche') + 10 }],
+        document: documentModel, getModel: () => model, getSelections: () => [{ getStartPosition: () => html.indexOf('schöpliche'), getEndPosition: () => html.indexOf('schöpliche') + 10 }],
         hasTextFocus: () => true, getDomNode: () => document.getElementById('text')
       });
     });
@@ -1154,14 +1154,14 @@ test('ME08-366 normal OCR fonts remove HTML styles before whole-document indexin
       const target = layerProbe(div);
       const results = [['<b>', '</b>'], ['<i>', '</i>'], ['<b><i>', '</i></b>']].map(([opening, closing]) => {
         const html = `<p>${body}</p><p style="text-indent: 0;">${opening}${footer}${closing}</p>`;
-        const index = locator.sourceIndex(html);
-        index?.diff([target]);
-        const connections = index.connectionPairs([target]), items = index.formatDifferences([], ['italic', 'bold'], true, connections);
-        const model = { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-        return { html, raw: target.raw, texts: index.reviewCandidates(null, false, true, true, [target]).length,
+        const index = new window.PdfSelectionDiff.PdfConnections(locator, html);
+        index?.update([target]);
+        const connections = [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []), items = index.formatDifferences([], ['italic', 'bold'], true, connections);
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+        return { html, raw: target.raw, texts: index.candidates(null, false, true, true, [target]).length,
           items: items.map(item => item.text),
           patched: PdfSelectionDiff.applyTextEdits(html, items.flatMap(item => item.options[0].edits)),
-          marks: index.sourceDecorations(index.reviewCandidates(null, true, false, true, [], connections), true, true, undefined, model).filter(mark => mark.options.inlineClassName.includes('mew-font-diff-text'))
+          marks: window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], connections), true, true, undefined, documentModel).filter(mark => mark.options.inlineClassName.includes('mew-font-diff-text'))
             .map(mark => html.slice(mark.range.startColumn - 1, mark.range.endColumn - 1)) };
       });
       PdfSelection.stop();
@@ -1206,7 +1206,7 @@ test('scrolling across retained PDF pages bounds DOM caches and revisits rebuild
       const retained = cacheProbe.size();
       const revisited = cacheProbe.layerIndex(pages[0]);
       const rebuilt = first !== revisited;
-      const makeSource = () => PdfSelection.locator.sourceIndex(revisited.raw);
+      const makeSource = () => new window.PdfSelectionDiff.PdfConnections(PdfSelection.locator, revisited.raw);
       const original = makeSource();
       const target = { index: original, start: 0, end: 4, range: { start: 0, end: 4 } };
       for (let i = 0; i < 80; i++) cacheProbe.nativeBoxes(pages[0], [], [{ ...target, text: String(i) }]);

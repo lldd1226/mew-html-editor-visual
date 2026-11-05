@@ -6,12 +6,17 @@ import { launchBrowser } from './support/browser.mjs';
 import { textEditFixture } from './support/pdf-harness.mjs';
 
 const scripts = new Map(await Promise.all([
-  'pdf-selection-diff.js', 'pdf-review-provider.js', 'replacement-review.js', 'pdf-selection.js'
-].map(async name => [name, await readFile(new URL(`../public/pdfdiff/${name}`, import.meta.url), 'utf8') + (name === 'pdf-selection-diff.js' ? textEditFixture : '')])));
+  'editor-core.js', 'pdf-selection-diff.js', 'pdf-connection.js', 'pdf-review-provider.js', 'replacement-review.js', 'pdf-selection.js'
+].map(async name => [name, await readFile(new URL(name === 'editor-core.js' ? '../public/editor-core.js' : `../public/pdfdiff/${name}`, import.meta.url), 'utf8') + (name === 'pdf-connection.js' ? textEditFixture : '')])));
 
-test('diff engine stays within 930 physical lines', () => {
-  const source = scripts.get('pdf-selection-diff.js');
-  assert.ok(source.split(/\r?\n/).length - Number(source.endsWith('\n')) <= 930);
+test('diff and provider stay within their physical line budgets', () => {
+  const lines = name => {
+    const source = scripts.get(name).replace(textEditFixture, '');
+    return source.split(/\r?\n/).length - Number(source.endsWith('\n'));
+  };
+  assert.ok(lines('pdf-selection-diff.js') <= 300);
+  assert.ok(lines('pdf-review-provider.js') <= 750);
+  assert.ok(lines('pdf-connection.js') < 650);
 });
 
 for (const order of [
@@ -33,7 +38,7 @@ for (const order of [
         if (url.pathname === '/api/reader/settings') return route.fulfill({ json: {} });
         // Exercise the supported local-diff fallback without a Monaco server.
         if (url.pathname.startsWith('/monaco/')) return route.fulfill({ contentType: 'text/javascript', body: 'throw new Error("Monaco unavailable in API fixture");' });
-        const source = scripts.get(url.pathname.replace('/pdfdiff/', ''));
+        const source = scripts.get(url.pathname.split('/').at(-1));
         assert.ok(source, `unexpected request: ${url.pathname}`);
         return route.fulfill({ contentType: 'text/javascript', body: source });
       });
@@ -45,16 +50,16 @@ for (const order of [
         if (api !== window.PdfReviewProvider || typeof api.PdfLocator !== 'function' ||
           methods.some(name => typeof api.highlights[name] !== 'function' || name in api))
           throw new Error('Highlights must be accessed through their owning instance');
-        if (typeof PdfSelectionDiff.PdfSourceIndex.prototype.sourceDecorations !== 'function' || 'sourceDecorations' in PdfSelectionDiff || 'sourceDecorations' in api)
-          throw new Error('Source decorations must belong to PdfSourceIndex');
+        if ('sourceDecorations' in PdfSelectionDiff.PdfConnections.prototype || 'sourceDecorations' in PdfSelectionDiff || typeof api.sourceDecorations !== 'function')
+          throw new Error('Source decorations must belong to PdfConnections');
         if ('connectionDiff' in api || 'textDifferences' in api) throw new Error('Obsolete diff helpers remain exported');
-        if ('PdfSourceIndex' in api || 'reviewCandidates' in api) throw new Error('Index operations must belong to the diff engine');
+        if ('PdfConnections' in api || 'reviewCandidates' in api) throw new Error('Index operations must belong to the diff engine');
         if (['normalized', 'lowerBound', 'htmlFontDefinition'].some(name =>
-          typeof PdfSelectionDiff[name] !== 'function' || name in PdfSelection.locator || name in PdfSelectionDiff.PdfSourceIndex))
+          typeof PdfSelectionDiff[name] !== 'function' || name in PdfSelection.locator || name in PdfSelectionDiff.PdfConnections))
           throw new Error('Stateless helpers must remain outside the class without locator wrappers');
-        if (['reviewCandidates', 'connectionPairs', 'connectionDiff', 'fontRuns', 'fontEdits', 'formatDifferences', 'sourceSegments', 'sourceDecorations', 'textEdits']
-          .some(name => typeof PdfSelectionDiff.PdfSourceIndex.prototype[name] !== 'function' || name in PdfSelectionDiff))
-          throw new Error('Index operations must be exported on the complete class');
+        if (['prepare', 'scope', 'remember', 'compare', 'range', 'pairs', 'locate', 'inherit', 'search', 'matches', 'missingRange', 'locateSource', 'locateLayer', 'candidates', 'formatDifferences', 'entry', 'fontRuns', 'fontEdits', 'sourceSegments', 'textEdits']
+          .some(name => typeof PdfSelectionDiff.PdfConnections.prototype[name] !== 'function' || name in PdfSelectionDiff))
+          throw new Error('Connection operations must belong to PdfConnections');
         if (['readPageText', 'readPageFonts', 'layerFonts'].some(name =>
           typeof api.PdfLocator.prototype[name] !== 'function' || name in PdfSelectionDiff || name in api))
           throw new Error('Data reading must belong to PdfLocator');
@@ -63,28 +68,28 @@ for (const order of [
           throw new Error('Font metadata and hover methods must be accessed through PdfLocator');
         if (!(PdfSelection.locator instanceof api.PdfLocator)) throw new Error('Selection uses a different provider');
         let value = '<p>Before WRONG after.</p>', version = 1;
-        const model = { getValue: () => value, getVersionId: () => version,
+        const documentModel = new window.MewEditorCore.DocumentModel({ model: { getValue: () => value, getVersionId: () => version,
           getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }),
-          getOffsetAt: position => position.column - 1 };
+          getOffsetAt: position => position.column - 1 } }), model = documentModel.model;
         const noop = () => ({ dispose() {} });
-        const editor = { getModel: () => model, getDomNode: () => document.body, getOption: () => false,
+        const editor = { document: documentModel, getModel: () => model, getDomNode: () => document.body, getOption: () => false,
           onDidChangeModel: noop, onDidChangeModelContent: noop, onDidScrollChange: noop,
           getSelection: () => null, setSelection() {}, revealRangeInCenterIfOutsideViewport() {}, pushUndoStop() {}, focus() {},
           executeEdits(origin, edits) {
             for (const edit of [...edits].reverse()) value = value.slice(0, edit.range.startColumn - 1)
               + edit.text + value.slice(edit.range.endColumn - 1);
-            version++; return true;
+            version++; documentModel.update(documentModel.content); return true;
           } };
         let currentToolbox;
         const unregister = ReplacementReview.register({ id: 'api-context', label: 'API context',
-          provide(context) { currentToolbox = context.toolbox; return []; } });
+          provide(context) { currentToolbox = context.documentModel; return []; } });
         await ReplacementReview.open('api-context', editor);
-        if (currentToolbox !== window.PdfSelectionDiff) throw new Error('Popup captured an unavailable toolbox');
+        if (currentToolbox !== documentModel) throw new Error('Popup captured a different document owner');
         ReplacementReview.close(); unregister();
-        const locator = PdfSelection.locator, index = locator.editorSourceIndex(model);
-        const target = locator.sourceIndex('<p>Before RIGHT after.</p>');
-        const connection = index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
-        const marks = index.sourceDecorations(index.reviewCandidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, model);
+        const locator = PdfSelection.locator, index = locator.editorSourceIndex(documentModel);
+        const target = new window.PdfSelectionDiff.PdfConnections(locator, '<p>Before RIGHT after.</p>');
+        const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
+        const marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel);
         const combined = [
           ['<i>heine</i>', 'keine'], ['<i>keXne</i>', 'keine'], ['<i>keinX</i>', 'keine'],
           ['<i>heeine</i>', 'keine'], ['<i>heine Worte</i>', 'keine Worte'],
@@ -92,12 +97,12 @@ for (const order of [
           ['<i>heine</i>', 'keine+'], ['<i>keineX</i>', 'keine'], ['<i>Xkeine</i>', 'keine'],
           ['<i> </i><b> </b>', 'XYZ']
         ].map(([markup, raw]) => {
-          const source = locator.sourceIndex(markup);
-          const pdf = new PdfSelectionDiff.PdfSourceIndex(locator, { raw,
+          const source = new window.PdfSelectionDiff.PdfConnections(locator, markup);
+          const pdf = new PdfSelectionDiff.PdfConnections(locator, { raw,
             parts: [{ start: 0, end: raw.length, font: { italic: false, bold: false } }] });
-          const pair = source.rememberConnection(0, source.raw.length, pdf, { start: 0, end: raw.length });
-          const decorations = source.sourceDecorations(source.reviewCandidates(null, true, false, true, [pdf], [[pair, pdf]]), true, true, item => PdfReviewProvider.locator.sourceHover(item, model), model);
-          const text = source.reviewCandidates(null, false, true, true, [pdf]);
+          const pair = source.remember(0, source.raw.length, pdf, { start: 0, end: raw.length });
+          const decorations = window.PdfReviewProvider.sourceDecorations(source, source.candidates(null, true, false, true, [pdf], [[pair, pdf]]), true, true, item => PdfReviewProvider.sourceHover(item, model), documentModel);
+          const text = source.candidates(null, false, true, true, [pdf]);
           return { ranges: decorations.map(({ range }) => markup.slice(range.startColumn - 1, range.endColumn - 1)),
             textRanges: decorations.filter(mark => mark.options.inlineClassName === 'mew-ocr-diff-text')
               .map(({ range }) => markup.slice(range.startColumn - 1, range.endColumn - 1)),
@@ -156,7 +161,9 @@ test('production modules share default marks, popup offsets and grouped replacem
   page.on('pageerror',e=>errors.push(e.message));
   await page.route('http://shared-review.test/**',route=>{
    const p=new URL(route.request().url()).pathname;
-   if(p==='/api/reader/settings')return route.fulfill({json:{diffHighlight:true,sourceDiffHighlight:true,selectionHighlight:false}});
+   const script=scripts.get(p.split('/').at(-1));
+   if(script)return route.fulfill({contentType:'text/javascript',body:script});
+   if(p==='/api/reader/settings')return route.fulfill({json:{diffHighlight:true,sourceDiffHighlight:true,selectionHighlight:true}});
    if(p.startsWith('/monaco/'))return route.fulfill({contentType:'text/javascript',body:'throw new Error("fallback fixture")'});
    return route.fulfill({contentType:'text/html',body:'<div id="editor" style="width:800px;height:400px"></div><div id="stage" style="position:relative;width:800px;height:300px;overflow:auto"><div class="pdfViewer"><div class="page" data-page-number="1" style="position:relative;width:800px;height:300px"><div class="textLayer"><span role="presentation">Alpha right beta right end.</span></div></div></div></div>'});
   });
@@ -164,12 +171,12 @@ test('production modules share default marks, popup offsets and grouped replacem
   await page.evaluate(()=>{
    window.source='<p>Alpha wrong beta wrong end.</p>'; window.version=1; window.selections=[];
    const wrap=r=>({...r,isEmpty:()=>r.startColumn===r.endColumn,getPosition:()=>({lineNumber:1,column:r.endColumn}),equalsRange:other=>other?.startColumn===r.startColumn&&other?.endColumn===r.endColumn});
-   const model={getValue:()=>source,getVersionId:()=>version,getPositionAt:offset=>({lineNumber:1,column:offset+1}),
-    getOffsetAt:pos=>pos.column-1,validateRange:r=>r,getLanguageId:()=> 'html'};
-   window.editor={getModel:()=>model,getDomNode:()=>document.getElementById('editor'),createDecorationsCollection:()=>({set(){},clear(){}}),
+   const documentModel = new window.MewEditorCore.DocumentModel({ model: {getValue:()=>source,getVersionId:()=>version,getPositionAt:offset=>({lineNumber:1,column:offset+1}),
+    getOffsetAt:pos=>pos.column-1,validateRange:r=>r,getLanguageId:()=> 'html'} }), model = documentModel.model;
+   window.editor={document: documentModel, getModel: () => model,getDomNode:()=>document.getElementById('editor'),createDecorationsCollection:()=>({set(){},clear(){}}),
     setPosition() {},getSelection:()=>window.selected||null,setSelection(r){window.selected=wrap(r);selections.push([r.startColumn,r.endColumn]);},
     revealRangeInCenterIfOutsideViewport(){},getScrolledVisiblePosition:()=>({top:20,left:0,height:20}),getOption:()=>false,pushUndoStop(){},focus(){},
-    executeEdits(origin,edits){for(const edit of [...edits].reverse())source=source.slice(0,edit.range.startColumn-1)+edit.text+source.slice(edit.range.endColumn-1);version++;return true;}};
+    executeEdits(origin,edits){for(const edit of [...edits].reverse())source=source.slice(0,edit.range.startColumn-1)+edit.text+source.slice(edit.range.endColumn-1);version++; documentModel.update(documentModel.content);return true;}};
    const item={str:'Alpha right beta right end.',transform:[1,0,0,1,0,280],width:240,height:20,fontName:'fixture'},
     pdfPage={getTextContent:async()=>({items:[item]}),commonObjs:new Map()};
    const div=document.querySelector('.page'), stage=document.getElementById('stage');
@@ -178,13 +185,14 @@ test('production modules share default marks, popup offsets and grouped replacem
     getPageView:()=>({div,pdfPage,viewport:{width:800,height:300,scale:1,convertToViewportPoint:(x,y)=>[x,300-y]}})};
    window.ReaderUI={getPdfViewer:()=>mockViewer,getSourceEditor:()=>editor,getPdfSourcePages:()=>[1]};
   });
-  for(const name of ['pdf-selection-diff.js','replacement-review.js','pdf-review-provider.js','pdf-selection.js'])
+  for(const name of ['editor-core.js','pdf-connection.js','replacement-review.js','pdf-review-provider.js','pdf-selection.js'])
    await page.addScriptTag({type:'module',content:scripts.get(name)});
   await page.waitForFunction(()=>window.PdfSelection,{},{timeout:5000});
   await page.evaluate(()=>PdfSelection.refresh());
-  await page.waitForFunction(()=>document.querySelector('.mew-pdf-review-pointer')?.children.length>0,{},{timeout:7000});
+  await page.waitForFunction(()=>document.querySelector('.mew-pdf-review-pointer')?.children.length>0,{},{timeout:7000})
+    .catch(error => { throw new Error(`${error.message}; page errors: ${errors.join('; ')}`); });
   await page.evaluate(async()=>{
-   const locator=PdfSelection.locator,model=editor.getModel(),index=locator.editorSourceIndex(model),target=await locator.indexDocument(mockViewer.pdfDocument,[1]);
+   const locator=PdfSelection.locator,model=editor.getModel(),index=locator.editorSourceIndex(editor.document),target=await locator.indexDocument(mockViewer.pdfDocument,[1]);
    const data=await locator.reviewItems({model,editor,source:model.getValue(),signal:new AbortController().signal});
    if(locator.model!==model||locator.index!==data.index||locator.reviewItems()!==data)throw new Error('Direct class entry must reuse prepared review data synchronously');
    await ReplacementReview.open('pdf-ocr',editor,'6:11',0,{pdf:mockViewer.pdfDocument,targets:[target],notice:{html:index.raw,pdf:'Alpha right beta right end.\nX',source:{index,start:0,end:index.raw.length}}});
@@ -198,12 +206,15 @@ test('production modules share default marks, popup offsets and grouped replacem
   assert.ok(clicked.some(([a,b])=>a===b),'an empty HTML counterpart retains its insertion offset');
   assert.deepEqual(clicked.slice(0,markCount/2),clicked.slice(markCount/2),'both rows carry the same source coordinates');
   await page.evaluate(async()=>{
-    const locator=PdfSelection.locator,index=locator.editorSourceIndex(editor.getModel()),target=await locator.indexDocument(mockViewer.pdfDocument,[1]);
+    const locator=PdfSelection.locator,index=locator.editorSourceIndex(editor.document),target=await locator.indexDocument(mockViewer.pdfDocument,[1]);
     await ReplacementReview.open('pdf-ocr',editor,'6:11',0,{pdf:mockViewer.pdfDocument,targets:[target],notice:{html:'wrong',pdf:'right',source:{index,start:6,end:11}}});
+    const execute=editor.executeEdits.bind(editor);
+    editor.executeEdits=(...args)=>new Promise(resolve=>setTimeout(()=>resolve(execute(...args)),30));
   });
   await page.evaluate(()=>document.querySelector('[data-advance]').click());
   await page.waitForFunction(()=>!source.includes('wrong'));
   assert.equal(await page.evaluate(()=>source),'<p>Alpha right beta right end.</p>');
+  await page.waitForFunction(()=>document.querySelector('[data-position]').textContent==='0 / 0');
   assert.deepEqual(errors,[]);
   await page.evaluate(()=>ReplacementReview.close(false,false));
   } finally { await browser.close(); }

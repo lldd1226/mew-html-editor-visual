@@ -18,18 +18,18 @@ try {
   await page.waitForFunction(() => {
     const locator = PdfSelection.locator, editor = readerMonaco.editor;
     const target = locator.getDocumentIndex(ReaderUI.getPdfViewer().pdfDocument, ReaderUI.getPdfSourcePages());
-    return target && locator.editorSourceIndex(editor.getModel()).pageScopes.get(target)?.prepared;
+    return target && locator.editorSourceIndex(editor.document).scopes.get(target)?.prepared;
   });
   const result = await page.evaluate(() => {
     PdfReviewProvider.setFontEnabled(false);
     const editor = readerMonaco.editor, locator = PdfSelection.locator;
-    const index = locator.editorSourceIndex(editor.getModel()), targets = locator.environment.getTargets();
-    index?.diff(targets);
+    const index = locator.editorSourceIndex(editor.document), targets = locator.environment.getTargets();
+    index?.update(targets);
     window.markState = marks => JSON.stringify(marks.filter(mark => /text.*difference/.test(mark.options.description))
       .map(({ range, options: o }) => { const r = editor.getModel().validateRange(range);
         return [r.startLineNumber, r.startColumn, r.endLineNumber, r.endColumn, o.inlineClassName, o.before?.inlineClassName]; }).sort());
     window.htmlMarks = () => markState(editor.getModel().getAllDecorations());
-    window.expectedMarks = () => markState(index.sourceDecorations(index.reviewCandidates(null, PdfReviewProvider.locator.fontStyles, false, true, locator.environment.getTargets(), index.connectionPairs(locator.environment.getTargets(), true)), PdfReviewProvider.locator.fontStyles, true, undefined, editor.getModel()));
+    window.expectedMarks = () => markState(window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, PdfReviewProvider.locator.fontStyles, false, true, locator.environment.getTargets(), locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), PdfReviewProvider.locator.fontStyles, true, undefined, editor.getModel()));
     window.paragraphNotice = null;
     addEventListener('pdf-selection-difference', event => {
       window.paragraphNotice = event.detail.notices?.find(n => n.source && n.target?.end > n.target?.start);
@@ -41,9 +41,9 @@ try {
   await page.waitForFunction(() => htmlMarks() === expectedMarks());
   await page.evaluate(() => {
     window.initialHtmlMarks = htmlMarks();
-    const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+    const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
     const start = index.raw.indexOf('Das einzige'), end = index.raw.indexOf('unter-', start) + 6;
-    editor.setSelection(window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+    editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
       (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length));
   });
   await page.waitForFunction(() => window.paragraphNotice?.box && !window.paragraphNotice.box.caret, null, { timeout: 5000 });
@@ -68,12 +68,12 @@ try {
   await page.waitForFunction(() => readerMonaco.editor.getModel().getAllDecorations()
     .some(mark => mark.options.description === 'PDF OCR text difference'));
   const normalHighlights = await page.evaluate(() => {
-    const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+    const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
     const start = index.raw.indexOf('und fordert empört'), end = index.raw.indexOf('sollen.', start) + 'sollen.'.length;
     const marks = editor.getModel().getAllDecorations().filter(mark => mark.options.description === 'PDF OCR text difference');
     ReplacementReview.close();
     window.selectionNotice = null;
-    editor.setSelection(window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+    editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
       (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length));
     return marks.some(mark => mark.options.inlineClassName === 'mew-ocr-diff-text');
   });
@@ -86,9 +86,9 @@ try {
   await page.evaluate(() => {
     ReplacementReview.close();
     window.paragraphNotice = null;
-    const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+    const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
     const start = index.raw.indexOf('Rivalität');
-    editor.setSelection(window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+    editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
       (start + 'Rivalität'.length > start ? index.ends[(start + 'Rivalität'.length) - 1] : index.starts[start]) ?? index.source.length));
   });
   await page.waitForFunction(() => window.paragraphNotice?.box && !window.paragraphNotice.box.caret, null, { timeout: 5000 });

@@ -1,3 +1,5 @@
+import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
+import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -10,17 +12,17 @@ test('font replacement retains overlapping faults and batch validation stays ato
     vm.runInNewContext(diffSource + '\n' + mappingSource, { window });
     const locator = new window.PdfReviewProvider.PdfLocator({}, { document: { createElement: () => ({}) } });
     let source = '<p>abc def</p>', applications = 0, undoStops = 0;
-    const model = { getValue: () => source, getVersionId: () => 1,
-      getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-    locator.editorSourceIndex(model);
-    const editor = { getModel: () => model, getOption: () => false, pushUndoStop() { undoStops++; },
+    const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => 1,
+      getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+    locator.editorSourceIndex(documentModel);
+    const editor = { document: documentModel, getModel: () => model, getOption: () => false, pushUndoStop() { undoStops++; },
       executeEdits(origin, edits) {
         applications++;
         for (const edit of [...edits].reverse()) source = source.slice(0, edit.range.startColumn - 1)
           + edit.text + source.slice(edit.range.endColumn - 1);
         return true;
       } };
-    window.PdfSelection = { locator, editor };
+    window.PdfSelection = { locator, savePreference() {}, editor };
     window.ReplacementReview = { register(provider) { providers.set(provider.id, provider); return () => {}; } };
     vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
     const items = [[0, 3, 3, 'A'], [1, 3, conflict ? 3 : 4, 'B'], [4, 7, 7, 'D']].map(([start, end, at, text], i) => ({
@@ -28,9 +30,14 @@ test('font replacement retains overlapping faults and batch validation stays ato
       options: [{ id: 'format', edits: [{ start: at, end: at + 1, expected: source[at], text }] }]
     }));
     const group = { items: [items[0]] };
-    locator.reviewLists.set(items, { groups: new Map([[items[0], group]]), index: locator.index,
+    locator.reviewLists.set(items[0], group);
+    locator.reviewLists.set(items, { index: locator.index,
       edits: items.flatMap(item => item.options[0].edits) });
-    const apply = () => providers.get('pdf-ocr').apply({ context: { editor, model, source, version: 1 }, items, position: 0 }, all);
+    const apply = () => {
+      const result = providers.get('pdf-ocr').apply({ context: { editor, model, documentModel, source, version: 1 }, item: items[0], items, position: 0 }, all);
+      result.apply?.();
+      return result;
+    };
     if (conflict) {
       assert.throws(apply, /替换范围重叠/);
       assert.equal(source, '<p>abc def</p>');
@@ -50,16 +57,17 @@ test('ME32-150 clicking a highlighted footnote digit opens its exact empty OCR c
   const window = { addEventListener(name, fn) { listeners.set(name, fn); }, removeEventListener() {} };
   vm.runInNewContext(diffSource + '\n' + mappingSource, { window });
   const api = Object.assign(window.PdfReviewProvider, window.PdfSelectionDiff);
-  const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+  const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getPdf: () => pdf, getTargets: () => [target] });
   const source = '<p><a id="F9" href="#ZF9">9</a> starkem Druck</p>';
-  const index = locator.sourceIndex(source), target = new api.PdfSourceIndex(locator, { raw: 'kem Druck\n', parts: [] });
-  index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
-  const model = { getValue: () => source, getVersionId: () => 1,
-    getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-  const editor = { getModel: () => model, getDomNode: () => ({ ownerDocument: { defaultView: window } }) };
+  const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => 1,
+    getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+  const index = locator.editorSourceIndex(documentModel), target = new api.PdfConnections(locator, { raw: 'kem Druck\n', parts: [] });
+  index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
+
+  const editor = { document: documentModel, getModel: () => model, getSelection: () => null, getDomNode: () => ({ ownerDocument: { defaultView: window } }) };
   let opened;
   window.ReaderUI = { getPdfViewer: () => ({ pdfDocument: pdf }) };
-  window.PdfSelection = { locator, editor };
+  window.PdfSelection = { locator, savePreference() {}, editor };
   window.ReplacementReview = { register(provider) { providers.set(provider.id, provider); return () => {}; },
     isOpenFor: () => false, openForSelection(...args) { opened = args; } };
   vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
@@ -67,61 +75,62 @@ test('ME32-150 clicking a highlighted footnote digit opens its exact empty OCR c
   const reviewItems = locator.reviewItems;
   let listenerRequest;
   locator.reviewItems = function(context) {
-    if (context === undefined) listenerRequest = this.reviewRequest;
+    listenerRequest = context.request;
     return reviewItems.apply(this, arguments);
   };
-  listeners.get('pdf-selection-difference')({ type: 'pdf-selection-difference', detail: { editor, model, pdf, notices: [notice], targets: [target] } });
+  await listeners.get('pdf-selection-difference')({ type: 'pdf-selection-difference', detail: { editor, model, pdf, notices: [notice], targets: [target] } });
   assert.ok(opened, 'the footnote filter must not discard an explicit digit click');
-  assert.equal(listenerRequest.notices[0], notice, 'candidate initialization reads the listener input from its locator');
-  assert.equal(locator.reviewRequest, undefined, 'listener input is consumed rather than retained as a second session');
-  assert.equal(opened[2], '0:1');
+  assert.equal(listenerRequest.notices[0], notice, 'candidate initialization receives the listener input directly');
+  assert.equal('reviewRequest' in locator, false, 'listener input is never stored on the locator');
+  assert.equal(opened[2], 'selection:0:1');
   assert.equal(locator.review.selection.id, opened[2], 'the focused selection is initialized with the cached candidates');
   const items = (await providers.get('pdf-ocr').locator.reviewItems({ model, source, request: opened[3] })).items;
-  const selected = items.find(item => item.id === '0:1');
+  const selected = locator.review.selection;
   assert.equal(selected.comparison.html, '9');
   assert.equal(selected.comparison.pdf, '');
   assert.equal(api.applyTextEdits(source, selected.options[0].edits), source.replace('>9</a>', '></a>'));
-  const onlyDigit = locator.sourceIndex(source.replace(' starkem', 'kem'));
-  onlyDigit.rememberConnection(0, onlyDigit.raw.length, target, { start: 0, end: target.raw.length });
-  assert.equal(onlyDigit.reviewCandidates(null, false, true, true, [target]).length, 0, 'default footnote filtering stays unchanged');
+  const onlyDigit = new api.PdfConnections(locator, source.replace(' starkem', 'kem'));
+  onlyDigit.remember(0, onlyDigit.raw.length, target, { start: 0, end: target.raw.length });
+  assert.equal(onlyDigit.candidates(null, false, true, true, [target]).length, 0, 'default footnote filtering stays unchanged');
 });
 
 for (const splitMarkup of [false, true]) for (const query of ['WR', 'W', 'eWRr', 'WRrm\nhere.', 'WR+', 'W xx W']) {
-  test(`selection popup matches any exact sequence ${JSON.stringify(query)}${splitMarkup ? ' across inline tags' : ''}`, async () => {
+  test(`selection popup groups exact sequences by selected context ${JSON.stringify(query)}${splitMarkup ? ' across inline tags' : ''}`, async () => {
     const providers = new Map(), pdf = {};
     const window = { addEventListener() {}, removeEventListener() {} };
     vm.runInNewContext(diffSource + '\n' + mappingSource, { window });
     const api = Object.assign(window.PdfReviewProvider, window.PdfSelectionDiff);
-    const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+    const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getPdf: () => pdf, getTargets: () => [target] });
     const paragraphs = [`First te${query}rm here.`, `Other te${query}rm there.`,
       `ot${query}rm te${query}rd ${query}`, `correct ${query}`, `different ${query}`, query.toLowerCase()];
     const markup = text => splitMarkup ? text.replaceAll('W', '<i>W</i>') : text;
     let source = '\r\n' + paragraphs.map(text => `<p>${markup(text)}</p>`).join('');
     let version = 1;
-    const model = { getValue: () => source, getVersionId: () => version,
-      getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-    const index = locator.editorSourceIndex(model);
+    const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => version,
+      getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+    const index = locator.editorSourceIndex(documentModel);
     const pdfText = paragraphs.map((text, at) => at === 3 ? text : text.replaceAll('W', at === 4 ? 'Q' : 'V')).join('\n') + '\n';
-    const target = new api.PdfSourceIndex(locator, { raw: pdfText, parts: [] });
+    const target = new api.PdfConnections(locator, { raw: pdfText, parts: [] });
     locator.indexDocument = locator.indexFonts = async () => target;
-    index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+    index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
     const start = index.raw.indexOf(query);
     const notice = { html: query, pdf: query.replaceAll('W', 'V'), source: { index, start, end: start + query.length } };
     window.ReaderUI = { getPdfViewer: () => ({ pdfDocument: pdf }) };
-    const editor = { getModel: () => model, getOption: () => false,
+    const editor = { document: documentModel, getModel: () => model, getOption: () => false,
       getDomNode: () => ({ ownerDocument: { defaultView: window }, classList: { toggle() {} } }), pushUndoStop() {},
       executeEdits(origin, edits) {
         for (const edit of [...edits].reverse()) source = source.slice(0, edit.range.startColumn - 1)
           + edit.text + source.slice(edit.range.endColumn - 1);
-        version++; return true;
+        version++; documentModel.update(documentModel.content); return true;
       } };
     let highlighted;
-    window.PdfSelection = { locator, editor, showReviewPointer(editor, items) { highlighted = items; } };
+    window.PdfSelection = { locator, savePreference() {}, editor, showReviewPointer(editor, items) { highlighted = items; } };
     window.ReplacementReview = { register(provider) { providers.set(provider.id, provider); return () => {}; } };
     vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
-    const provider = providers.get('pdf-ocr'), context = { editor, model, source, request: { pdf, notice, targets: [target] } };
-    const items = (await provider.locator.reviewItems(context)).items;
-    const selections = items.filter(item => item.selection);
+    const provider = providers.get('pdf-ocr'), context = { editor, model, documentModel, source, request: { pdf, notice, targets: [target] } };
+    const result = await provider.locator.reviewItems(context), items = result.items;
+    const selections = locator.reviewLists.get(result.selection).items;
+    assert.ok(!items.some(item => item.selection), 'selection groups do not reorder the original queue');
     const prepared = locator.reviewLists.get(items);
     assert.deepEqual(Array.from(prepared.entries), Array.from(items, item => item.pdfSource),
       'review entries follow the final source-index candidate order');
@@ -133,23 +142,21 @@ for (const splitMarkup of [false, true]) for (const query of ['WR', 'W', 'eWRr',
         'the expanded text selection precedes its overlapping format fault');
     }
     const expected = [];
-    for (let at = start; at < index.raw.indexOf('correct '); at = index.raw.indexOf(query, at + query.length)) expected.push(at);
+    for (let at = start; at >= 0 && at < index.raw.indexOf('correct '); at = index.raw.indexOf(query, at + query.length)) expected.push(at);
     assert.deepEqual(Array.from(selections, item => item.sourceStart), expected,
-      'matches include other word prefixes, suffixes and standalone sequences, excluding correct text and different replacements');
-    assert.deepEqual(Array.from(provider.matchingItems(selections[0], context, items), item => item.id),
-      Array.from(selections, item => item.id), 'popup, preview and replacement share the group');
-    const foreign = { ...selections[0], pdfSource: { index: target, start, end: start + 2 } };
-    assert.deepEqual(Array.from(provider.matchingItems(selections[0], context, [...items, foreign]), item => item.id),
-      Array.from(selections, item => item.id), 'another source index cannot join the group');
+      'the selected text is the context, independent of other word prefixes and suffixes');
+    const matches = selections;
+    assert.equal(locator.reviewLists.get(selections[0]).items, selections);
     provider.onSelect(selections[0], context, items);
-    assert.deepEqual(Array.from(highlighted, item => item.id), Array.from(selections, item => item.id),
+    assert.deepEqual(Array.from(highlighted, item => item.id), Array.from(matches, item => item.id),
       'selecting a term highlights every matching candidate');
-    const refreshed = provider.apply({ items, position: items.indexOf(selections[0]), context: { ...context, version } }, false);
+    const refreshed = provider.apply({ items, item: selections[0], position: selections[0].queueRange[0], context: { ...context, version } }, false);
+    await refreshed.apply();
     assert.ok(Number.isInteger(refreshed.offset), 'replacement returns the resume offset to the shared review session');
     const refreshedContext = { ...context, source, version, request: {} };
     await provider.locator.reviewItems(refreshedContext);
     assert.equal(locator.index.source, source, 'provide rebuilds review data from the current model');
-    source = source.replace('First', 'First longer'); version++;
+    source = source.replace('First', 'First longer'); version++; documentModel.update(documentModel.content);
     const manual = { ...refreshedContext, source, version };
     await provider.locator.reviewItems(manual);
     assert.equal(locator.index.source, source, 'manual edits use the same provider entry');
@@ -166,24 +173,26 @@ for (const [pdfWord, preparedOnly, unmapped] of [['Ge-\nsinnung'], ['Gesin nung'
     const window = { addEventListener(name, callback) { listeners.set(name, callback); }, removeEventListener() {} };
     vm.runInNewContext(diffSource + '\n' + mappingSource, { window });
     const api = Object.assign(window.PdfReviewProvider, window.PdfSelectionDiff);
-    const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+    const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getPdf: () => pdf, getTargets: () => [target] });
     const source = '<p><i>Gesinnung</i> haben, aus schlechter Absicht und purem boshafen Willen.</p>';
-    const index = locator.sourceIndex(source), wordEnd = 'Gesinnung'.length;
-    const target = new api.PdfSourceIndex(locator, {
+    const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => 1,
+      getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+    const index = locator.editorSourceIndex(documentModel), wordEnd = 'Gesinnung'.length;
+    const target = new api.PdfConnections(locator, {
       raw: index.raw.replace('Gesinnung', pdfWord).replace('boshafen', 'boshaften'),
       parts: [{ start: 0, end: pdfWord.length, font: { italic: false, bold: false } }]
     });
-    if (!unmapped) index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+    if (!unmapped) index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
     if (preparedOnly) {
-      index.pageScopes.set(target, { connections: index.connections.get(target) });
-      index.connections.set(target, []);
+      const prepared = index.connections.get(target);
+      prepared.preparedRanges = prepared.ranges;
+      prepared.ranges = [];
     }
-    const model = { getValue: () => source, getVersionId: () => 1,
-      getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-    const editor = { getModel: () => model, getDomNode: () => ({ ownerDocument: { defaultView: window } }) };
+
+    const editor = { document: documentModel, getModel: () => model, getSelection: () => null, getDomNode: () => ({ ownerDocument: { defaultView: window } }) };
     let opened;
     window.ReaderUI = { getPdfViewer: () => ({ pdfDocument: pdf }) };
-    window.PdfSelection = { locator, editor };
+    window.PdfSelection = { locator, savePreference() {}, editor };
     window.ReplacementReview = {
       register(provider) { providers.set(provider.id, provider); return () => {}; },
       isOpenFor: () => false,
@@ -192,17 +201,17 @@ for (const [pdfWord, preparedOnly, unmapped] of [['Ge-\nsinnung'], ['Gesin nung'
     vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
     const notice = { html: 'Gesinnung', pdf: pdfWord, source: { index, start: 0, end: wordEnd },
       target: { index: target, start: 0, end: pdfWord.length } };
-    listeners.get('pdf-selection-difference')({ type: 'pdf-selection-difference', detail: { editor, model, pdf, notices: [notice], targets: [target] } });
+    await listeners.get('pdf-selection-difference')({ type: 'pdf-selection-difference', detail: { editor, model, pdf, notices: [notice], targets: [target] } });
     assert.ok(opened);
     const [id, , focusId, request] = opened, realTextChange = pdfWord.includes('sinnnng');
     assert.equal(id, 'pdf-ocr');
-    assert.equal(focusId, realTextChange ? `0:${wordEnd}` : `font:0:${wordEnd}`);
+    assert.equal(focusId, realTextChange ? `selection:0:${wordEnd}` : `font:0:${wordEnd}`);
     assert.equal(request.kind, realTextChange ? undefined : 'font');
     const prepared = locator.review?.items;
-    if (!realTextChange) assert.equal(locator.review.focus.id, focusId, 'font focus is cached with its candidate list');
+    if (!realTextChange) assert.ok(prepared.some(item => item.font && item.id === focusId), 'font focus comes directly from the cached queue');
     const items = (await providers.get(id).locator.reviewItems({ model, source, request })).items;
     if (!realTextChange) assert.equal(items, prepared, 'opening the popup reuses the list prepared for the format click');
-    const selected = items.find(item => item.id === focusId);
+    const selected = realTextChange ? locator.review.selection : items.find(item => item.id === focusId);
     assert.ok(selected, 'clicked candidate must exist instead of falling forward to boshafen');
     assert.equal(!!selected.font, !realTextChange);
     assert.ok(items.some(item => item.comparison?.pdf.includes('t')), 'later text fault remains available');
@@ -210,12 +219,12 @@ for (const [pdfWord, preparedOnly, unmapped] of [['Ge-\nsinnung'], ['Gesin nung'
     const laterText = items.findIndex(item => item.comparison?.pdf.includes('t'));
     assert.ok(firstFont >= 0 && firstFont < laterText,
       'navigation keeps an earlier font fault before later text differences');
-    if (realTextChange) assert.ok(items.indexOf(selected) < firstFont,
+    if (realTextChange) assert.ok(selected.queueRange[0] <= firstFont,
       'overlapping text differences precede their font differences');
     index.version = 0;
-    index.reviewCandidates = () => { throw new Error('an outdated notice must be rejected before candidate generation'); };
+    index.candidates = () => { throw new Error('an outdated notice must be rejected before candidate generation'); };
     opened = null;
-    listeners.get('pdf-selection-difference')({ type: 'pdf-selection-difference', detail: { editor, model, pdf, notices: [notice], targets: [target] } });
+    await listeners.get('pdf-selection-difference')({ type: 'pdf-selection-difference', detail: { editor, model, pdf, notices: [notice], targets: [target] } });
     assert.equal(opened, null);
   });
 }
@@ -236,9 +245,9 @@ for (const kind of ['text', 'insertion', 'deletion', 'newline', 'format', 'word'
       ? `${at === 1 ? 'Different' : 'Before𠀀'} ${token} ${at === 1 ? 'elsewhere.' : 'after.'}` : token);
     const matching = kind === 'selection' ? [0, 1, 2, 3, 5, 6] : whole ? [0, 1, 5, 6] : [0, 1];
     let source = paragraphs.map(text => `<p>${text}</p>`).join(''), version = 1, applications = 0, undoStops = 0;
-    const model = { getValue: () => source, getVersionId: () => version,
-      getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-    const index = locator.editorSourceIndex(model), target = new api.PdfSourceIndex(new api.PdfLocator(), { raw: index.raw, parts: [] });
+    const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => version,
+      getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+    const index = locator.editorSourceIndex(documentModel), target = new api.PdfConnections(new api.PdfLocator(), { raw: index.raw, parts: [] });
     const items = [];
     let start = 0;
     for (const [at, paragraph] of paragraphs.entries()) {
@@ -249,33 +258,36 @@ for (const kind of ['text', 'insertion', 'deletion', 'newline', 'format', 'word'
       const text = at === 4 ? 'OTHER' : replacement;
       items.push({ id: String(at), sourceStart: a, sourceEnd: b,
         selection: kind === 'selection',
-        ...(format ? { text: old, font, htmlFont: index.formats[a] }
+        ...(format ? { text: old, font, htmlFont: index.formats[a], formats: [{ font, htmlFont: index.formats[a] }] }
           : { comparison: { html: old, pdf: text } }),
         options: [{ id: 'pdf', edits: format ? index.fontEdits(a, b, font)
           : kind === 'term' ? [{ start: index.starts[a], end: index.ends[b - 1], expected: old, text }]
             : index.textEdits(a, b, text) }] });
       start += paragraph.length + 1;
     }
-    index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+    index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
     // Replacement reuses prepared edits without another comparison.
-    api.PdfSourceIndex.prototype.reviewCandidates = () => { throw new Error('replacement must reuse prepared candidates'); };
+    api.PdfConnections.prototype.candidates = () => { throw new Error('replacement must reuse prepared candidates'); };
     const classes = new Set(), node = { ownerDocument: { defaultView: window }, classList: {
       toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
       remove(name) { classes.delete(name); }
     } };
-    const editor = { getDomNode: () => node, getModel: () => model, getOption: () => false, pushUndoStop() { undoStops++; },
+    const editor = { getDomNode: () => node, document: documentModel, getModel: () => model, getOption: () => false, pushUndoStop() { undoStops++; },
       executeEdits(origin, edits) {
         applications++;
         for (const edit of [...edits].reverse()) source = source.slice(0, edit.range.startColumn - 1)
           + edit.text + source.slice(edit.range.endColumn - 1);
-        version++; return true;
+        version++; documentModel.update(documentModel.content); return true;
       } };
     let highlighted;
-    window.PdfSelection = { locator, editor, showReviewPointer(targetEditor, matches) { highlighted = matches; },
+    window.PdfSelection = { locator, savePreference() {}, editor, showReviewPointer(targetEditor, matches) { highlighted = matches; },
       clearReviewPointer() { highlighted = null; } };
     window.ReplacementReview = { register(provider) { providers.set(provider.id, provider); return () => {}; } };
     vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
-    const provider = providers.get('pdf-ocr'), context = { editor, model, index, targets: [target] };
+    const provider = providers.get('pdf-ocr'), context = { editor, model, documentModel, index, targets: [target] };
+    index.candidates = () => items;
+    index.getDifferences();
+    locator.cacheReview({ items, index });
     provider.onSelect(items[1], context, items);
     assert.deepEqual(Array.from(highlighted, item => item.id), matching.map(String), 'matching faults are highlighted with preview off');
     assert.equal(classes.has('mew-review-preview'), false);
@@ -285,8 +297,8 @@ for (const kind of ['text', 'insertion', 'deletion', 'newline', 'format', 'word'
     provider.onClose(context);
     assert.equal(highlighted, null);
     assert.equal(classes.has('mew-review-preview'), false);
-    provider.apply({ items, position: 1, context: { ...context, source, version },
-      choices: new Map(items.map(item => [item.id, 'pdf'])) }, false);
+    provider.apply({ items, item: items[1], position: 1, context: { ...context, source, version, snapshot: editor.document.snapshot },
+      choices: new Map(items.map(item => [item.id, 'pdf'])) }, false).apply?.();
     assert.equal(source, paragraphs.map((text, at) => {
       const a = at < 5 ? text.indexOf(' ') + 1 + prefix.length : 0;
       return `<p>${matching.includes(at) ? text.slice(0, a) + (format ? '<b>W</b>' : replacement)
@@ -304,16 +316,16 @@ test('prepared review lists share groups, entries and edits across consumers and
   const api = Object.assign(window.PdfReviewProvider, window.PdfSelectionDiff);
   let target, source = '<p>First teWRrm here.</p><p>Other teWRrm there.</p>', version = 1;
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getPdf: () => pdf, getTargets: () => [target] });
-  const model = { getValue: () => source, getVersionId: () => version,
-    getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-  const index = locator.editorSourceIndex(model);
-  target = new api.PdfSourceIndex(locator, { raw: index.raw.replaceAll('WR', 'R'), parts: [] });
-  index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+  const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => version,
+    getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+  const index = locator.editorSourceIndex(documentModel);
+  target = new api.PdfConnections(locator, { raw: index.raw.replaceAll('WR', 'R'), parts: [] });
+  index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
   locator.indexDocument = async () => target;
   locator.indexFonts = async () => target;
   let pointer;
   window.ReaderUI = { getPdfViewer: () => ({ pdfDocument: pdf }) };
-  window.PdfSelection = { locator, showReviewPointer(...args) { pointer = args; }, clearReviewPointer() {}, refresh() {} };
+  window.PdfSelection = { locator, savePreference() {}, showReviewPointer(...args) { pointer = args; }, clearReviewPointer() {}, refresh() {} };
   let suggestionPlans;
   window.ReplacementReview = { register(provider) { providers.set(provider.id, provider); return () => {}; }, invalidate() {},
     bindSuggestions(editor, provide) { suggestionPlans = provide; } };
@@ -322,18 +334,16 @@ test('prepared review lists share groups, entries and edits across consumers and
   const fontProvider = providers.get('pdf-font'), focusItems = [
     { sourceStart: 2, sourceEnd: 2 }, { sourceStart: 4, sourceEnd: 8, font: true }, { sourceStart: 10, sourceEnd: 12 }
   ], focusRequest = { notice: { source: { start: 2, end: 2 } } };
-  assert.equal(provider.focusIndex, fontProvider.focusIndex, 'providers share the focus implementation');
-  assert.equal(provider.focusIndex(focusItems, focusRequest), 0, 'text review retains insertion candidates');
-  assert.equal(fontProvider.focusIndex(focusItems, focusRequest), 1, 'font review skips empty candidates at the boundary');
+  assert.equal(provider.focusIndex, undefined, 'the review session owns candidate focus');
   focusRequest.notice.source = { start: 5, end: 6 };
   assert.equal(!!provider.containsSelection(focusItems[1], focusRequest), false, 'text selection requires an exact range');
   assert.equal(fontProvider.containsSelection(focusItems[1], focusRequest), true, 'font selection accepts an overlapping range');
   const node = { ownerDocument: { defaultView: window }, classList: { toggle() {}, remove() {} } };
   let marks;
-  const editor = { getModel: () => model, getDomNode: () => node,
+  const editor = { document: documentModel, getModel: () => model, getSelection: () => null, getDomNode: () => node,
     createDecorationsCollection: () => ({ set(values) { marks = values; }, clear() {} }) };
   window.PdfSelection.editor = editor;
-  const context = { model, source, editor, signal: { aborted: false } };
+  const context = { model, source, editor, documentModel: editor.document, snapshot: editor.document.snapshot, signal: { aborted: false } };
   assert.ok(provider.locator === locator, 'the host loads the shared class instance directly');
   assert.equal(provider.provide, undefined, 'PDF review has no forwarding adapter');
   assert.ok(locator.model === model, 'the locator owns the current editor model');
@@ -353,36 +363,38 @@ test('prepared review lists share groups, entries and edits across consumers and
   assert.equal((await provider.locator.reviewItems(context)).items, items, 'unchanged source reuses the full candidate list');
   assert.equal(context.index, undefined, 'the request does not own the source index');
   assert.equal(context.targets, undefined, 'targets belong to the class-owned source index');
-  const group = provider.matchingItems(items[0], context, items);
+  const group = locator.reviewLists.get(items[0]).items;
   assert.equal(group.length, 2);
   let comparisons = 0;
   const comparison = items[0].comparison;
   Object.defineProperty(items[0], 'comparison', { get() { comparisons++; return comparison; }, configurable: true });
-  assert.equal(provider.matchingItems(items[0], context, items), group);
+  assert.equal(locator.reviewLists.get(items[0]).items, group);
   assert.equal(comparisons, 0, 'prepared group lookup does not read or reclassify candidate text');
   const entries = locator.reviewLists.get(group).entries;
   assert.equal(locator.reviewLists.get(group).entries, entries);
   assert.ok(entries[0] === group[0].pdfSource, 'pointer entries are the generated source records');
-  const state = { items, position: 0, context };
+  const state = { items, item: items[0], position: 0, context };
   assert.equal(provider.content(state, items[0]).edits, provider.content(state, items[0]).edits);
   assert.equal(provider.content(state, items[0]).allEdits, provider.content(state, items[0]).allEdits);
-  const applyEdits = window.PdfSelectionDiff.applyEdits, applied = [];
-  window.PdfSelectionDiff.applyEdits = (...args) => { applied.push(args[4]); };
+  const applyEdits = editor.document.applyEdits, applied = [];
+  editor.document.applyEdits = (edits) => { applied.push(edits); };
   try {
     for (const all of [false, true]) {
       const result = provider.apply({ ...state, context: { ...context, version: model.getVersionId() } }, all);
-      assert.equal(applied.at(-1), locator.reviewLists.get(all ? items : group).edits,
-        'application reuses the prepared edit list for the selected scope');
+      result.apply();
+      assert.equal(JSON.stringify(applied.at(-1)),
+        JSON.stringify([...locator.reviewLists.get(all ? items : group).edits].sort((a, b) => a.start - b.start || a.end - b.end)),
+        'application validates the prepared edits for the selected scope');
       const offset = index.starts[items[0].sourceStart];
       assert.equal(result.offset, offset + applied.at(-1).reduce((delta, edit) => delta
         + (edit.end <= offset ? edit.text.length - (edit.end - edit.start) : 0), 0));
     }
-  } finally { window.PdfSelectionDiff.applyEdits = applyEdits; }
+  } finally { editor.document.applyEdits = applyEdits; }
   assert.equal(provider.content(state, items[0]).comparison, provider.content(state, items[0]).comparison, 'popup rows are reused through the existing comparison cache');
   provider.onSelect(items[0], context, items);
   assert.equal(pointer[1], group, 'the pointer receives the same group as preview and replacement');
   const publish = () => listeners.get('pdf-selection-sources')({ detail: {
-    editor, index: locator.index, targets: [target], enabled: false, diffEnabled: true } });
+    editor, pdf, enabled: false, diffEnabled: true } });
   publish();
   window.PdfSelection.editor = editor;
   const plans = suggestionPlans(model);
@@ -399,7 +411,7 @@ test('prepared review lists share groups, entries and edits across consumers and
   const peerProviders = new Map(), peer = { ...window, PdfReviewProvider: api, addEventListener() {},
     ReplacementReview: { register(value) { peerProviders.set(value.id, value); return () => {}; } } };
   vm.runInNewContext(providerSource, { window: peer, document: {}, setInterval: () => 0, clearInterval() {} });
-  assert.equal(peerProviders.get('pdf-ocr').matchingItems(items[0], context, items), group);
+  assert.equal(peer.PdfSelection.locator.reviewLists.get(items[0]).items, group);
   assert.equal(peer.PdfSelection.locator.reviewLists.get(group).entries, entries);
   target.parts = [{ start: 0, end: target.raw.length, font: { bold: true, italic: true } }];
   target.fontVersion = 1;
@@ -415,19 +427,19 @@ test('prepared review lists share groups, entries and edits across consumers and
     window.PdfReviewProvider.setFontEnabled(false, undefined, false);
     for (const style of styles) window.PdfReviewProvider.setFontEnabled(true, style, false);
     const prepared = (await provider.locator.reviewItems(context)).items, data = locator.reviewLists.get(prepared);
-    const expected = comparable(index.sourceDecorations(index.reviewCandidates(null, styles, false, textEnabled, [target], data.shared.connections), styles, textEnabled, item => window.PdfReviewProvider.locator.sourceHover(item, model), model));
-    const reviewCandidates = index.reviewCandidates, formatDifferences = index.formatDifferences;
-    index.reviewCandidates = index.formatDifferences = () => { throw new Error('source highlighting rebuilt prepared candidates'); };
+    const expected = comparable(sourceDecorations(index, index.candidates(null, styles, false, textEnabled, [target], data.shared.connections), styles, textEnabled, item => window.PdfReviewProvider.sourceHover(item, model), editor.document));
+    const reviewCandidates = index.candidates, formatDifferences = index.formatDifferences;
+    index.candidates = index.formatDifferences = () => { throw new Error('source highlighting rebuilt prepared candidates'); };
     try {
-      listeners.get('pdf-selection-sources')({ detail: { editor, index, targets: [target], enabled: true, diffEnabled: true } });
+      listeners.get('pdf-selection-sources')({ detail: { editor, pdf, enabled: true, diffEnabled: true } });
       assert.equal(comparable(marks), expected, 'prepared source marks preserve text, font, caret and hover output');
-    } finally { index.reviewCandidates = reviewCandidates; index.formatDifferences = formatDifferences; }
+    } finally { index.candidates = reviewCandidates; index.formatDifferences = formatDifferences; }
   }
   provider.setEnabled(false);
   const textDisabled = (await provider.locator.reviewItems(context)).items;
   assert.equal(textDisabled.filter(item => !item.font).length, 0);
   provider.setEnabled(true);
-  source = source.replaceAll('WR', 'XX'); version++;
+  source = source.replaceAll('WR', 'XX'); version++; documentModel.update(documentModel.content);
   context.source = source;
   await provider.locator.reviewItems(context);
   assert.notEqual(locator.index, index, 'editing selects a new source snapshot');
@@ -440,12 +452,49 @@ test('prepared review lists share groups, entries and edits across consumers and
   const pending = locator.reviewItems({ ...context });
   await Promise.resolve();
   assert.equal(typeof finishFonts, 'function');
-  source = source.replaceAll('XX', 'YY'); version++;
+  source = source.replaceAll('XX', 'YY'); version++; documentModel.update(documentModel.content);
   const current = locator.reviewItems();
   assert.ok(current.index === locator.index, 'a no-argument review refreshes the class-owned index');
   assert.equal(locator.index.source, source);
-  assert.deepEqual(Array.from(locator.index.targets), [target], 'model edits retain the prepared PDF targets');
+  assert.deepEqual(Array.from(locator.index.prepared.pages), [target], 'model edits retain the prepared PDF targets');
   finishFonts();
   assert.equal((await pending).items.length, 0, 'obsolete async review does not publish candidates');
   assert.ok(locator.index === current.index, 'obsolete async review cannot restore an older shared index');
+});
+
+
+test('a bracket selection batches the selected context but excludes other patterns', () => {
+  const window = { addEventListener() {}, removeEventListener() {} };
+  vm.runInNewContext(diffSource + '\n' + mappingSource, { window });
+  const api = Object.assign(window.PdfReviewProvider, window.PdfSelectionDiff), providers = new Map();
+  const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+  let source = '<p>V[ereinigten] Verein[igten] V[ereinigten] V[ereinigten]</p>';
+  const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => 1,
+    getOffsetAt: position => position.column - 1, getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+  const index = locator.editorSourceIndex(documentModel);
+  const items = Array.from(index.raw.matchAll(/\[/g), (match, at) => ({
+    id: String(at), sourceStart: match.index, sourceEnd: match.index + 1, selection: true,
+    comparison: { html: '[', pdf: at === 3 ? '(' : '' },
+    options: [{ edits: index.textEdits(match.index, match.index + 1, at === 3 ? '(' : '') }]
+  }));
+  let highlighted;
+  const editor = { document: documentModel, getModel: () => model, getOption: () => false, pushUndoStop() {},
+    getDomNode: () => ({ ownerDocument: { defaultView: window }, classList: { toggle() {} } }),
+    executeEdits(origin, edits) {
+      for (const edit of [...edits].reverse()) source = source.slice(0, edit.range.startColumn - 1)
+        + edit.text + source.slice(edit.range.endColumn - 1);
+      return true;
+    } };
+  window.PdfSelection = { locator, savePreference() {}, editor, showReviewPointer(editor, matches) { highlighted = matches; } };
+  window.ReplacementReview = { register(provider) { providers.set(provider.id, provider); return () => {}; } };
+  vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
+  const provider = providers.get('pdf-ocr'), context = { editor, model, documentModel, source, version: 1 };
+  index.candidates = () => items;
+  index.getDifferences();
+  locator.cacheReview({ items, index });
+  assert.deepEqual(Array.from(locator.reviewLists.get(items[0]).items, item => item.id), ['0', '1', '2']);
+  provider.onSelect(items[0], context, items);
+  assert.deepEqual(Array.from(highlighted, item => item.id), ['0', '1', '2']);
+  provider.apply({ items, item: items[0], position: 0, context }, false).apply();
+  assert.equal(source, '<p>Vereinigten] Vereinigten] Vereinigten] V[ereinigten]</p>');
 });

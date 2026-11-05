@@ -26,9 +26,9 @@ try {
     await page.waitForFunction(number => PdfSelection.viewer.currentPageNumber === number, first + offset);
     await page.waitForTimeout(5000);
     const snapshot = await page.evaluate(() => {
-      const editor = readerMonaco.editor, locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.getModel());
+      const editor = readerMonaco.editor, locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.document);
       const targets = locator.environment.getTargets();
-      const items = index.reviewCandidates(null, false, true, true, targets);
+      const items = index.candidates(null, false, true, true, targets);
       return { page: PdfSelection.viewer.currentPageNumber,
         marks: editor.getModel().getAllDecorations().filter(mark => /PDF.*difference/.test(mark.options.description))
           .map(mark => [mark.options.description, mark.range, mark.options.inlineClassName]),

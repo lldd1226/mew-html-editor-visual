@@ -1,0 +1,1946 @@
+[
+  {
+    "variant": "current",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 1.7,
+      "prepare": 0.6,
+      "candidates": 0.1,
+      "total": 2.9
+    },
+    "items": 6,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.4,
+      "prepare": 0.2,
+      "candidates": 0.1,
+      "total": 0.7
+    },
+    "items": 6,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 6.1,
+      "prepare": 0.5,
+      "candidates": 0.6,
+      "total": 7.3
+    },
+    "items": 82,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 4.8,
+      "prepare": 0.2,
+      "candidates": 0.5,
+      "total": 5.4
+    },
+    "items": 82,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.5,
+      "prepare": 0.2,
+      "candidates": 0,
+      "total": 0.8
+    },
+    "items": 9,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.2,
+      "prepare": 0,
+      "candidates": 0,
+      "total": 0.2
+    },
+    "items": 9,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 1.9,
+      "prepare": 0.2,
+      "candidates": 0.2,
+      "total": 2.3
+    },
+    "items": 90,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 1.5,
+      "prepare": 0,
+      "candidates": 0.2,
+      "total": 1.8
+    },
+    "items": 90,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 1.8,
+      "prepare": 0.2,
+      "candidates": 0.1,
+      "total": 2.1
+    },
+    "items": 53,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.7,
+      "prepare": 0.1,
+      "candidates": 0.1,
+      "total": 0.9
+    },
+    "items": 53,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 6.4,
+      "prepare": 171.4,
+      "candidates": 1.2,
+      "total": 178.8
+    },
+    "items": 541,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "current",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 6.2,
+      "prepare": 173.1,
+      "candidates": 1.1,
+      "total": 181.4
+    },
+    "items": 541,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 2,
+      "prepare": 1.4,
+      "candidates": 0,
+      "total": 3.4
+    },
+    "items": 6,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.4,
+      "prepare": 0.2,
+      "candidates": 0,
+      "total": 0.7
+    },
+    "items": 6,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 6.2,
+      "prepare": 3,
+      "candidates": 0.5,
+      "total": 10.2
+    },
+    "items": 82,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 4.8,
+      "prepare": 0.3,
+      "candidates": 0.6,
+      "total": 5.6
+    },
+    "items": 82,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.5,
+      "prepare": 0.4,
+      "candidates": 0,
+      "total": 0.9
+    },
+    "items": 9,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.1,
+      "prepare": 0,
+      "candidates": 0,
+      "total": 0.2
+    },
+    "items": 9,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 2,
+      "prepare": 0.7,
+      "candidates": 0.3,
+      "total": 3.1
+    },
+    "items": 90,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 1.6,
+      "prepare": 0.1,
+      "candidates": 0.2,
+      "total": 1.9
+    },
+    "items": 90,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 1.8,
+      "prepare": 1.5,
+      "candidates": 0.2,
+      "total": 3.5
+    },
+    "items": 53,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.8,
+      "prepare": 0.1,
+      "candidates": 0.1,
+      "total": 0.9
+    },
+    "items": 53,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 6.3,
+      "prepare": 187,
+      "candidates": 1.2,
+      "total": 194.4
+    },
+    "items": 541,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-text",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 7,
+      "prepare": 184.8,
+      "candidates": 1.2,
+      "total": 192.5
+    },
+    "items": 541,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.3,
+      "prepare": 12.5,
+      "candidates": 0.1,
+      "total": 12.9
+    },
+    "items": 6,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.2,
+      "prepare": 12.3,
+      "candidates": 0.1,
+      "total": 12.7
+    },
+    "items": 6,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 2.1,
+      "prepare": 215.9,
+      "candidates": 0.5,
+      "total": 218.4
+    },
+    "items": 82,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 2.2,
+      "prepare": 223.3,
+      "candidates": 0.6,
+      "total": 226.1
+    },
+    "items": 82,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.1,
+      "prepare": 1.8,
+      "candidates": 0.1,
+      "total": 2
+    },
+    "items": 9,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.1,
+      "prepare": 1.7,
+      "candidates": 0,
+      "total": 1.9
+    },
+    "items": 9,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 0.9,
+      "prepare": 28.8,
+      "candidates": 0.3,
+      "total": 30
+    },
+    "items": 90,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 1,
+      "prepare": 29.5,
+      "candidates": 0.4,
+      "total": 31.6
+    },
+    "items": 90,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.5,
+      "prepare": 27.8,
+      "candidates": 0.1,
+      "total": 28.4
+    },
+    "items": 53,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.4,
+      "prepare": 27.3,
+      "candidates": 0.1,
+      "total": 27.9
+    },
+    "items": 53,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 3.9,
+      "prepare": 231.7,
+      "candidates": 1.1,
+      "total": 238.2
+    },
+    "items": 541,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "full-mapping",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 3.9,
+      "prepare": 230.4,
+      "candidates": 1.2,
+      "total": 236.1
+    },
+    "items": 541,
+    "matchesCurrent": true
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 13.9,
+      "prepare": 0.6,
+      "candidates": 0.1,
+      "total": 14.6
+    },
+    "items": 6,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.4,
+      "prepare": 0.2,
+      "candidates": 0.1,
+      "total": 0.8
+    },
+    "items": 6,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 15.8,
+      "prepare": 0.6,
+      "candidates": 0.4,
+      "total": 16.9
+    },
+    "items": 90,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 4.7,
+      "prepare": 0.1,
+      "candidates": 0.4,
+      "total": 5.2
+    },
+    "items": 90,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.7,
+      "prepare": 0.1,
+      "candidates": 0,
+      "total": 0.8
+    },
+    "items": 9,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 64,
+        "end": 65,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 64,
+        "end": 67,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.2,
+      "prepare": 0,
+      "candidates": 0.1,
+      "total": 0.3
+    },
+    "items": 9,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 64,
+        "end": 65,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 64,
+        "end": 67,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 2.1,
+      "prepare": 0.1,
+      "candidates": 0.3,
+      "total": 2.5
+    },
+    "items": 97,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 79,
+        "end": 80,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 79,
+        "end": 82,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 1.6,
+      "prepare": 0.1,
+      "candidates": 0.2,
+      "total": 1.9
+    },
+    "items": 97,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 79,
+        "end": 80,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 79,
+        "end": 82,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 2.9,
+      "prepare": 0.3,
+      "candidates": 0.2,
+      "total": 3.4
+    },
+    "items": 55,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1347,
+        "end": 1350,
+        "comparison": {
+          "html": "\n\r\n",
+          "pdf": " .\n. "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1621,
+                "end": 1623,
+                "text": " .\n. ",
+                "expected": "\r\n"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1347,
+        "end": 1347,
+        "comparison": {
+          "html": "",
+          "pdf": " ."
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1617,
+                "end": 1617,
+                "text": " .",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.8,
+      "prepare": 0.1,
+      "candidates": 0.1,
+      "total": 0.9
+    },
+    "items": 55,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1347,
+        "end": 1350,
+        "comparison": {
+          "html": "\n\r\n",
+          "pdf": " .\n. "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1621,
+                "end": 1623,
+                "text": " .\n. ",
+                "expected": "\r\n"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1347,
+        "end": 1347,
+        "comparison": {
+          "html": "",
+          "pdf": " ."
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1617,
+                "end": 1617,
+                "text": " .",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 6.7,
+      "prepare": 156.3,
+      "candidates": 1.5,
+      "total": 164.5
+    },
+    "items": 543,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": "a"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "a",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": ""
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "monaco",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 6.1,
+      "prepare": 153.8,
+      "candidates": 1.1,
+      "total": 160.6
+    },
+    "items": 543,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": "a"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "a",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": ""
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.3,
+      "prepare": 22.1,
+      "candidates": 0.1,
+      "total": 22.5
+    },
+    "items": 6,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me08-350",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.3,
+      "prepare": 21.5,
+      "candidates": 0.1,
+      "total": 21.9
+    },
+    "items": 6,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 814,
+        "end": 814,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 923,
+                "end": 923,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 2.1,
+      "prepare": 248.1,
+      "candidates": 0.4,
+      "total": 250.7
+    },
+    "items": 90,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me08-350",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 2.2,
+      "prepare": 244.6,
+      "candidates": 0.5,
+      "total": 247.2
+    },
+    "items": 90,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1033,
+        "end": 1033,
+        "comparison": {
+          "html": "",
+          "pdf": "t2o6J "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1148,
+                "end": 1148,
+                "text": "t2o6J ",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.1,
+      "prepare": 1.8,
+      "candidates": 0.1,
+      "total": 1.9
+    },
+    "items": 9,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 64,
+        "end": 65,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 64,
+        "end": 67,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-323",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.1,
+      "prepare": 1.6,
+      "candidates": 0.1,
+      "total": 1.8
+    },
+    "items": 9,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 64,
+        "end": 65,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 64,
+        "end": 67,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 169,
+                "end": 170,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 0.8,
+      "prepare": 26.8,
+      "candidates": 0.3,
+      "total": 28
+    },
+    "items": 97,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 79,
+        "end": 80,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 79,
+        "end": 82,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-323",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 0.9,
+      "prepare": 26,
+      "candidates": 0.3,
+      "total": 27.2
+    },
+    "items": 97,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 79,
+        "end": 80,
+        "comparison": {
+          "html": "]",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 79,
+        "end": 82,
+        "comparison": {
+          "html": "]\n\r",
+          "pdf": "J"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 193,
+                "end": 194,
+                "text": "J",
+                "expected": "]"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "text",
+    "ms": {
+      "index": 0.4,
+      "prepare": 28.6,
+      "candidates": 0.1,
+      "total": 29.1
+    },
+    "items": 55,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1347,
+        "end": 1350,
+        "comparison": {
+          "html": "\n\r\n",
+          "pdf": " .\n. "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1621,
+                "end": 1623,
+                "text": " .\n. ",
+                "expected": "\r\n"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1347,
+        "end": 1347,
+        "comparison": {
+          "html": "",
+          "pdf": " ."
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1617,
+                "end": 1617,
+                "text": " .",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-524",
+    "copies": 1,
+    "edit": "format",
+    "ms": {
+      "index": 0.4,
+      "prepare": 29,
+      "candidates": 0.1,
+      "total": 29.6
+    },
+    "items": 55,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 1347,
+        "end": 1350,
+        "comparison": {
+          "html": "\n\r\n",
+          "pdf": " .\n. "
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1621,
+                "end": 1623,
+                "text": " .\n. ",
+                "expected": "\r\n"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 1347,
+        "end": 1347,
+        "comparison": {
+          "html": "",
+          "pdf": " ."
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 1617,
+                "end": 1617,
+                "text": " .",
+                "expected": ""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "text",
+    "ms": {
+      "index": 3.7,
+      "prepare": 373.1,
+      "candidates": 1.2,
+      "total": 379
+    },
+    "items": 543,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": "a"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "a",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": ""
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "variant": "full-monaco",
+    "fixture": "me32-524",
+    "copies": 8,
+    "edit": "format",
+    "ms": {
+      "index": 3.7,
+      "prepare": 370.4,
+      "candidates": 1.3,
+      "total": 375.5
+    },
+    "items": 543,
+    "matchesCurrent": false,
+    "difference": {
+      "before": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": "a"
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "a",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      },
+      "after": {
+        "start": 187,
+        "end": 189,
+        "comparison": {
+          "html": "rs",
+          "pdf": ""
+        },
+        "options": [
+          {
+            "id": "pdf",
+            "label": "替换",
+            "edits": [
+              {
+                "start": 302,
+                "end": 304,
+                "text": "",
+                "expected": "rs"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+]

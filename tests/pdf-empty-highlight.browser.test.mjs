@@ -182,7 +182,7 @@ test('ME08-376 whitespace counterpart remains a visible PDF caret when collapsed
     await page.addScriptTag({ content: engineSource + '\n' + highlightSource });
     const result = await page.evaluate(() => {
       const div = document.getElementById('page'), node = div.firstChild.firstChild, raw = node.textContent;
-      const index = new PdfSelectionDiff.PdfSourceIndex(null, { raw, parts: [{ node, start: 0, end: raw.length }] });
+      const index = new PdfSelectionDiff.PdfConnections(null, { raw, parts: [{ node, start: 0, end: raw.length }] });
       const highlights = ReviewHighlights.create({ document });
       const original = Range.prototype.getClientRects;
       Range.prototype.getClientRects = function () { return this.collapsed ? [] : original.call(this); };

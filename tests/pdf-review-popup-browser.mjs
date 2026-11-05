@@ -115,7 +115,7 @@ try {
     for (const [at, expected] of [[3, ['Q', 'Z']], [0, ['X', 'YYYYY']]]) {
       await page.evaluate(async linked => {
         ReplacementReview.close(); PdfSelection.setSelectionHighlight(linked);
-        const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.getModel());
+        const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
         const target = await locator.indexDocument(mockViewer.pdfDocument);
         const notice = { html: index.raw, pdf: target.raw, source: { index, start: 0, end: index.raw.length }, target: { index: target, start: 0, end: target.raw.length } };
         await ReplacementReview.open('pdf-ocr', testEditor, `0:${index.raw.length}`, 0, { pdf: mockViewer.pdfDocument, notice, targets: [target], interactionId: 1, anchor: { left: 950, top: 100, bottom: 120 } });
@@ -163,7 +163,7 @@ try {
     const div = document.querySelector('#testStage .page');
     div.innerHTML = '<div class="textLayer"><span role="presentation"></span></div>';
     div.querySelector('span').textContent = raw;
-    const locator = PdfSelection.locator, source = locator.sourceIndex(markup), target = locator.sourceIndex(raw);
+    const locator = PdfSelection.locator, source = new window.PdfSelectionDiff.PdfConnections(locator, markup), target = new window.PdfSelectionDiff.PdfConnections(locator, raw);
     const notice = { html: 'e', pdf: '', source: { index: source, start: at, end: at + 1 }, target: { index: target, start: at, end: at } };
     const original = locator.findLocations;
     // A full-document mapping can survive while the native text layer is rebuilt.

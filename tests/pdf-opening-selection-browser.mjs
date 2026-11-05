@@ -16,9 +16,9 @@ try {
   const points = await page.evaluate(() => {
     window.openingFallbacks = [];
     window.dragNotice = null;
-    const prototype = PdfSelectionDiff.PdfSourceIndex.prototype;
-    const locate = prototype.locate, matches = prototype.matches;
-    prototype.locate = function (entry, ...args) {
+    const prototype = PdfSelectionDiff.PdfConnections.prototype;
+    const locate = prototype.search, matches = prototype.matches;
+    prototype.search = function (entry, ...args) {
       if (entry.text === 'Man verstehe wohl!') openingFallbacks.push('locate');
       return locate.call(this, entry, ...args);
     };

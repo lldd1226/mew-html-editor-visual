@@ -32,18 +32,18 @@ try {
     await page.waitForFunction(() => window.readerMonaco?.editor && window.PdfSelection?.locator.environment.getTargets().some(t => t.layer), null, { timeout: 30000 });
     const expected = await page.evaluate(fixture => {
       const editor = readerMonaco.editor, model = editor.getModel(), locator = PdfSelection.locator;
-      const index = locator.editorSourceIndex(model), visible = locator.environment.getVisiblePages().find(p => p.index?.layer);
+      const index = locator.editorSourceIndex(editor.document), visible = locator.environment.getVisiblePages().find(p => p.index?.layer);
       if (!visible) throw new Error('No rendered page');
       const target = visible.index, div = ReaderUI.getPdfViewer().getPageView(visible.number - 1).div;
-      index?.diff([target], ReaderUI.getPdfViewer().pdfDocument);
+      index?.update([target], ReaderUI.getPdfViewer().pdfDocument);
       const start = index.raw.indexOf(fixture.selection.from), end = index.raw.indexOf(fixture.selection.to, start) + fixture.selection.to.length;
-      const hit = index.connectedRange(target, start, end, false, undefined, true);
+      const hit = index.range(target, start, end, false, undefined, true);
       if (!hit) throw new Error('No forward selection alignment');
       const measured = target.raw.slice(hit.start, hit.end), expected = fixture.raw.slice(fixture.selection.pdfStart, fixture.selection.pdfEnd);
       const reading = PdfSelectionDiff.significantText(measured), reference = PdfSelectionDiff.significantText(expected);
       if (reading !== reference)
         throw new Error('Wrong PDF selection: ' + JSON.stringify(measured));
-      const range = window.PdfSelectionDiff.rangeAt(model, index.starts[start] ?? index.source.length,
+      const range = editor.document.rangeAt(index.starts[start] ?? index.source.length,
         (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length);
       window.pageSelection = { index, target, div, hit, range, source: model.getValue() };
       return { start: model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }),

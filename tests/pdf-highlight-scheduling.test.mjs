@@ -1,3 +1,5 @@
+import { PdfConnections as FixtureConnections } from './support/pdf-harness.mjs';
+import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
@@ -8,7 +10,7 @@ const source = await readFile(new URL('../public/pdfdiff/pdf-selection.js', impo
 const start = source.indexOf('  function queueWarm('), end = source.indexOf('  function warm(', start);
 assert.ok(start >= 0 && end > start);
 function scheduler(interaction = 0, edit = -Infinity) {
-  const state = { now: 1000, calls: [], tasks: [], stopped: false, diffHighlight: true, sourceDiffHighlight: true, selectionHighlight: true,
+  const state = { now: 1000, calls: [], tasks: [], stopped: false, selecting: false, diffHighlight: true, sourceDiffHighlight: true, selectionHighlight: true,
     lastInteraction: interaction, lastEdit: edit, editIdleDelay: 350, preparationPages: new Set(), preparationTask: null,
     contexts: [], reviewPointer: null, visiblePages: () => [2,3], schedule() {},
     performance: { now: () => state.now }, warm: numbers => state.calls.push(numbers),
@@ -60,11 +62,23 @@ test('queued preparation stops when selection linkage is disabled', () => {
   assert.equal(state.calls.length, 0);
 });
 
+test('holding a selection pauses preparation without scheduling a busy loop', () => {
+  const state = Object.assign(scheduler(), { selecting: true });
+  state.queueWarm(2);
+  assert.equal(state.tasks[0].delay, 100);
+  state.now += 100; state.tasks[0].run();
+  assert.equal(state.calls.length, 0);
+  assert.equal(state.tasks[1].delay, 100);
+  state.selecting = false;
+  state.now += 100; state.tasks[1].run();
+  assert.deepEqual(Array.from(state.calls[0]), [2]);
+});
+
 test('PDF and source highlight switches persist independently and clear only PDF pointers', () => {
   const state = { diffHighlight: true, sourceDiffHighlight: true, defaultPointer: {}, diffButton: null,
-    reviewPointer: null, review: { clearHighlights() { state.cleared++; } },
+    reviewPointer: null, review: { highlights: { clearHighlights() { state.cleared++; } } },
     writes: [], cleared: 0, published: [], savePreference(key, value) { state.writes.push([key, value]); },
-    publishSources() { state.published.push([state.diffHighlight, state.sourceDiffHighlight]); }, queueWarm() {} };
+    queueWarm() { state.published.push([state.diffHighlight, state.sourceDiffHighlight]); } };
   vm.runInNewContext(`this.api = { clearReviewPointer() { cleared++; },
     ${section('    setDiffHighlight(', '    setSelectionHighlight(')}
   };`, state);
@@ -86,7 +100,7 @@ function section(from, to) {
 }
 test('PDF selection chrome keeps the OCR index while content and font changes invalidate it', () => {
   const layer = { textContent: 'OCR' }, sentinel = { textContent: '' }, span = { textContent: 'word' }, div = {};
-  const state = { layers: new Map() };
+  const state = { layers: new Map(), review: { highlights: { paintHighlight() {} } }, options: { color: 'yellow' } };
   vm.runInNewContext(section('  function clearLayer(div,', '  function currentPointer('), state);
   const invalidate = records => {
     state.layers.set(div, { layer, observer: { disconnect() {} } });
@@ -94,14 +108,15 @@ test('PDF selection chrome keeps the OCR index while content and font changes in
   };
   const change = (target, addedNodes = [], removedNodes = []) => ({ type: 'childList', target, addedNodes, removedNodes });
   assert.equal(invalidate([change(layer, [sentinel], [sentinel]),
-    { type: 'attributes', target: layer }, { type: 'attributes', target: sentinel }]), false);
+    { type: 'attributes', attributeName: 'class', target: layer }, { type: 'attributes', target: sentinel }]), false);
   for (const record of [change(layer, [span]), change(layer, [], [span]),
-    { type: 'characterData', target: { textContent: '' } }, { type: 'attributes', target: span }])
+    { type: 'characterData', target: { textContent: '' } }, { type: 'attributes', target: span },
+    { type: 'attributes', attributeName: 'style', target: layer }])
     assert.equal(invalidate([record]), true);
 });
 function pointers(items = [{ sourceStart: 0, sourceEnd: 1 }]) {
-  const model = { getVersionId: () => 1 }, editor = { getModel: () => model }, pdf = {};
-  const index = { raw: 'abcdef', connectionPairs: () => [], reviewCandidates: () => items, formatDifferences: () => [] };
+  const documentModel = new FixtureDocument({ model: { getVersionId: () => 1 } }), model = documentModel.model, editor = { document: documentModel, getModel: () => model }, pdf = {};
+  const index = { raw: 'abcdef', pairs: () => [], candidates: () => items, formatDifferences: () => [] };
   const state = {
     ...scheduler(), viewer: { pdfDocument: pdf }, activeEditor: editor, layers: new Map(),
     defaultPointer: null, reviewPointer: null, revision: 0, timer: null,
@@ -202,14 +217,14 @@ test('highlight preparation and visible-page lookup tolerate an unattached PDF',
 });
 
 test('empty source ranges remain collapsed across tags and at document boundaries', () => {
-  const index = locator().sourceIndex('<p>one</p><p>two</p>');
-  const model = { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
+  const index = new FixtureConnections(locator(), '<p>one</p><p>two</p>');
+  const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
   for (let at = 0; at <= index.raw.length; at++) {
-    const range = engine().rangeAt(model, index.starts[at] ?? index.source.length,
+    const range = editor.document.rangeAt(index.starts[at] ?? index.source.length,
       index.starts[at] ?? index.source.length);
     assert.equal(range.startColumn, range.endColumn);
   }
-  const range = engine().rangeAt(model, index.starts[4] ?? index.source.length,
+  const range = editor.document.rangeAt(index.starts[4] ?? index.source.length,
     (7 > 4 ? index.ends[(7) - 1] : index.starts[4]) ?? index.source.length);
   assert.equal(range.startColumn, 14);
   assert.equal(range.endColumn, 17);

@@ -1,3 +1,5 @@
+import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
+import { sourceDecorations } from './support/pdf-harness.mjs';
 // Extracted from tmp/pdf-perf-benchmark.mjs and tmp/pdfdiff-comparison-cost.mjs.
 // Synthetic scaling measurements; real OCR and browser rendering have separate benchmarks.
 import assert from 'node:assert/strict';
@@ -29,14 +31,14 @@ function measure(workload, size, run, check) {
     maxMs: +samples.at(-1).toFixed(3) });
 }
 for (const size of sizes) {
-  const owner = locator(), source = owner.sourceIndex('a\n'.repeat(size));
-  const target = new api.PdfSourceIndex(owner, { raw: 'b\n'.repeat(size) });
+  const owner = locator(), source = new api.PdfConnections(owner, 'a\n'.repeat(size));
+  const target = new api.PdfConnections(owner, { raw: 'b\n'.repeat(size) });
   const parts = Array.from({ length: size }, () => [
     { html: 'a', pdf: 'b', changed: true }, { html: '\n', pdf: '\n', changed: false }
   ]).flat();
-  source.connections.set(target, [{ start: 0, end: source.raw.length,
+  source.byTarget.set(target, [{ start: 0, end: source.raw.length,
     targetStart: 0, targetEnd: target.raw.length, editorDiff: { parts } }]);
-  measure('review candidates', size, () => source.reviewCandidates(null, false, true, true, [target]), items => {
+  measure('review candidates', size, () => source.candidates(null, false, true, true, [target]), items => {
     assert.equal(items.length, size);
     items.forEach((item, i) => {
       assert.equal(item.sourceStart, i * 2);
@@ -45,13 +47,13 @@ for (const size of sizes) {
     });
   });
 
-  const fragmented = owner.sourceIndex('<span>a</span>'.repeat(size));
-  const pdf = new api.PdfSourceIndex(owner, { raw: 'c'.repeat(size),
+  const fragmented = new api.PdfConnections(owner, '<span>a</span>'.repeat(size));
+  const pdf = new api.PdfConnections(owner, { raw: 'c'.repeat(size),
     parts: [{ start: 0, end: size, font: { bold: false, italic: false } }] });
   const connection = { start: 0, end: size, targetStart: 0, targetEnd: size,
     editorDiff: { parts: [{ html: fragmented.raw, pdf: pdf.raw, changed: true }] } };
-  const model = { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) };
-  measure('fragmented decorations', size, () => fragmented.sourceDecorations(fragmented.reviewCandidates(null, true, false, true, [], [[connection, pdf]]), true, true, undefined, model), marks => {
+  const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
+  measure('fragmented decorations', size, () => sourceDecorations(fragmented, fragmented.candidates(null, true, false, true, [], [[connection, pdf]]), true, true, undefined, documentModel), marks => {
     assert.equal(marks.length, size);
     marks.forEach((mark, i) => {
       assert.equal(mark.range.startColumn, fragmented.starts[i] + 1);
@@ -62,15 +64,15 @@ for (const size of sizes) {
 }
 for (const size of [1, 12, 48]) {
   const owner = locator(), raw = 'abcd efgh ijkl mnop qrst uvwx yz.\n'.repeat(200);
-  const source = owner.sourceIndex(raw), pdf = {};
-  const pages = Array.from({ length: size }, () => new api.PdfSourceIndex(owner, { raw }));
-  for (const page of pages) source.rememberConnection(0, raw.length, page, { start: 0, end: raw.length });
-  source?.diff(pages, pdf);
-  const expected = source.connectionPairs(pages);
+  const source = new api.PdfConnections(owner, raw), pdf = {};
+  const pages = Array.from({ length: size }, () => new api.PdfConnections(owner, { raw }));
+  for (const page of pages) source.remember(0, raw.length, page, { start: 0, end: raw.length });
+  source?.update(pages, pdf);
+  const expected = source.livePairs;
   assert.ok(expected.length, 'cached preparation needs real retained connections');
   measure('cached preparation x100', size, () => {
-    for (let i = 0; i < 100; i++) source?.diff(pages, pdf);
-    return source.connectionPairs(pages);
+    for (let i = 0; i < 100; i++) source?.update(pages, pdf);
+    return source.livePairs;
   }, pairs => assert.deepEqual(pairs, expected));
 }
 console.table(rows);

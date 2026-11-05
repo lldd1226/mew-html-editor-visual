@@ -21,18 +21,18 @@ try {
     editor.setPosition({ lineNumber: 1, column: 4 }); editor.focus();
   });
   await page.keyboard.type('x');
-  await page.waitForFunction(() => document.querySelector('#fileName').textContent.endsWith(' *'));
+  await page.waitForFunction(() => document.querySelector('#tabs .tab.active .tabName').textContent.endsWith(' *'));
   await page.evaluate(() => { window.typingTab = document.querySelector('#tabs .tab.active'); });
   await page.keyboard.type('abcdef', { delay: 140 });
   assert.equal(await page.evaluate(() => typingTab === document.querySelector('#tabs .tab.active')), true, 'continued typing retains tab DOM and scroll position');
   await page.keyboard.press('Control+s');
-  await page.waitForFunction(() => !document.querySelector('#fileName').textContent.endsWith(' *'));
+  await page.waitForFunction(() => !document.querySelector('#tabs .tab.active .tabName').textContent.endsWith(' *'));
   assert.match(await readFile(path.join(fixture, 'a.html'), 'utf8'), /xabcdef/);
   await page.evaluate(() => mewWorkbench.editor.pushUndoStop());
   await page.keyboard.type('z');
-  await page.waitForFunction(() => document.querySelector('#fileName').textContent.endsWith(' *'));
+  await page.waitForFunction(() => document.querySelector('#tabs .tab.active .tabName').textContent.endsWith(' *'));
   await page.keyboard.press('Control+z');
-  await page.waitForFunction(() => !document.querySelector('#fileName').textContent.endsWith(' *'));
+  await page.waitForFunction(() => !document.querySelector('#tabs .tab.active .tabName').textContent.endsWith(' *'));
   assert.deepEqual(errors, []);
   console.log(`Real Monaco: paced typing retains tabs; dirty state, save and undo passed (${Buffer.byteLength(original)} bytes HTML).`);
 } finally {

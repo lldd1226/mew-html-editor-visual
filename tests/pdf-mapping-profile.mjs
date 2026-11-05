@@ -1,3 +1,5 @@
+import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
+import { sourceDecorations } from './support/pdf-harness.mjs';
 // Extracted from tmp/highlight-latency.mjs; method costs include nested calls.
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -13,7 +15,8 @@ assert.ok(fixture.pages?.length, 'The profile needs recorded PDF pages');
 const api = engine(), methods = {}, samples = [];
 let measuring = false;
 for (const [proto, names] of [
-  [api.PdfSourceIndex.prototype, ['diff', 'sourcePageScope', 'rememberConnection', 'connectionDiff', 'sourceDecorations', 'formatDifferences', 'matches', 'reviewCandidates']],
+  [api.PdfConnections.prototype, ['update', 'scope', 'remember', 'compare', 'search', 'matches', 'candidates', 'formatDifferences']],
+  [api, ['sourceDecorations']],
   [api.PdfLocator.prototype, ['sourceIndex']]
 ]) for (const name of names) {
   const original = proto[name];
@@ -38,21 +41,21 @@ for (let iteration = -3; iteration < iterations; iteration++) {
       transform: [1, 0, 0, 1, 0, 10], width: 500, height: 10 }];
     return { getTextContent: async () => ({ items }) };
   } });
-  const targets = full.pages.map(page => new api.PdfSourceIndex(locator, {
+  const targets = full.pages.map(page => new api.PdfConnections(locator, {
     raw: full.raw.slice(page.start, page.end),
     parts: page.parts.map(part => ({ ...part, start: part.start - page.start, end: part.end - page.start }))
   }));
   measuring = iteration >= 0;
-  const start = performance.now(), index = locator.sourceIndex(fixture.html);
-  index?.diff(targets, {});
-  const pairs = index.connectionPairs(targets);
-  const marks = index.sourceDecorations(index.reviewCandidates(null, true, false, true, [], pairs), true, true, undefined, { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) });
-  const candidates = index.reviewCandidates(null, false, true, true, targets);
+  const start = performance.now(), index = new api.PdfConnections(locator, fixture.html);
+  index?.update(targets, {});
+  const pairs = targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []);
+  const marks = api.sourceDecorations(index, index.candidates(null, true, false, true, [], pairs), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
+  const candidates = index.candidates(null, false, true, true, targets);
   const elapsed = performance.now() - start;
   measuring = false;
   assert.ok(pairs.length && marks.length && candidates.length, 'Profile must exercise mapped differences');
   for (const [connection, target] of pairs) {
-    const diff = index.connectionDiff(target, connection);
+    const diff = index.compare(target, connection);
     assert.ok(diff, 'Mapped passage exceeds the comparison budget');
     assert.equal(diff.parts.map(part => part.html).join(''), index.raw.slice(connection.start, connection.end));
     assert.equal(diff.parts.map(part => part.pdf).join(''), target.raw.slice(connection.targetStart, connection.targetEnd));

@@ -19,18 +19,18 @@ function installFixtureReview() {
       assertContext(state);
       const edits = item?.options.flatMap(value => value.edits) || [];
       return { message: item?.label || '没有可审阅的差异。', options: item?.options || [],
-        range: edits.length ? PdfSelectionDiff.rangeAt(state.context.model, Math.min(...edits.map(edit => edit.start)), Math.max(...edits.map(edit => edit.end))) : null };
+        range: edits.length ? state.context.documentModel.rangeAt(Math.min(...edits.map(edit => edit.start)), Math.max(...edits.map(edit => edit.end))) : null };
     },
     apply(state, all) {
       assertContext(state);
       const edits = (all ? state.items : [state.items[state.position]])
         .flatMap(item => item.options.find(value => value.id === state.choices.get(item.id)).edits);
-      const checked = PdfSelectionDiff.validateEdits(state.context.source, edits);
+      const checked = state.context.documentModel.validateEdits(edits);
       const shift = offset => offset + checked.reduce((sum, edit) => sum + (edit.end <= offset ? edit.text.length - edit.end + edit.start : 0), 0);
       const before = state.items.slice(0, state.position).length;
       const items = all ? [] : state.items.filter((item, at) => at !== state.position).map(item => ({ ...item,
         options: item.options.map(value => ({ ...value, edits: value.edits.map(edit => ({ ...edit, start: shift(edit.start), end: shift(edit.end) })) })) }));
-      PdfSelectionDiff.applyEdits(state.context.editor, state.context.model, state.context.version, state.context.source, edits);
+      state.context.documentModel.applyEdits(checked, { editor: state.context.editor });
       return { items, position: Math.min(before, Math.max(0, items.length - 1)) };
     }
   };
@@ -75,9 +75,9 @@ try {
       const model = testEditor.getModel();
       window.testOriginal = testEditor.getValue();
       window.fixtureCalls = 0;
-      ReplacementReview.register({ ...fixtureReview, id: 'fixture', label: '格式修订测试', provide({ model, toolbox }) {
+      ReplacementReview.register({ ...fixtureReview, id: 'fixture', label: '格式修订测试', provide({ model, documentModel }) {
         ++window.fixtureCalls;
-        const index = new PdfReviewProvider.PdfLocator().editorSourceIndex(model), items = [];
+        const index = new PdfReviewProvider.PdfLocator().editorSourceIndex(testEditor.document), items = [];
         for (const match of index.raw.matchAll(/WRONG/g)) items.push({ id: String(items.length), label: '替换错误文字', options: [
           { id: 'replace', label: '改成 <正确> & 𠀀', edits: index.textEdits(match.index, match.index + 5, '<正确> & 𠀀') },
           { id: 'keep', label: '保留原文', edits: [] }
@@ -143,11 +143,12 @@ try {
     const callsBeforeEdit = await page.evaluate(() => fixtureCalls);
     await page.evaluate(() => testEditor.executeEdits('test', [{ range: testEditor.getModel().getFullModelRange(), text: testOriginal + '\n<!-- changed -->' }]));
     await page.waitForFunction(previous => fixtureCalls > previous && !document.querySelector('[data-apply]').disabled, callsBeforeEdit);
-    assert.match(await popup.locator('[data-status]').textContent(), /内容已修改，请保存/);
+    assert.equal(await popup.locator('[data-status]').textContent(), '替换错误文字', 'refreshed provider content replaces the transient update message');
+    assert.match(await page.evaluate(() => testEditor.getValue()), /<!-- changed -->/);
     assert.equal(await popup.locator('[data-refresh]').count(), 0);
     await page.waitForFunction(() => !document.querySelector('[data-apply]').disabled);
     await page.evaluate(() => testEditor.updateOptions({ readOnly: true }));
-    await popup.locator('[data-apply]').click();
+    await popup.locator('[data-advance]').click();
     assert.match(await popup.locator('[data-status]').textContent(), /只读/);
     await page.evaluate(async () => { ReplacementReview.close(); await ReplacementReview.open('fixture'); });
     await page.evaluate(() => {
@@ -160,7 +161,7 @@ try {
     assert.equal(await page.evaluate(() => blockedReviewSaves), 0, 'failed replacement must not save');
     await page.evaluate(() => { (window.mewWorkbench || window.readerMonaco).save = savedReviewSave; testEditor.updateOptions({ readOnly: false }); ReplacementReview.close(); });
     await page.evaluate(async () => { testEditor.getModel().setValue(testOriginal); await ReplacementReview.open('fixture'); window.callsBeforeApply = fixtureCalls; });
-    await popup.locator('[data-apply]').click();
+    await popup.locator('[data-advance]').click();
     assert.equal(await popup.locator('[data-position]').textContent(), '1 / 1', 'replacement immediately selects the remaining candidate');
     assert.equal(await page.evaluate(() => testEditor.getModel().getValueInRange(testEditor.getSelection())), 'WRONG', 'remaining coordinates account for tag segments, entities and Unicode');
     const textToSave = original.replace('<b>WR</b>ONG', '<b>&lt;正确&gt; &amp; 𠀀</b>').replace('Second WRONG', 'Second &lt;正确&gt; &amp; 𠀀');
@@ -256,7 +257,7 @@ try {
       await page.waitForSelector('.mew-ocr-diff-text');
       await page.evaluate(() => {
         const model = testEditor.getModel(), start = model.getValue().indexOf('Gesellschaft') + 8;
-        testEditor.setSelection(PdfSelectionDiff.rangeAt(model, start, start + 1));
+        testEditor.setSelection(testEditor.document.rangeAt(start, start + 1));
       });
       await popup.waitFor({ state: 'visible' });
       assert.deepEqual(await popup.locator('[data-comparison] mark').allTextContents(), ['h', 'H']);
@@ -264,7 +265,7 @@ try {
       await page.locator('.mew-ocr-diff-text').click();
       await popup.waitFor({ state: 'visible' });
       assert.deepEqual(await popup.locator('[data-comparison] mark').allTextContents(), ['h', 'H']);
-      await popup.locator('[data-apply]').click();
+      await popup.locator('[data-advance]').click();
       assert.match(await page.evaluate(() => testEditor.getValue()), /GesellscHaft/);
       await page.evaluate(({ source, pdf }) => {
         ReplacementReview.close();
@@ -356,7 +357,7 @@ try {
       await page.evaluate(() => {
         window.fullSelection = testEditor.getValue().slice(3, -4);
         const model = testEditor.getModel();
-        testEditor.setSelection(PdfSelectionDiff.rangeAt(model, 3, model.getValueLength() - 4));
+        testEditor.setSelection(testEditor.document.rangeAt(3, model.getValueLength() - 4));
       });
       await page.waitForFunction(() => !document.querySelector('.replacement-review').hidden && !document.querySelector('[data-apply]').disabled);
       assert.equal(await page.evaluate(() => testEditor.getModel().getValueInRange(testEditor.getSelection())),
@@ -365,7 +366,7 @@ try {
         'the selection popup marks every mismatch, including distant differences');
       assert.equal(await popup.locator('[data-comparison] > *').first().textContent(),
         'HTML: ' + await page.evaluate(() => fullSelection), 'the popup retains all matching context without truncation');
-      await popup.locator('[data-apply]').click();
+      await popup.locator('[data-advance]').click();
       assert.match(await page.evaluate(() => testEditor.getValue()), /an YYYYY.*a Z/,
         'replacement applies all differences in the selected passage');
       await page.evaluate(() => { ReplacementReview.close(); testEditor.trigger('test', 'undo'); });
@@ -383,22 +384,22 @@ try {
       assert.equal(await popup.locator('[data-expanded]').isHidden(), true, 'compact PDF review hides expanded preview');
       await page.evaluate(() => {
         window.reviewCalls = 0; window.reviewScopes = [];
-        const original = PdfSelectionDiff.PdfSourceIndex.prototype.reviewCandidates;
-        PdfSelectionDiff.PdfSourceIndex.prototype.reviewCandidates = function (...args) { ++reviewCalls; reviewScopes.push(args[0]?.length || 0); return original.apply(this, args); };
+        const original = PdfSelectionDiff.PdfConnections.prototype.candidates;
+        PdfSelectionDiff.PdfConnections.prototype.candidates = function (...args) { ++reviewCalls; reviewScopes.push(args[0]?.length || 0); return original.apply(this, args); };
       });
-      await popup.locator('[data-apply]').click();
+      await popup.locator('[data-advance]').click();
       await page.waitForFunction(() => testEditor.getValue().includes('an Y'));
       assert.equal(await popup.locator('[data-position]').textContent(), '1 / 2',
         'recomputation discovers the four missing Ys after replacing X with a selected single Y');
       assert.ok(await page.evaluate(() => reviewCalls) > 0);
-      await popup.locator('[data-apply]').click();
+      await popup.locator('[data-advance]').click();
       await page.waitForFunction(() => testEditor.getValue().includes('an YYYYY'));
       assert.equal(await popup.locator('[data-position]').textContent(), '1 / 1');
       assert.equal(await page.evaluate(() => testEditor.getModel().getValueInRange(testEditor.getSelection())), 'Q');
       const refreshedCalls = await page.evaluate(() => reviewCalls);
       await page.waitForTimeout(400);
       assert.equal(await page.evaluate(() => reviewCalls), refreshedCalls, 'selection feedback does not restart candidate calculation');
-      await popup.locator('[data-apply]').click();
+      await popup.locator('[data-advance]').click();
       assert.match(await page.evaluate(() => testEditor.getValue()), /a Z character/);
       for (let i = 0; i < 3; i++)
         await page.evaluate(() => { ReplacementReview.close(); testEditor.trigger('test', 'undo'); });
@@ -420,7 +421,7 @@ try {
       });
       await page.mouse.click(point.x, point.y);
       assert.equal(await popup.isVisible(), true, 'clicking the highlighted difference keeps review open');
-      await page.evaluate(() => testEditor.setSelection(PdfSelectionDiff.rangeAt(testEditor.getModel(), manualOriginal.indexOf('X'), manualOriginal.indexOf('X') + 1)));
+      await page.evaluate(() => testEditor.setSelection(testEditor.document.rangeAt(manualOriginal.indexOf('X'), manualOriginal.indexOf('X') + 1)));
       await page.keyboard.insertText('Y');
       await page.keyboard.insertText('YYYY');
       const insertionCaret = await page.evaluate(() => testEditor.getPosition());
@@ -489,11 +490,11 @@ try {
       });
       await page.waitForFunction(() => window.splitTargetIndex?.raw.includes('RIGHT'));
       await child.evaluate(async () => {
-        const editor = mewWorkbench.editor, model = editor.getModel(), index = new PdfReviewProvider.PdfLocator().editorSourceIndex(model);
+        const editor = mewWorkbench.editor, model = editor.getModel(), index = new PdfReviewProvider.PdfLocator().editorSourceIndex(editor.document);
         const start = index.raw.lastIndexOf('WRONG'), target = opener.splitTargetIndex;
-        const range = PdfSelectionDiff.rangeAt(model, index.starts[start], index.ends[start + 4]);
+        const range = testEditor.document.rangeAt(index.starts[start], index.ends[start + 4]);
         editor.setSelection(range); editor.revealRangeInCenter(range);
-        index.rememberConnection(start, start + 5, target, { start: 0, end: 5 });
+        index.remember(start, start + 5, target, { start: 0, end: 5 });
         opener.dispatchEvent(new opener.CustomEvent('pdf-selection-difference', { detail: {
           editor, model, pdf: opener.ReaderUI.getPdfViewer().pdfDocument, targets: [target],
           notices: [{ html: 'WRONG', pdf: 'RIGHT', source: { index, start, end: start + 5 }, target: { index: target, start: 0, end: 5 } }]

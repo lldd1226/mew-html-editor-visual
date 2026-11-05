@@ -17,7 +17,7 @@ try {
       const viewer = window.ReaderUI?.getPdfViewer();
       const target = locator?.getDocumentIndex(viewer?.pdfDocument, ReaderUI.getPdfSourcePages());
       return editor && document.querySelector('.textLayer span') && target
-        && locator.editorSourceIndex(editor.getModel()).pageScopes.get(target)?.prepared;
+        && locator.editorSourceIndex(editor.document).scopes.get(target)?.prepared;
     });
     await page.evaluate(() => {
       PdfReviewProvider.setFontEnabled(false);
@@ -27,15 +27,15 @@ try {
       window.htmlMarks = () => markState(readerMonaco.editor.getModel().getAllDecorations());
       addEventListener('pdf-selection-difference', event => { window.caretNotices = event.detail.notices; });
       window.expectedMarks = () => {
-        const locator = PdfSelection.locator, editor = readerMonaco.editor, index = locator.editorSourceIndex(editor.getModel()), targets = locator.environment.getTargets();
-        return markState(index.sourceDecorations(index.reviewCandidates(null, false, false, true, targets, index.connectionPairs(targets, true)), false, true, undefined, editor.getModel()));
+        const locator = PdfSelection.locator, editor = readerMonaco.editor, index = locator.editorSourceIndex(editor.document), targets = locator.environment.getTargets();
+        return markState(window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, false, false, true, targets, targets.filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), false, true, undefined, editor.getModel()));
       };
     });
     await page.waitForFunction(() => htmlMarks() === expectedMarks());
     const before = await page.evaluate(() => htmlMarks());
     const cases = await page.evaluate(() => {
-      const locator = PdfSelection.locator, index = locator.editorSourceIndex(readerMonaco.editor.getModel());
-      return index.reviewCandidates(null, false, true, true, locator.environment.getTargets()).map(item => ({
+      const locator = PdfSelection.locator, index = locator.editorSourceIndex(readerMonaco.editor.document);
+      return index.candidates(null, false, true, true, locator.environment.getTargets()).map(item => ({
         start: item.sourceStart, end: item.sourceEnd, missing: !!item.missing,
         html: item.comparison.html, pdf: item.comparison.pdf
       }));
@@ -46,10 +46,10 @@ try {
     if (number === 452) {
       const selectedText = await page.evaluate(() => {
         ReplacementReview.close(); window.caretNotices = [];
-        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
         const start = index.raw.indexOf('Dronke und Imandt begaben');
         const end = start + index.raw.slice(start, index.raw.indexOf('„An die Redaktion', start)).trimEnd().length;
-        editor.setSelection(window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+        editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length));
         return index.raw.slice(start, end);
       });
@@ -65,10 +65,10 @@ try {
     }
     if (number === 453) {
       await page.evaluate(() => {
-        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
         const text = 'gemacht, die in Beziehung zu de', start = index.raw.indexOf(text);
         window.caretNotices = [];
-        editor.setSelection(window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+        editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (start + text.length > start ? index.ends[(start + text.length) - 1] : index.starts[start]) ?? index.source.length));
       });
       await page.waitForFunction(() => window.caretNotices?.length);
@@ -100,8 +100,8 @@ try {
       : [[item.start, item.end]]) {
       await page.evaluate(([start, end]) => {
         ReplacementReview.close();
-        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
-        editor.setSelection(window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[start] ?? index.source.length,
+        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
+        editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (Math.max(start, end) > start ? index.ends[(Math.max(start, end)) - 1] : index.starts[start]) ?? index.source.length));
       }, [start, end]);
       await page.waitForTimeout(120);
@@ -110,7 +110,7 @@ try {
     for (const item of cases.filter(item => item.missing)) {
       const point = await page.evaluate(item => {
         ReplacementReview.close(); window.caretNotices = [];
-        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+        const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
         const position = editor.getModel().getPositionAt(index.starts[Math.floor((item.start + item.end) / 2)]);
         editor.revealPositionInCenter(position); editor.render(true);
         const rect = editor.getDomNode().getBoundingClientRect(), visible = editor.getScrolledVisiblePosition(position);

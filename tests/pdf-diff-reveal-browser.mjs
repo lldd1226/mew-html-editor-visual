@@ -62,7 +62,7 @@ try {
     await page.waitForTimeout(150);
     const pdfClick = await page.evaluate(() => {
       const editor = readerMonaco.editor, viewer = ReaderUI.getPdfViewer();
-      const index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+      const index = PdfSelection.locator.editorSourceIndex(editor.document);
       const range = {
         start: PdfSelectionDiff.lowerBound(index.ends, editor.getModel().getOffsetAt({lineNumber:testRange.startLineNumber,column:testRange.startColumn}) + 1),
         end: PdfSelectionDiff.lowerBound(index.starts, editor.getModel().getOffsetAt({lineNumber:testRange.endLineNumber,column:testRange.endColumn}))

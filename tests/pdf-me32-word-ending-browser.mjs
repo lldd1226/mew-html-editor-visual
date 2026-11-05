@@ -20,8 +20,8 @@ try {
     const point = await page.evaluate(() => {
       ReplacementReview.close(); PdfSelection.clear();
       const editor = readerMonaco.editor, model = editor.getModel();
-      const index = PdfSelection.locator.editorSourceIndex(model), at = index.raw.indexOf('gewähren.') + 'gewähren.'.length;
-      const range = window.PdfSelectionDiff.rangeAt(model, index.starts[at] ?? index.source.length,
+      const index = PdfSelection.locator.editorSourceIndex(editor.document), at = index.raw.indexOf('gewähren.') + 'gewähren.'.length;
+      const range = editor.document.rangeAt(index.starts[at] ?? index.source.length,
         index.starts[at] ?? index.source.length);
       editor.revealRangeInCenter(range);
       return { lineNumber: range.startLineNumber, column: range.startColumn };

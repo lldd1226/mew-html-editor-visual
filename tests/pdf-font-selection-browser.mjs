@@ -37,7 +37,7 @@ try {
         return { items: [{ str: raw, transform: [1, 0, 0, 1, 0, 500], width: 800, height: 18 }] };
       } }; } } };
     window.ReaderUI = { getPdfViewer: () => viewer };
-    PdfSelection.locator.layerFonts = () => () => ({ italic: false, bold: false });
+    PdfReviewProvider.layerFonts = () => () => ({ italic: false, bold: false });
     PdfSelection.attachViewer(viewer);
     PdfSelection.attachEditor(testEditor);
   });
@@ -49,9 +49,9 @@ try {
   assert.deepEqual(style, { background: 'rgba(0, 0, 0, 0)', line: 'underline', style: 'wavy' });
   assert.ok(await page.locator('.mew-ocr-diff-text').count(), 'text faults retain their background highlight');
   await page.evaluate(() => {
-    const index = PdfSelection.locator.editorSourceIndex(testEditor.getModel());
+    const index = PdfSelection.locator.editorSourceIndex(testEditor.document);
     const target = PdfSelection.locator.environment.getVisiblePages()[0].index;
-    index.rememberConnection(0, index.raw.length, target, { start: 0, end: target.raw.length });
+    index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
     PdfSelection.refresh();
   });
   await page.evaluate(() => {
@@ -103,8 +103,8 @@ try {
     const expected = range.getBoundingClientRect();
     const overlay = div.querySelector('.mew-pdf-selection-highlight:not(.mew-pdf-review-pointer)');
     const actual = overlay.firstChild.getBoundingClientRect();
-    const index = PdfSelection.locator.editorSourceIndex(testEditor.getModel());
-    const item = index.formatDifferences([], ['italic', 'bold'], true, index.connectionPairs(PdfSelection.locator.environment.getTargets()))[0];
+    const index = PdfSelection.locator.editorSourceIndex(testEditor.document);
+    const item = index.formatDifferences([], ['italic', 'bold'], true, PdfSelection.locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []))[0];
     item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
     return { visible: getComputedStyle(overlay).visibility, actual: [actual.left, actual.right], expected: [expected.left, expected.right],
       anchor: PdfSelection.locator.reviewAnchor(item, index), popup: document.querySelector('.replacement-review').getBoundingClientRect().toJSON() };

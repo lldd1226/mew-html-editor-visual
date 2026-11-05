@@ -20,6 +20,7 @@ try {
     node.style.cssText = 'position:fixed;inset:100px 0 0;background:white;z-index:10000';
     document.body.append(node);
     window.suggestionEditor = monaco.editor.create(node, { value: '  WRONG tail', language: 'html', quickSuggestions: false });
+    window.suggestionEditor.document = new window.MewEditorCore.DocumentModel({ model: window.suggestionEditor.getModel() });
     const registerAction = monaco.languages.registerCodeActionProvider;
     const registerCompletion = monaco.languages.registerCompletionItemProvider;
     monaco.languages.registerCodeActionProvider = (...args) => { window.actionProvider = args[1]; return registerAction(...args); };
@@ -33,7 +34,7 @@ try {
     monaco.languages.registerCompletionItemProvider = registerCompletion;
     ReplacementReview.register({ id: 'suggestion-test', label: 'Test',
       provide: ({ model }) => plans(model).map((value, i) => ({ id: String(i), options: [{ id: 'replace', ...value }] })),
-      content: (state, item) => ({ range: item && PdfSelectionDiff.rangeAt(state.context.model, 2, 7) }) });
+      content: (state, item) => ({ range: item && state.context.documentModel.rangeAt(2, 7) }) });
     localStorage.setItem('mew-review-preview', 'false');
     suggestionEditor.setPosition({ lineNumber: 1, column: 3 });
     suggestionEditor.focus();
@@ -230,15 +231,15 @@ try {
         for (const key of ['editor', 'model', 'source', 'version']) {
           if (Object.hasOwn(state, key)) throw new Error(`Duplicate context field: ${key}`);
         }
-        const { model, source, version, toolbox } = state.context;
+        const { model, source, version, documentModel } = state.context;
         if (source !== model.getValue() || version !== model.getVersionId()) throw new Error('Stale context');
         window.contextSource = source;
         const edit = item?.options[0].edits[0];
-        return { range: edit && toolbox.rangeAt(model, edit.start, edit.end) };
+        return { range: edit && documentModel.rangeAt(edit.start, edit.end) };
       },
-      apply({ context: { editor, model, source, version, toolbox }, items, position }) {
+      apply({ context: { editor, snapshot, documentModel }, items, position }) {
         const edits = items[position].options[0].edits;
-        toolbox.applyEdits(editor, model, version, source, edits);
+        documentModel.applyEdits(edits, { editor: editor });
         return { offset: edits[0].start + edits[0].text.length };
       }
     });

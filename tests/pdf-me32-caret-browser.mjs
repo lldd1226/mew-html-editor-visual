@@ -25,8 +25,8 @@ try {
       const range = await page.evaluate(() => {
         ReplacementReview.close();
         const editor = readerMonaco.editor, model = editor.getModel();
-        const index = PdfSelection.locator.editorSourceIndex(model), start = index.raw.indexOf('raison') + 5;
-        const range = window.PdfSelectionDiff.rangeAt(model, index.starts[start] ?? index.source.length,
+        const index = PdfSelection.locator.editorSourceIndex(editor.document), start = index.raw.indexOf('raison') + 5;
+        const range = editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (start + 1 > start ? index.ends[(start + 1) - 1] : index.starts[start]) ?? index.source.length);
         editor.revealRangeInCenter(range);
         const viewer = PdfSelection.viewer;
@@ -69,8 +69,8 @@ try {
       const range = await page.evaluate(text => {
         ReplacementReview.close(); PdfSelection.clear();
         const editor = readerMonaco.editor, model = editor.getModel();
-        const index = PdfSelection.locator.editorSourceIndex(model), start = index.raw.indexOf(text);
-        const range = window.PdfSelectionDiff.rangeAt(model, index.starts[start] ?? index.source.length,
+        const index = PdfSelection.locator.editorSourceIndex(editor.document), start = index.raw.indexOf(text);
+        const range = editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (start + text.length > start ? index.ends[(start + text.length) - 1] : index.starts[start]) ?? index.source.length);
         editor.setPosition({ lineNumber: range.startLineNumber, column: range.startColumn });
         editor.revealRangeInCenter(range);
@@ -111,8 +111,8 @@ try {
     await page.evaluate(() => {
       ReplacementReview.close(); PdfSelection.clear();
       const editor = readerMonaco.editor, model = editor.getModel();
-      const index = PdfSelection.locator.editorSourceIndex(model), end = index.raw.indexOf('raison') + 6;
-      const range = window.PdfSelectionDiff.rangeAt(model, index.starts[end] ?? index.source.length,
+      const index = PdfSelection.locator.editorSourceIndex(editor.document), end = index.raw.indexOf('raison') + 6;
+      const range = editor.document.rangeAt(index.starts[end] ?? index.source.length,
         index.starts[end] ?? index.source.length);
       editor.setPosition({ lineNumber: range.startLineNumber, column: range.startColumn + 1 });
       editor.focus();
@@ -126,11 +126,11 @@ try {
       const before = await page.evaluate(olderSelection => {
         ReplacementReview.close(); PdfSelection.clear();
         const editor = readerMonaco.editor, model = editor.getModel(), locator = PdfSelection.locator;
-        const index = locator.editorSourceIndex(model), start = index.raw.indexOf('raison') + 5;
-        window.reviewItem = index.reviewCandidates(null, false, true, true, locator.environment.getTargets()).find(item => item.sourceStart === start);
+        const index = locator.editorSourceIndex(editor.document), start = index.raw.indexOf('raison') + 5;
+        window.reviewItem = index.candidates(null, false, true, true, locator.environment.getTargets()).find(item => item.sourceStart === start);
         if (olderSelection) {
           const previous = index.raw.indexOf('honneur');
-          editor.setSelection(window.PdfSelectionDiff.rangeAt(model, index.starts[previous] ?? index.source.length,
+          editor.setSelection(editor.document.rangeAt(index.starts[previous] ?? index.source.length,
             (previous + 7 > previous ? index.ends[(previous + 7) - 1] : index.starts[previous]) ?? index.source.length));
         }
         const viewer = PdfSelection.viewer;
@@ -161,10 +161,10 @@ try {
       await page.evaluate(text => {
         ReplacementReview.close(); PdfSelection.clear();
         const editor = readerMonaco.editor, model = editor.getModel();
-        const index = PdfSelection.locator.editorSourceIndex(model), word = index.raw.indexOf('raison');
+        const index = PdfSelection.locator.editorSourceIndex(editor.document), word = index.raw.indexOf('raison');
         const start = text.startsWith('paragraph') ? index.raw.indexOf('erlichsten Operationen') : word + (text === 'n' ? 5 : 0);
         const end = word + (text === 'n' || text === 'raison' ? 6 : 5);
-        editor.setSelection(window.PdfSelectionDiff.rangeAt(model, index.starts[start] ?? index.source.length,
+        editor.setSelection(editor.document.rangeAt(index.starts[start] ?? index.source.length,
           (end > start ? index.ends[(end) - 1] : index.starts[start]) ?? index.source.length));
         const viewer = PdfSelection.viewer;
         viewer.container.scrollTop = viewer.getPageView(viewer.currentPageNumber - 1).div.offsetTop;

@@ -15,8 +15,7 @@ try {
   await page.route('**/pdfdiff/pdf-review-provider.js', async route => {
     const body = (await readFile('public/pdfdiff/pdf-review-provider.js', 'utf8')).replace(
       'async indexDocument(pdf, numbers) {', 'async indexDocument(pdf, numbers) { if (!numbers) window.volumeReads = (window.volumeReads || 0) + 1;').replace(
-      'cached.index = new toolbox.PdfSourceIndex(this, { raw, pages, normalized: mapped });',
-      'cached.index = new toolbox.PdfSourceIndex(this, { raw, pages, normalized: mapped }); if (numbers) window.coldIndex = cached.index;');
+      'index.normalized = mapped;', 'index.normalized = mapped; if (index.sourcePages) window.coldIndex = index;');
     await route.fulfill({ body, contentType: 'text/javascript' });
   });
   await page.goto(`http://127.0.0.1:${port}/?volume=8&page=${requested}&mode=source`, { waitUntil: 'domcontentloaded' });
@@ -24,15 +23,15 @@ try {
   await page.waitForFunction(() => {
     const editor = window.readerMonaco?.editor, viewer = window.ReaderUI?.getPdfViewer();
     if (!editor || !viewer?.pdfDocument || !window.PdfSelection) return false;
-    const index = PdfSelection.locator.editorSourceIndex(editor.getModel());
+    const index = PdfSelection.locator.editorSourceIndex(editor.document);
     const target = window.coldIndex;
     if (!target) return false;
-    const candidate = index.reviewCandidates(null, false, true, true, [target]).find(item => {
-      const hit = index.connectedRange(target, item.sourceStart, item.sourceEnd, false, undefined, true);
+    const candidate = index.candidates(null, false, true, true, [target]).find(item => {
+      const hit = index.range(target, item.sourceStart, item.sourceEnd, false, undefined, true);
       return hit && target.pages.some(p => p.number === 452 && hit.start >= p.start && hit.start < p.end);
     });
     if (!candidate) return false;
-    window.coldRange = window.PdfSelectionDiff.rangeAt(editor.getModel(), index.starts[candidate.sourceStart] ?? index.source.length,
+    window.coldRange = editor.document.rangeAt(index.starts[candidate.sourceStart] ?? index.source.length,
       (candidate.sourceEnd > candidate.sourceStart ? index.ends[(candidate.sourceEnd) - 1] : index.starts[candidate.sourceStart]) ?? index.source.length);
     return true;
   }, null, { timeout: 15000 });

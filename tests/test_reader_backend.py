@@ -72,6 +72,116 @@ class ReaderBackendTests(unittest.TestCase):
                           method=method, headers=headers or {})
         return urlopen(request)
 
+    def test_string_page_labels_both_servers(self):
+        labels = ['i', 'ii', 'iv', 'A', '17a', '001', '003']
+        for label in labels:
+            (self.root / 'pages' / f'{label}.html').write_text(f'<p>{label}</p>', 'utf-8')
+        config = dict(editorRoot='.', volumes=[dict(id='uuid-volume',
+            pages=dict(directory='pages', pattern=r'^(?<page>.+)[.]html$', list=labels), pdf='scan.pdf')])
+        self.config.write_text(json.dumps(config), 'utf-8')
+        for command in ([sys.executable, str(ROOT / 'reader-server.py')], ['node', str(ROOT / 'reader-server.js')]):
+            with self.subTest(command=command[0]):
+                with socket.socket() as listener:
+                    listener.bind(('127.0.0.1', 0))
+                    port = listener.getsockname()[1]
+                process = subprocess.Popen([*command, '-c', str(self.config), '-p', str(port)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                try:
+                    base = f'http://127.0.0.1:{port}'
+                    deadline = time.monotonic() + 10
+                    while True:
+                        try:
+                            with urlopen(base + '/api/reader/config', timeout=.3) as response:
+                                loaded = json.load(response)
+                            break
+                        except OSError:
+                            if process.poll() is not None or time.monotonic() > deadline:
+                                self.fail('Reader failed to start')
+                            time.sleep(.02)
+                    self.assertEqual(loaded['volumes'][0]['pages'], ['i', 'ii', 'iv', 'A', '17a', 1, 3])
+                    for label in ['iv', 'A', '17a', '001']:
+                        url = base + '/api/reader/page/uuid-volume/' + label
+                        with urlopen(url) as response:
+                            data = json.load(response)
+                        self.assertEqual(data['page'], 1 if label == '001' else label)
+                        with urlopen(Request(url, data=json.dumps(dict(text='<p>edited</p>', mtime=data['mtime'])).encode(),
+                                method='PUT', headers={'Content-Type': 'application/json'})) as response:
+                            self.assertEqual(response.status, 200)
+                        with urlopen(url) as response:
+                            self.assertEqual(json.load(response)['text'], '<p>edited</p>')
+                    with self.assertRaises(HTTPError) as missing:
+                        urlopen(base + '/api/reader/page/uuid-volume/iii')
+                    missing.exception.close()
+                finally:
+                    process.terminate()
+                    process.wait(timeout=5)
+                    process.stderr.close()
+
+    def test_config_ownership_and_instance_settings(self):
+        commands = ([sys.executable, str(ROOT / 'reader-server.py')],
+                    ['node', str(ROOT / 'reader-server.js')])
+        processes = []
+        def close():
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
+                process.stderr.close()
+        self.addCleanup(close)
+
+        def start(command, config):
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', 0))
+                port = listener.getsockname()[1]
+            process = subprocess.Popen([*command, '-c', str(config), '-p', str(port)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            processes.append(process)
+            base = f'http://127.0.0.1:{port}'
+            deadline = time.monotonic() + 10
+            while True:
+                if process.poll() is not None:
+                    self.fail(process.stderr.read().decode('utf-8', errors='replace'))
+                try:
+                    with urlopen(base + '/api/reader/settings', timeout=.2) as response:
+                        return process, base, json.load(response)
+                except OSError:
+                    if time.monotonic() > deadline:
+                        self.fail('Reader did not start')
+                    time.sleep(.02)
+
+        original = json.loads(self.config.read_text('utf-8'))
+        fallback = backend.SETTINGS_FILE.read_bytes()
+        for command in commands:
+            with self.subTest(command=command[0]):
+                self.config.write_text(json.dumps(original), 'utf-8')
+                process, base, defaults = start(command, self.config)
+                self.assertEqual(defaults, backend.load_settings())
+                for other in commands:
+                    duplicate = subprocess.run([*other, '-c', str(self.config), '-p', '0'],
+                        capture_output=True, timeout=10)
+                    self.assertNotEqual(duplicate.returncode, 0)
+                    self.assertIn('http://localhost:' + base.rsplit(':', 1)[1], duplicate.stderr.decode('utf-8', errors='replace'))
+                second_config = self.root / 'second.json'
+                second_config.write_text(json.dumps({**original, 'settings': {'paper': '#123456'}}), 'utf-8')
+                second, second_base, separate = start(command, second_config)
+                self.assertEqual(separate['paper'], '#123456')
+                self.assertEqual(separate['brightness'], defaults['brightness'])
+                for address, brightness in ((base, 111), (second_base, 122)):
+                    with urlopen(Request(address + '/api/reader/settings',
+                            data=json.dumps({'brightness': brightness}).encode(), method='PUT')) as response:
+                        self.assertEqual(json.load(response)['brightness'], brightness)
+                self.assertEqual(json.loads(self.config.read_text('utf-8'))['settings']['brightness'], 111)
+                self.assertEqual(json.loads(second_config.read_text('utf-8'))['settings']['brightness'], 122)
+                self.assertEqual(backend.SETTINGS_FILE.read_bytes(), fallback)
+                for running in (process, second):
+                    running.terminate()
+                    running.wait(timeout=5)
+                # Windows termination leaves the PID record; both backends must recover it.
+                restarted, _, saved = start(commands[1] if command == commands[0] else commands[0], self.config)
+                self.assertEqual(saved['brightness'], 111)
+                restarted.terminate()
+                restarted.wait(timeout=5)
+
     def test_js_and_fastapi_http_contracts_match(self):
         self.start()
         with socket.socket() as listener:
@@ -404,7 +514,8 @@ class ReaderBackendTests(unittest.TestCase):
                 self.assertTrue(loaded['italicDetection'])
                 self.assertFalse(loaded['boldDetection'])
                 self.assertTrue(loaded['splitView'])
-            self.assertEqual(json.loads((self.root / 'settings.json').read_text('utf-8')), loaded)
+            self.assertEqual(json.loads(self.config.read_text('utf-8'))['settings'], loaded)
+            self.assertFalse((self.root / 'settings.json').exists())
             with self.request('/api/reader/settings', dict(splitView=False), 'PUT') as response:
                 saved = json.load(response)
                 self.assertFalse(saved['splitView'])

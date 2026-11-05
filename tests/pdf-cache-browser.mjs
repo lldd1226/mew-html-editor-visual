@@ -49,18 +49,18 @@ try {
     const index = await locator.indexDocument(pdf);
     // Neither document comparison nor format indexing may reopen/extract PDF pages.
     pdf.getPage = () => { throw new Error('Unexpected PDF extraction'); };
-    const source = locator.sourceIndex('<p>Normal surrounding text for stable alignment.</p><p>Italic passage with enough letters.</p><p>Bold passage with enough letters.</p><p>Another WRONG reading here.</p>');
-    source?.diff([index], pdf);
+    const source = new window.PdfSelectionDiff.PdfConnections(locator, '<p>Normal surrounding text for stable alignment.</p><p>Italic passage with enough letters.</p><p>Bold passage with enough letters.</p><p>Another WRONG reading here.</p>');
+    source?.update([index], pdf);
     await locator.indexFonts(pdf, source);
-    const connections = (source.connections.get(index) || []).map(connection => [connection, index]);
-    const canonical = locator.sourceIndex('<p>Normal surrounding text for stable alignment.</p><p><em>Italic passage with enough letters.</em></p><p><strong>Bold passage with enough letters.</strong></p><p>Another correct reading here.</p>');
-    canonical?.diff([index], pdf);
-    const canonicalFormats = canonical.formatDifferences([], ['italic', 'bold'], true, (canonical.connections.get(index) || []).map(connection => [connection, index]));
+    const connections = (source.byTarget.get(index) || []).map(connection => [connection, index]);
+    const canonical = new window.PdfSelectionDiff.PdfConnections(locator, '<p>Normal surrounding text for stable alignment.</p><p><em>Italic passage with enough letters.</em></p><p><strong>Bold passage with enough letters.</strong></p><p>Another correct reading here.</p>');
+    canonical?.update([index], pdf);
+    const canonicalFormats = canonical.formatDifferences([], ['italic', 'bold'], true, (canonical.byTarget.get(index) || []).map(connection => [connection, index]));
     return { url: pdf.ocrTextUrl, raw: index.raw,
       canonicalFormats: canonicalFormats.length,
       runs: index.fontRuns(),
       formats: source.formatDifferences([], ['italic', 'bold'], true, connections).map(item => ({ text: item.text, font: item.font })),
-      texts: source.reviewCandidates(null, false, true, true, [index]).map(item => item.comparison),
+      texts: source.candidates(null, false, true, true, [index]).map(item => item.comparison),
       same: index === await locator.indexDocument(pdf), cached: !index.textLayer,
       geometryFree: index.pages.every(page => page.parts.every(part => !part.item && !part.bbox)),
       blocks: index.pages[0].blocks.length };
