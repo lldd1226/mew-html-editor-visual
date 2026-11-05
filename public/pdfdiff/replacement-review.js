@@ -440,8 +440,7 @@
       let found = selectedId ? items.findIndex(item => item.id === selectedId) : -1;
       if (found < 0) found = items.findIndex(item => {
         const range = item.range || saved.provider.content({ ...saved, context, items, choices }, item).range;
-        return range && (saved.context.model.getOffsetAt({ lineNumber: range.endLineNumber, column: range.endColumn }) > saved.resumeOffset
-          || saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset);
+        return range && saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset;
       });
       Object.assign(saved, { items, choices, selection, position: found < 0 ? items.length : found,
         context, stale: false, partial: !!result.partial });
@@ -509,7 +508,7 @@
       signal: controller.signal, documentModel: target.document, snapshot, request: requestData };
     for (const [event, callback] of Object.entries({
       onDidChangeModel: () => close(), onDidDispose: () => close(false, false),
-      onDidChangeModelContent: event => { if (!session?.applying) stale(event); },
+      onDidChangeModelContent: event => { if (!session?.applying && !(session?.context.request?.mirror && session.stale)) stale(event); },
       onDidCompositionStart: () => { composing = true; clearTimeout(manualTimer); },
       onDidCompositionEnd: () => {
         composing = false;
@@ -586,7 +585,7 @@
         previewEnabled ? selectedEdits() : [], previewEnabled ? content.previewDecorations : []);
     }
     void preview(); place(editor);
-    if (!mirrored && peer) peer.host.mirror(session, { ...peer.request, mirror: true, snapshot: { ...session } });
+    if (!mirrored && peer && !(session.context.request?.mirror && session.stale))  peer.host.mirror(session, { ...peer.request, mirror: true, snapshot: { ...session } });
   }
   function comparison(rows = []) {
     get('comparison').replaceChildren(...rows.map(row => element('div', {}, ...(row.label ? [`${row.label}: `] : []),
@@ -654,7 +653,7 @@
         saved.resumeOffset = result.offset; saved.stale = true;
         if (result.position !== undefined) { saved.position = result.position; panelMoved = false; }
         render(true);
-        if (panel.dataset.side === 'pdf') await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        if (opposite(saved)?.window && !opposite(saved).window.closed) await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
         if (session !== saved) return;
         await result.apply?.();
         await refreshAfterEdit(saved, result.priority);
@@ -819,10 +818,10 @@
       if (session?.provider.id === saved.provider.id && session.context.editor === saved.context.editor && session.context.model === saved.context.model) {
         ++generation; clearTimeout(manualTimer);
         Object.assign(session, { items: saved.items, position: saved.position,
-          choices: new Map(saved.choices),
+          choices: new Map(saved.choices), selection: saved.selection,
           context: { ...saved.context, request }, stale: !!saved.stale, partial: !!saved.partial });
         if (saved.stale) panelMoved = false;
-        render(true, true);
+        render(false, true);
       } else void open(saved.provider.id, saved.context.editor, saved.items[saved.position]?.id, saved.position, request);
     },
     isOpenFor(id, target) { return !panel.hidden && (session?.provider.id === id && session.context.editor === target || lastRequest?.id === id && lastRequest.editor === target); },
