@@ -265,7 +265,9 @@
         const index = review.locator.index, a = window.PdfSelectionDiff.lowerBound(index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(index.starts, end);
         // HTML tags split decorations, but every fragment selects the complete difference.
         const item = marked && (index.prepared?.differences || index.getDifferences()).items
-          .find(item => item.sourceStart <= a && item.sourceEnd >= b);
+          .find(item => !item.font && (!item.comparison.html.trim()
+            ? index.sourceSegments(item.sourceStart, item.sourceStart)[0].start === start
+            : item.sourceStart <= a && item.sourceEnd >= b));
         return index.entry(item?.sourceStart ?? a, item?.sourceEnd ?? b, marked);
       });
       select(entries, true);

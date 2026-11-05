@@ -11,16 +11,17 @@ function sourceDecorations(index, items = [], fonts = true, text = true, hover, 
     const font = !item.comparison, start = !font && !item.comparison.html.trim() && /^\s/u.test(item.comparison.pdf) ? item.sourceEnd : item.sourceStart;
     const options = { description: font ? 'PDF font difference' : 'PDF OCR text difference', stickiness: 1,
       inlineClassName: font ? 'mew-font-diff-text' : 'mew-ocr-diff-text', hoverMessage: hover?.(item) };
-    const segments = index.sourceSegments(start, item.sourceEnd, font || !index.raw.slice(start, item.sourceEnd).trim());
-    if (!font && !segments.length) {
-      const at = index.starts[start] ?? index.ends[start - 1] ?? 0;
-      segments.push({ start: at, end: at });
+    const segments = index.sourceSegments(start, item.sourceEnd, font);
+    if (!font && (!segments.length || segments.every(segment => segment.start === segment.end))) {
+      if (!segments.length) segments.push(...index.sourceSegments(start, start));
       Object.assign(options, { inlineClassName: undefined, showIfCollapsed: true,
         before: { content: '\u200b', inlineClassName: 'mew-ocr-diff-insert', inlineClassNameAffectsLetterSpacing: true } });
     }
     return segments.map(({ start, end }) => ({ range: documentModel.rangeAt(start, end), options }));
-  }).sort(({ range: a }, { range: b }) => a.startLineNumber - b.startLineNumber || a.startColumn - b.startColumn
-    || b.endLineNumber - a.endLineNumber || b.endColumn - a.endColumn);
+  }).sort(({ range: a }, { range: b }) => documentModel.model.getOffsetAt({ lineNumber: a.endLineNumber, column: a.endColumn })
+    - documentModel.model.getOffsetAt({ lineNumber: a.startLineNumber, column: a.startColumn })
+    - (documentModel.model.getOffsetAt({ lineNumber: b.endLineNumber, column: b.endColumn })
+      - documentModel.model.getOffsetAt({ lineNumber: b.startLineNumber, column: b.startColumn })));
 }
 function sourceHover(item, model, command) {
   const request = { model: model.uri?.toString(), version: model.getVersionId?.(), id: item.id };
@@ -323,7 +324,7 @@ class PdfLocator {
     Object.assign(data, { entries: [], edits: [], plans: [], groups: new Map() });
     for (const value of data.items) {
       if (value.font && data.notice?.source && value.sourceStart < data.notice.source.end && value.sourceEnd > data.notice.source.start) data.focus ||= value;
-      if (value.font || value.missing || value.selection) value.range ||= this.editorDocument.rangeAt(value.sourceStart, value.sourceEnd, true);
+      if (value.font || value.missing || value.selection && value.comparison.html.trim()) value.range ||= this.editorDocument.rangeAt(value.sourceStart, value.sourceEnd, true);
       value.pdfSource ||= data.index.entry(value.sourceStart, value.sourceEnd, true);
       const key = groupKey(value);
       if (!value.missing) data.plans.push(value.font ? { ...value.options[0],

@@ -91,6 +91,12 @@ class PdfConnections {
   }
   sourceSegments(start, end, includeWhitespace = false) {
     const segments = [];
+    if (start === end) {
+      let offset = this.starts[start] ?? this.ends[start - 1] ?? 0;
+      const body = this.tags?.pairs.find(tag => tag.name === 'body');
+      if (body) offset = Math.max(body.openEnd, Math.min(body.closeStart, offset));
+      return [{ start: offset, end: offset }];
+    }
     for (let at = start; at < end; at++) {
       const a = this.starts[at], b = this.ends[at], last = segments.at(-1);
       const text = this.source?.slice(a, b);
@@ -103,10 +109,9 @@ class PdfConnections {
   textEdits(start, end, replacement) {
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start
       || end > this.raw.length || typeof replacement !== 'string') throw new Error('无效的可见文字替换范围');
-    const segments = this.sourceSegments(start, end, !this.raw.slice(start, end).trim());
+    const segments = this.sourceSegments(start, end, !this.raw.slice(start, end).trim() && !replacement.trim());
     if (!segments.length) {
-      const at = this.starts[start] ?? this.ends[start - 1] ?? 0;
-      segments.push({ start: at, end: at });
+      segments.push(...this.sourceSegments(start, start));
     }
     const text = replacement.replace(/[&<>]/g, char => char === '&' ? '&amp;' : char === '<' ? '&lt;' : '&gt;');
     return segments.map((segment, i) => ({ ...segment, text: i ? '' : text,
