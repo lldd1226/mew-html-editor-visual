@@ -326,10 +326,7 @@
         if (viewer !== instance) return;
         if (event === "textlayerrendered") clearLayer(instance.getPageView(data?.pageNumber - 1)?.div);
         if (["pagesinit", "scalechanging", "rotationchanging"].includes(event)) { clearLayers(); review.highlights.clearHighlights(); }
-        if (event === "textlayerrendered" && performance.now() - lastEdit >= editIdleDelay) {
-          warm([data.pageNumber]);
-        }
-        else queueWarm(data?.pageNumber);
+        queueWarm(data?.pageNumber);
         if (contexts.length || reviewPointer || defaultPointer) schedule();
       };
       instance.eventBus.on(event, update);

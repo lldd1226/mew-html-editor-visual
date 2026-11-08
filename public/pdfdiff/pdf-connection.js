@@ -178,6 +178,7 @@ class PdfConnections {
           }
         this.scope(page, true);
       }
+      if (full) this.connections.get(full).preparedRanges = this.connections.get(full).ranges;
       // Prefer whole-passage mappings over shorter quotations on adjacent pages.
       const connections = this.targetConnections(pages);
       for (const page of pages) {
@@ -466,11 +467,11 @@ class PdfConnections {
     for (const range of collected.ranges.sort((a, b) =>
       a.sourceStart - b.sourceStart || a.sourceEnd - b.sourceEnd)) {
       const edge = collected.edges[lowerBound(collected.edges, range.sourceStart + 1, value => value.sourceEnd) - 1]?.targetEnd || 0;
-      const hit = !range.connection && target && this.connections.get(target)?.prepared
-        && this.range(target, range.sourceStart, range.sourceEnd, false, undefined, true);
-      const resolved = !!(hit && /[\p{L}\p{N}]/u.test(target.raw.slice(hit.start, hit.end))
-        && significantText(this.raw.slice(range.sourceStart, range.sourceEnd))
-          === significantText(target.raw.slice(hit.start, hit.end)));
+      const source = significantText(this.raw.slice(range.sourceStart, range.sourceEnd));
+      const resolved = !!source && connections.some(connection => {
+        const hit = this.range(connection.target, range.sourceStart, range.sourceEnd, false, connection, true);
+        return hit && significantText(connection.target.raw.slice(hit.start, hit.end)).includes(source);
+      });
       Object.assign(range, { edge, matched, resolved });
     }
     return Object.assign(collected.ranges, { context });
@@ -514,19 +515,24 @@ class PdfConnections {
       collected.edges.push({ sourceEnd: start + b - (part.html.length - part.html.trimEnd().length),
         targetEnd: base + connection.targetStart + right - (part.pdf.length - part.pdf.trimEnd().length) });
     }
-    for (const [a, b, , , part] of diff.reviewRanges || diff.ranges) {
-      if (!notice && !part.review) continue;
+    for (const [a, b, , right, part] of diff.reviewRanges || diff.ranges) {
+      if (!notice && !part.review || connection && !part.html.trim() && connections.some(other => other !== connection && other.target === connection.target && other.targetStart <= base + connection.targetStart + right && other.targetEnd >= base + connection.targetStart + right + part.pdf.length && significantText(this.raw.slice(other.start, other.end)))) continue;
       const htmlNumber = number.exec(part.html), pdfNumber = number.exec(part.pdf);
       const aligned = htmlNumber && pdfNumber, from = start + a + (aligned ? htmlNumber[0].indexOf(htmlNumber[1]) : 0),
         end = from + (aligned ? htmlNumber[1].length : b - a);
       const contains = other => other === connection || other.start <= from && other.end >= end
         && (from < end || other.end > from || other.start === from);
-      const absent = missing || !!collected && /[\p{L}\p{N}]/u.test(part.html)
+      const source = significantText(this.raw.slice(from, end));
+      if (source && connections.some(other => {
+        const hit = this.range(other.target, from, end, false, other);
+        return hit && significantText(other.target.raw.slice(hit.start, hit.end)).includes(source);
+      })) continue;
+      let absent = missing || !!collected && /[\p{L}\p{N}]/u.test(part.html)
         && (part.blank[1] || /\p{L}/u.test(part.html) && !/\p{L}/u.test(part.pdf))
         && (mappedFirst === undefined || b <= mappedFirst || a >= mappedLast);
       if (collected && absent) collected.ranges.push({ sourceStart: from, sourceEnd: end, connection });
       if (!items) continue;
-      if (connection && connections.find(contains) !== connection) continue;
+      if (connection && connections.filter(other => contains(other) || other.start > from && other.start < end && other.end >= end).sort((a, b) => a.end - a.start - (b.end - b.start))[0] !== connection) continue;
       const low = lowerBound(items, from, item => item.sourceStart);
       if (items[low]?.sourceStart === from && (items[low].sourceEnd > from || end === from) || low && items[low - 1].sourceEnd > from
         || items[low] && items[low].sourceStart < end && items[low].sourceEnd > from) continue;
@@ -553,7 +559,7 @@ class PdfConnections {
         || connections.some(connection => connection.target === target && connection.recovered)), items, edits }) || [];
     if (text && notice?.source && this.raw.slice(notice.source.start, notice.source.end) === notice.html)
       this.add(items, notice.source.start, { parts: comparisonParts(notice) }, { notice, edits, connections });
-    for (const range of missing) if (!range.resolved)
+    for (const range of missing) if (!range.resolved && /[\p{L}\p{N}]/u.test(this.raw.slice(range.sourceStart, range.sourceEnd)))
       this.add(items, range.sourceStart, { parts: [{ html: this.raw.slice(range.sourceStart, range.sourceEnd),
         pdf: '', changed: true }] }, { missing: true, edits, connections });
     const result = this.formatDifferences(items, fonts, edits, connections);
