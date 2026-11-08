@@ -103,7 +103,8 @@
         marks.set(editor, state);
       }
       if (state.key?.length === key.length && key.every((value, i) => value === state.key[i])) return;
-      state.collection.set(decorations());
+      state.values = decorations();
+      state.collection.set(state.values);
       editor.render?.(true);
       state.key = key;
     }
@@ -117,12 +118,14 @@
         const mark = collection.getRange(i);
         if (event?.lineRange ? mark?.intersectRanges(event.lineRange) : mark?.containsPosition(position)
           && (mark.isEmpty() || event?.source === 'keyboard' || position.lineNumber !== mark.endLineNumber || position.column !== mark.endColumn
-            || box && event.clientX < box.left + editor.getScrolledVisiblePosition(position)?.left * box.width / node.offsetWidth)) return mark;
+            || box && event.clientX < box.left + editor.getScrolledVisiblePosition(position)?.left * box.width / node.offsetWidth))
+          return { range: mark, item: marks.get(editor)?.values?.[i]?.reviewItem };
         // Missing text beside a space must also be reachable from that space.
         if (!event?.lineRange && mark?.isEmpty() && position.lineNumber === mark.startLineNumber
           && position.column + 1 === mark.startColumn && /^\s$/u.test(editor.getModel().getValueInRange({
             startLineNumber: position.lineNumber, startColumn: position.column,
-            endLineNumber: mark.startLineNumber, endColumn: mark.startColumn }))) return mark;
+            endLineNumber: mark.startLineNumber, endColumn: mark.startColumn })))
+          return { range: mark, item: marks.get(editor)?.values?.[i]?.reviewItem };
       }
       return null;
     }
@@ -162,7 +165,8 @@
   function message(text) { get('status').textContent = text; get('status').hidden = !text; }
   function current(state = session) {
     const selected = state?.selection, range = selected?.queueRange;
-    return range && state.position >= range[0] && state.position <= range[1] ? selected : state?.items[state.position];
+    const item = state?.items?.[state.position];
+    return range && state.position >= range[0] && state.position <= range[1] && !item?.font ? selected : item;
   }
   function selectedEdits(all = false) {
     return session.content?.[all ? 'allEdits' : 'edits'] || (all ? session.items : session.provider.matchingItems?.(current(), session.context, session.items) || [current()])
@@ -422,7 +426,7 @@
     message('正在自动重新计算差异…'); controls();
     if (!composing) manualTimer = setTimeout(() => void refreshAfterEdit(saved), 350);
   }
-  function refreshAfterEdit(saved, priority = false) {
+  function refreshAfterEdit(saved, priority = false, focus = false) {
     if (saved.refreshTask) return saved.refreshTask;
     if (session !== saved || !saved.stale || composing || saved.context.editor.getModel() !== saved.context.model || saved.provider.available?.(saved.context.editor) === false) return Promise.resolve();
     const request = ++generation, snapshot = saved.context.documentModel.snapshot, { source, version } = snapshot;
@@ -440,11 +444,14 @@
       let found = selectedId ? items.findIndex(item => item.id === selectedId) : -1;
       if (found < 0) found = items.findIndex(item => {
         const range = item.range || saved.provider.content({ ...saved, context, items, choices }, item).range;
-        return range && saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset;
+        return range && (saved.context.model.getOffsetAt({ lineNumber: range.endLineNumber, column: range.endColumn }) > saved.resumeOffset
+          || saved.context.model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn }) >= saved.resumeOffset);
       });
       Object.assign(saved, { items, choices, selection, position: found < 0 ? items.length : found,
         context, stale: false, partial: !!result.partial });
-      render(true);
+      // An applied replacement advances like the navigation buttons do: the source
+      // selection moves to the current candidate, so the PDF highlights it at once.
+      render(!focus);
       return true;
     };
     const provide = async () => saved.provider.locator ? saved.provider.locator.reviewItems({ ...context,
@@ -478,8 +485,8 @@
     get('save').textContent = session?.stale ? '更新中....' : '替换&保存';
     const blocked = !currentVersion || !!session?.applying;
     const range = current()?.queueRange || [session?.position ?? 0, session?.position ?? 0];
-    get('prev').disabled = blocked || range[0] <= 0;
-    get('next').disabled = blocked || range[1] >= session.items.length - 1;
+    get('prev').disabled = blocked || (session?.position ?? 0) <= 0;
+    get('next').disabled = blocked || (session?.position ?? 0) >= session.items.length - 1;
     get('position').textContent = session ? `${range[0] === range[1] ? Math.min(range[0] + 1, session.items.length) : `${range[0] + 1}–${range[1] + 1}`} / ${session.items.length}${session.partial ? '+' : ''}` : '';
   }
   async function open(id, suppliedEditor, focusId, fallbackPosition = 0, requestData = null) {
@@ -508,7 +515,7 @@
       signal: controller.signal, documentModel: target.document, snapshot, request: requestData };
     for (const [event, callback] of Object.entries({
       onDidChangeModel: () => close(), onDidDispose: () => close(false, false),
-      onDidChangeModelContent: event => { if (!session?.applying && !(session?.context.request?.mirror && session.stale)) stale(event); },
+      onDidChangeModelContent: event => { if (!session?.applying) stale(event); },
       onDidCompositionStart: () => { composing = true; clearTimeout(manualTimer); },
       onDidCompositionEnd: () => {
         composing = false;
@@ -585,7 +592,7 @@
         previewEnabled ? selectedEdits() : [], previewEnabled ? content.previewDecorations : []);
     }
     void preview(); place(editor);
-    if (!mirrored && peer && !(session.context.request?.mirror && session.stale))  peer.host.mirror(session, { ...peer.request, mirror: true, snapshot: { ...session } });
+    if (!mirrored && peer) peer.host.mirror(session, { ...peer.request, mirror: true, snapshot: { ...session } });
   }
   function comparison(rows = []) {
     get('comparison').replaceChildren(...rows.map(row => element('div', {}, ...(row.label ? [`${row.label}: `] : []),
@@ -653,10 +660,13 @@
         saved.resumeOffset = result.offset; saved.stale = true;
         if (result.position !== undefined) { saved.position = result.position; panelMoved = false; }
         render(true);
-        if (opposite(saved)?.window && !opposite(saved).window.closed) await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        // Paint the advanced candidate before the replacement clears it, exactly like a
+        // navigation step. Hidden windows have no animation frame to wait for.
+        await new Promise(resolve => document.visibilityState === 'hidden'
+          ? setTimeout(resolve, 0) : requestAnimationFrame(() => setTimeout(resolve, 0)));
         if (session !== saved) return;
         await result.apply?.();
-        await refreshAfterEdit(saved, result.priority);
+        await refreshAfterEdit(saved, result.priority, true);
         return true;
       }
       const snapshot = saved.context.documentModel.snapshot;
@@ -676,8 +686,7 @@
   }
   function navigate(direction) {
     if (!valid() || session.applying) return;
-    const range = current()?.queueRange;
-    const next = (range ? range[direction > 0 ? 1 : 0] : session.position) + direction;
+    const next = session.position + direction;
     if (next >= 0 && next < session.items.length) { session.position = next; render(); }
   }
   function queuePlace() {
@@ -821,7 +830,7 @@
           choices: new Map(saved.choices), selection: saved.selection,
           context: { ...saved.context, request }, stale: !!saved.stale, partial: !!saved.partial });
         if (saved.stale) panelMoved = false;
-        render(false, true);
+        render(true, true);
       } else void open(saved.provider.id, saved.context.editor, saved.items[saved.position]?.id, saved.position, request);
     },
     isOpenFor(id, target) { return !panel.hidden && (session?.provider.id === id && session.context.editor === target || lastRequest?.id === id && lastRequest.editor === target); },

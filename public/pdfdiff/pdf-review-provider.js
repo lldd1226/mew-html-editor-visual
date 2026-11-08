@@ -17,7 +17,7 @@ function sourceDecorations(index, items = [], fonts = true, text = true, hover, 
       Object.assign(options, { inlineClassName: undefined, showIfCollapsed: true,
         before: { content: '\u200b', inlineClassName: 'mew-ocr-diff-insert', inlineClassNameAffectsLetterSpacing: true } });
     }
-    return segments.map(({ start, end }) => ({ range: documentModel.rangeAt(start, end), options }));
+    return segments.map(({ start, end }) => ({ range: documentModel.rangeAt(start, end), options, reviewItem: item }));
   }).sort(({ range: a }, { range: b }) => documentModel.model.getOffsetAt({ lineNumber: a.endLineNumber, column: a.endColumn })
     - documentModel.model.getOffsetAt({ lineNumber: a.startLineNumber, column: a.startColumn })
     - (documentModel.model.getOffsetAt({ lineNumber: b.endLineNumber, column: b.endColumn })
@@ -43,10 +43,10 @@ function fontSummary(runs, field) {
   return states.map(([, label, values]) => field ? `${label}：${!values.size || values.has(null) ? '未知' : values.size > 1 ? '混合' : values.has(true) ? '是' : '否'}` : [...values].join('；')).filter(Boolean).join('；')
     + (reasons.size ? `（${[...reasons].join('；')}）` : '');
 }
-function comparisonRows(value, compact = true, missing = value?.missing) {
+function comparisonRows(value, compact = true, missing = value?.missing, full = value?.selection === true) {
   if (typeof value?.html !== 'string' || typeof value?.pdf !== 'string') return [];
-  let parts = window.PdfSelectionDiff.comparisonParts(value);
-  const rows = value.comparisonDiff.rows, key = Number(compact) + 2 * !!missing;
+  let parts = window.PdfSelectionDiff.comparisonParts(value, full);
+  const rows = value.comparisonDiff.rows, key = Number(compact) + 2 * !!missing + 4 * !!full;
   // Expanded rows carry live source indices and offsets; only compact rows are reusable.
   if (compact && rows[key]) return rows[key];
   if (compact) {
@@ -77,12 +77,15 @@ function pageData(page) {
 function readPageText(page) {
   const data = pageData(page);
   return data.text ||= Promise.resolve().then(() => page.getTextContent()).then(content => {
+    const items = content.items.filter(item => item.str?.length), sorted = [...items].sort((a, b) =>
+      Math.round((window.PdfSelectionDiff.pdfTextBaseline(b) - window.PdfSelectionDiff.pdfTextBaseline(a)) / Math.max(a.height, b.height)) || a.transform[4] - b.transform[4]), misaligned = sorted.some((item, i) =>
+        i && item.transform[4] < sorted[i - 1].transform[4] && Math.abs(window.PdfSelectionDiff.pdfTextBaseline(item)
+          - window.PdfSelectionDiff.pdfTextBaseline(sorted[i - 1])) <= Math.max(item.height, sorted[i - 1].height) * 0.75), ordered = misaligned ? items : sorted;
     let raw = '', previous = null;
     const parts = [];
-    for (const item of content.items.filter(item => item.str?.length).sort((a, b) =>
-      Math.round((window.PdfSelectionDiff.pdfTextBaseline(b) - window.PdfSelectionDiff.pdfTextBaseline(a)) / Math.max(a.height, b.height)) || a.transform[4] - b.transform[4])) {
+    for (const item of ordered) {
       if (previous && !raw.endsWith('\n')) {
-        const lineBreak = Math.abs(window.PdfSelectionDiff.pdfTextBaseline(item) - window.PdfSelectionDiff.pdfTextBaseline(previous)) > Math.max(item.height, previous.height) * 0.5;
+        const lineBreak = Math.abs(window.PdfSelectionDiff.pdfTextBaseline(item) - window.PdfSelectionDiff.pdfTextBaseline(previous)) > Math.max(item.height, previous.height) * (misaligned ? 0.75 : 0.5);
         if (lineBreak) raw += '\n';
         else if (item.transform[4] - previous.transform[4] - previous.width > Math.max(item.height, previous.height) * 0.08) raw += ' ';
       }
@@ -206,11 +209,10 @@ class PdfLocator {
     const notice = context.request?.candidateId ? null : context.request?.notice;
     const fontKey = fontStyles.join(','), { changedRange, lowerBound } = window.PdfSelectionDiff;
     const reusable = this.review?.model === this.model && this.review.enabled === this.textEnabled && this.review.fontKey === fontKey;
-    const previous = this.review?.index, prepared = previous?.prepared, versions = prepared?.fontVersions;
+    const previous = this.review?.index, prepared = previous?.prepared;
     let priority = [];
     if (context.onProgress && context.priority && reusable && previous !== this.index && prepared?.pdf === this.pdf
-      && versions && prepared.pages.every((page, i) => page.parts === versions[1 + i * 3]
-        && page.pages === versions[2 + i * 3] && page.fontVersion === versions[3 + i * 3])) {
+      && previous.fontsCurrent) {
       const raw = changedRange(previous.raw, this.index.raw), source = changedRange(previous.source, this.index.source);
       const delta = raw.newEnd - raw.oldEnd, sourceDelta = source.newEnd - source.oldEnd, suffix = previous.raw !== this.index.raw ? raw.oldEnd : 0;
       for (let at = lowerBound(this.review.items, Math.max(suffix, lowerBound(previous.ends, context.priority.offset - sourceDelta + 1)),
@@ -253,9 +255,9 @@ class PdfLocator {
     if (!data.partial && source && this.index.raw.slice(source.start, source.end) === notice.html) {
       const overlaps = (item, start, end) => !item.font && item.sourceStart <= end && item.sourceEnd >= start
         && (item.sourceEnd > start || item.sourceStart === start) && (item.sourceStart < end || item.sourceEnd === end);
-      const changes = notice.missing ? [] : window.PdfSelectionDiff.comparisonParts(notice).filter(part => part.changed);
+      const changes = notice.missing ? [] : window.PdfSelectionDiff.comparisonParts(notice, true).filter(part => part.changed);
       const covered = data.items.flatMap((item, at) => overlaps(item, source.start, source.end) ? [at] : []);
-      if (!covered.length || !notice.missing && (!changes.length || covered.some(at => data.items[at].missing))) return data;
+      if (!notice.missing && (!changes.length || covered.some(at => data.items[at].missing))) return data;
       const makeSelection = (start, queueRange) => ({
         id: `${start}:${start + notice.html.length}`, sourceStart: start, sourceEnd: start + notice.html.length,
         selection: true, queueRange, comparison: start === source.start ? notice : { ...notice, source: { index: this.index, start, end: start + notice.html.length } },
@@ -263,16 +265,20 @@ class PdfLocator {
         pdfSource: this.index.entry(start, start + notice.html.length, true),
         options: [{ id: 'pdf', label: '替换', edits: changes.flatMap(part => this.index.textEdits(start + part.start, start + part.end, part.pdf)) }]
       });
-      const selectedItem = makeSelection(source.start, [covered[0], covered.at(-1)]);
+      const selectedAt = covered.length ? 0 : lowerBound(data.items, source.start, item => item.sourceStart);
+      const selectedItem = makeSelection(source.start, covered.length ? [covered[0], covered.at(-1)] : [selectedAt, selectedAt]);
+      const selectedAnchor = covered.length === 1 ? data.items[covered[0]] : null;
+      const selectedPattern = selectedAnchor && [...notice.html].length === 1 ? this.pattern(selectedAnchor, this.index) : null;
       const group = { index: this.index, items: [selectedItem], entries: [selectedItem.pdfSource], edits: [...selectedItem.options[0].edits] };
       const [change] = changes, text = data.items.filter(item => !item.font);
       // Match selected context against cached faults; never rebuild or splice the queue.
-      for (const anchor of change ? text : []) {
+      for (const anchor of covered.length && change ? text : []) {
         if (anchor.missing) continue;
         for (let offset = anchor.comparison.html.indexOf(change.html); offset >= 0;
           offset = change.html ? anchor.comparison.html.indexOf(change.html, offset + 1) : -1) {
           const start = anchor.sourceStart + offset - change.start, end = start + notice.html.length;
           if (start === source.start || start < 0 || this.index.raw.slice(start, end) !== notice.html) continue;
+          if (selectedPattern && this.pattern(anchor, this.index) !== selectedPattern) continue;
           const faults = text.slice(lowerBound(text, start, item => item.sourceEnd), lowerBound(text, end + 1, item => item.sourceStart))
             .filter(item => overlaps(item, start, end));
           const parts = faults.flatMap(item => item.missing ? [{ missing: true }] : window.PdfSelectionDiff.comparisonParts(item.comparison)
@@ -322,14 +328,14 @@ class PdfLocator {
     const change = value.font ? [value.text, ...fontKeys.flatMap(key => [value.htmlFont[key], value.font[key]])]
         : [value.comparison?.html, value.comparison?.pdf];
     return JSON.stringify([!!value.font, !!value.selection, change,
-      ...(value.selection && window.PdfSelectionDiff.comparisonParts(value.comparison).some(part => !part.changed && part.html.length) ? [] : [prefix, suffix])]);
+      ...(value.selection && window.PdfSelectionDiff.comparisonParts(value.comparison, true).some(part => !part.changed && part.html.length) ? [] : [prefix, suffix])]);
   }
   cacheReview(data) {
     Object.assign(data, { entries: [], edits: [], plans: [] });
     const groups = new Map();
     for (const value of data.items) {
       if (value.font || value.missing || value.selection && value.comparison.html.trim()) value.range ||= this.editorDocument.rangeAt(value.sourceStart, value.sourceEnd, true);
-      value.pdfSource ||= data.index.entry(value.sourceStart, value.sourceEnd, true);
+      value.pdfSource ||= data.index.candidateEntry(value);
       const key = data.partial ? value : this.pattern(value, data.index);
       if (!value.missing) data.plans.push(value.font ? { ...value.options[0],
         title: `替换格式：${value.text}（${fontSummary(value.formats)}）`,
@@ -518,7 +524,7 @@ async function onDifference(event) {
   if (nativeEditor && data.side === 'html')
     return item && host.showHover(review, { editor, model, documentModel: editor.document, snapshot: editor.document.snapshot }, item, prepared.items, notice.source);
   if (!notice.source || !model) return host.showNotice({
-    title: 'PDF 文字差异', message: '文字不一致', comparison: comparisonRows(notice, false), anchor: data.anchor,
+    title: 'PDF 文字差异', message: '文字不一致', comparison: comparisonRows(notice, false, notice.missing, true), anchor: data.anchor,
     layout: presentation({ editor, request })
   });
   return host.openForSelection(locator.textEnabled ? 'pdf-ocr' : fontStyles.includes('italic') ? 'pdf-font' : 'pdf-bold', editor, request.focusId, request);
@@ -533,7 +539,9 @@ function presentation(context, item) {
     left: rect.left + box.x * rect.width, top: rect.top + box.y * rect.height,
     bottom: rect.top + (box.y + box.h) * rect.height
   } : request?.anchor);
-  const anchor = item && side === 'pdf' ? locator.reviewAnchor(item) : requested;
+  // The event already measured the clicked PDF range. Recomputing it from a
+  // source fragment can lose the range at an inline-tag boundary.
+  const anchor = side === 'pdf' ? requested || (item && locator.reviewAnchor(item)) : null;
   const destination = side === 'pdf' ? reader : source, pdfViewer = viewer();
   return {
     side, switchable: split, switchLabel: side === 'pdf' ? '查看HTML' : '查看PDF', host: destination.ReplacementReview, window: destination,
@@ -552,7 +560,7 @@ function content(state, item) {
     message, edits: locator.reviewLists.get(item)?.edits, allEdits: data?.edits,
     all: data?.partial ? false : undefined,
     comparison: item?.font ? ['htmlFont', 'font'].map((field, i) => ({ label: i ? 'PDF' : 'HTML', parts: [{ text: fontSummary(item.formats, field) }] }))
-      : comparisonRows(item?.comparison, !item?.selection, item?.missing),
+      : comparisonRows(item?.comparison, !item?.selection, item?.missing, item?.selection),
     previewDecorations: item?.font || item?.missing ? item.previewDecorations ||= (data?.index || item.pdfSource?.index || locator.index).sourceSegments(item.sourceStart, item.sourceEnd, true).map(segment => ({
       range: documentModel.rangeAt(segment.start, segment.end), options: { inlineClassName: item.missing ? 'mew-review-proposed' : 'mew-review-format', stickiness: 1 }
     })) : [],

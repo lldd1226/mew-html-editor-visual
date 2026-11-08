@@ -84,7 +84,10 @@
       const model = editor?.getModel();
       if (!model || !viewer?.pdfDocument || key && !diffHighlight || !items?.length && !key) return;
       const data = review.locator.reviewLists.get(items);
-      const entries = data?.entries || items.map(item => item.pdfSource || review.locator.editorSourceIndex(editor.document).entry(item.sourceStart, item.sourceEnd, true));
+      // One index owns both the candidate offsets and the rendered page mappings, so a
+      // candidate list arriving from the paired window is re-anchored on the PDF side.
+      const index = data?.index || review.locator.editorSourceIndex(editor.document);
+      const entries = data?.entries || items.map(item => index.candidateEntry(item));
       const pointer = { editor, model, version: model.getVersionId?.(), pdf: viewer?.pdfDocument, entries, key };
       if (key) defaultPointer = pointer;
       else reviewPointer = pointer;
@@ -197,7 +200,8 @@
       const entry = input && typeof input === 'object' ? input : { text: input }, text = entry.text, value = entry.marked ? text : decode(text);
       const start = entry.start + (plain && !entry.marked ? text.length - text.trimStart().length : 0);
       return { text: value, before: decode(entry.before || "").slice(-160),
-        after: decode(entry.after || "").slice(0, 160), index: entry.index, start, end: start + value.length, marked: entry.marked };
+        after: decode(entry.after || "").slice(0, 160), index: entry.index, start, end: start + value.length,
+        marked: entry.marked, difference: entry.difference };
     }).filter(entry => entry.text || entry.marked);
     status.differences = [];
     locationSearch = null;
@@ -250,19 +254,18 @@
       if (!selectionHighlight) { queueWarm(); return; }
       activeEditor = editor;
       const model = editor.getModel();
-      let index, differences;
+      let index;
       const entries = model ? (editor.getSelections() || []).flatMap(range => {
-        const mark = review.highlights.selectionRange(editor, event, range);
+        const selected = review.highlights.selectionRange(editor, event, range), mark = selected?.range;
         range = mark || range;
         const start = model.getOffsetAt(range.getStartPosition()), end = model.getOffsetAt(range.getEndPosition());
         if (!mark && start === end) return [];
         index ||= review.locator.editorSourceIndex(editor.document);
         const a = window.PdfSelectionDiff.lowerBound(index.ends, start + 1), b = window.PdfSelectionDiff.lowerBound(index.starts, end);
-        // HTML tags split decorations, but every fragment selects the complete difference.
-        const item = mark && (differences ||= index.getDifferences().items).find(item => !item.font && (!item.comparison.html.trim()
-          ? index.sourceSegments(item.sourceStart, item.sourceStart)[0].start === start
-          : item.sourceStart <= a && item.sourceEnd >= b));
-        return [index.entry(item?.sourceStart ?? a, item?.sourceEnd ?? b, !!mark)];
+        // Each decoration owns its candidate; fragments do not need to rediscover
+        // a nearby text candidate and turn a font click into a text review.
+        const item = selected?.item;
+        return [item ? index.candidateEntry(item) : index.entry(a, b, !!mark)];
       }) : [];
       if (viewer && (!index || index.prepared?.pdf !== viewer.pdfDocument)) queueWarm();
       select(entries, true);
@@ -614,6 +617,9 @@
       let index = documentIndex, hit = null, number;
       for (const page of visible) {
         hit = page.index && entry.index?.range(page.index, entry.start, entry.end, false, undefined, true);
+        if (hit && window.PdfSelectionDiff.significantText(entry.text)
+          !== window.PdfSelectionDiff.significantText(page.index.raw.slice(hit.start, hit.end)))
+          hit = page.index.search(entry, page.index.connections.get(entry.index)?.scope) || hit;
         if (!hit) continue;
         ({ index, number } = page);
         break;
@@ -625,7 +631,8 @@
       if (!hit) return { entry, targets: [], queries: entry.index ? [] : [entry.text] };
       const connection = hit.connection;
       const counterpart = index.raw.slice(hit.start, hit.end);
-      const difference = hit.approximate || entry.text !== counterpart ? { html: entry.text, pdf: counterpart } : null;
+      const difference = entry.difference || (hit.approximate || entry.text !== counterpart
+        ? { html: entry.text, pdf: counterpart } : null);
       const pages = index.pages || [{ number, start: 0, end: index.raw.length, parts: index.parts }];
       const targets = pages.filter(page => hit.start === hit.end ? hit.start >= page.start && hit.start <= page.end
         : hit.start < page.end && hit.end > page.start).map(page => {
@@ -719,18 +726,23 @@
     const current = () => selectionHighlight && !stopped && run === revision && instance === viewer && pdf === viewer.pdfDocument;
     if (!locationSearch || locationSearch.pdf !== pdf) {
       report("searching", { error: null });
-      const entries = contexts.slice();
-      const found = findLocations(pdf, entries, entries.every(entry => entry.marked));
-      const search = locationSearch = { pdf, locations: Array.isArray(found) ? found : null };
+      const entries = contexts.slice(), marked = entries.every(entry => entry.marked);
+      const found = findLocations(pdf, entries, marked);
+      const search = locationSearch = { pdf, locations: Array.isArray(found)
+        && (!marked || found.some(location => location.targets.length)) ? found : null };
       const complete = locations => {
         if (stopped || !selectionHighlight || locationSearch !== search || viewer?.pdfDocument !== pdf) return;
         search.locations = locations;
         schedule(-1);
       };
-      if (!search.locations) Promise.resolve(found).then(complete, error => {
-        console.warn("[PDF selection highlight] Context search unavailable:", error);
-        complete(entries.map(entry => ({ entry, targets: [] })));
-      });
+      // A review group can lose its visible-page mapping for one frame after a
+      // replacement; fall back to the whole document instead of marking nothing.
+      if (!search.locations) Promise.resolve(found).then(locations => marked
+        && !locations.some(location => location.targets.length) ? findLocations(pdf, entries, false) : locations)
+        .then(complete, error => {
+          console.warn("[PDF selection highlight] Context search unavailable:", error);
+          complete(entries.map(entry => ({ entry, targets: [] })));
+        });
     }
     const locations = locationSearch.locations;
     publishSources();

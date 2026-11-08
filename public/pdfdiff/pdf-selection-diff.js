@@ -1,10 +1,9 @@
 // Text comparison and normalization; independent of document and review state.
 let diffComputer = null;
 const fontKeys = ['italic', 'bold'];
-function significantText(text, index, start = 0) {
-  return text.replace(/[\s\-\u00ad\u2010\u2011\d]/g, (char, offset) => /\d/.test(char)
-    && !(index?.formats?.[start + offset]?.name === 'a'
-      && /\bhref\s*=\s*(["'])#Z?F\d+\1/i.test(index.formats[start + offset].definition.open)) ? char : '').replace(/[^\x00-\x7f]+/g, value => normalized(value, undefined, 0, false).text.replace(/\s/g, ''));
+function significantText(text) {
+  return text.normalize("NFKC").replace(/ſ/g, "s").replace(/ß/g, "ss").replace(/ẞ/g, "SS")
+    .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"').replace(/[\s\-\u00ad\u2010\u2011]/g, '');
 }
 function textDiff(left, right, details = false, limit = Infinity, condense = false) {
   if (left === right) return { distance: 0, parts: details ? (left ? [{ html: left, pdf: right, changed: false }] : []) : undefined };
@@ -54,13 +53,16 @@ function textDiff(left, right, details = false, limit = Infinity, condense = fal
   } catch { /* Retry Monaco on the next comparison. */ }
   return fallback && limit >= 128 ? fallback : localTextDiff(left, right, details, limit);
 }
+const mixedWhitespace = (left, right) => !!left && !!right
+  && /\s/u.test(left) !== /\s/u.test(right) && /[\p{L}\p{N}]/u.test(left + right);
 // Detailed unbounded text uses word alignment; bounded/token checks use the edit wavefront.
 function localTextDiff(left, right, details = false, limit = Infinity, equal = (a, b) => a === b, substitutions = true) {
   const wordwise = details && typeof left === 'string' && !Number.isFinite(limit);
   if (wordwise) {
     const words = text => text.match(/[\p{L}\p{N}]+(?:[-\u2010\u2011][\p{L}\p{N}]+)*\s*|[^\s]\s*|\s+/gu) || [];
     left = words(left); right = words(right); limit = 1024;
-    equal = (a, b) => a.trimEnd() === b.trimEnd() || /^[.,\s]+$/u.test(a + b);
+    equal = (a, b) => a.trimEnd() === b.trimEnd() || /^[.,\s]+$/u.test(a + b)
+      || /^\d+\s*$/u.test(a) && /^\d+\s*$/u.test(b);
   }
   const originalA = [...left], originalB = [...right];
   const { start, oldEnd: endA, newEnd: endB } = changedRange(originalA, originalB, equal);
@@ -74,7 +76,8 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     for (let k = Math.max(-score, -m); k <= Math.min(score, n); k++) {
       const at = k + score - 1;
       const replace = previous[at], remove = previous[at - 1], insert = previous[at + 1];
-      let x = substitutions && replace >= 0 && replace < n && replace - k < m ? replace + 1 : -1, move = 0;
+      let x = substitutions && replace >= 0 && replace < n && replace - k >= 0 && replace - k < m
+        && !mixedWhitespace(a[replace], b[replace - k]) ? replace + 1 : -1, move = 0;
       // At equal cost, retain the insertion/deletion path and its exact character matches.
       if (remove >= 0 && remove < n && remove + 1 >= x) { x = remove + 1; move = 1; }
       if (insert >= 0 && insert - k - 1 < m && insert >= x) { x = insert; move = 2; }
@@ -134,8 +137,11 @@ function changedRange(before, after, equal = (a, b) => a === b) {
 }
 function appendPart(parts, html, pdf, changed) {
   const last = parts.at(-1), previous = parts.at(-2);
+  const blank = part => part?.changed && (part.html || part.pdf) && !part.html.trim() && !part.pdf.trim();
+  const lettered = part => part?.changed && /[\p{L}\p{N}]/u.test(part.html + part.pdf);
+  const separate = blank(last) && lettered({ changed, html, pdf }) || blank({ changed, html, pdf }) && lettered(last);
   if (changed && !pdf && last?.changed === false && previous?.changed && !previous.pdf && /^[\p{L}\p{N}]+$/u.test(last.html) && html.endsWith(last.html)) previous.html += last.html + html.slice(0, -last.html.length);
-  else if (last?.changed === changed) { last.html += html; last.pdf += pdf; }
+  else if (last?.changed === changed && !separate) { last.html += html; last.pdf += pdf; }
   else if (html || pdf) parts.push({ html, pdf, changed });
 }
 function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, foldCase = true) {
@@ -143,15 +149,26 @@ function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, 
     ? raw.normalized : normalized(raw.raw.slice(result.start, result.end));
   let previous = result.text.at(-1) || "";
   const units = [], { starts, ends } = result;
-  for (const match of raw.matchAll(/((?<=[\p{L}\p{N}])[-\u2010\u2011]\s*\n\s*(?=[\p{L}\p{N}]))|([a-zA-Z0-9]+)|(\s+)|(\.(?:\s*\.){2,})|[\s\S]/gu)) {
+  for (const match of raw.matchAll(/((?<=[\p{L}\p{N}])[-\u2010\u2011]\s*\n\s*(?=[\p{L}\p{N}]))|((?<![A-Za-z0-9])(?:[A-Za-z0-9][^\S\r\n]+){2,}[A-Za-z0-9](?![A-Za-z0-9]))|([a-zA-Z0-9]+)|(\s+)|(\.(?:\s*\.){2,})|[\s\S]/gu)) {
     const char = match[0], start = base + match.index, offset = start + char.length;
     if (match[1] || char === "\u00ad") continue;
-    if (match[2]) {
-      units.push(foldCase ? char.toLowerCase() : char); previous = char.at(-1);
-      for (let i = 0; i < char.length; i++) { starts.push(start + i); ends.push(start + i + 1); }
+    if (match[2] || match[3]) {
+      // Text layers sometimes separate every glyph in a word; source offsets still belong to each glyph.
+      let after = start, last = "";
+      for (let i = 0; i < char.length; i++) {
+        const glyph = char[i];
+        if (!/[A-Za-z0-9]/.test(glyph)) continue;
+        if (match[2] && /[a-z]/.test(last) && /[A-Z]/.test(glyph)) {
+          units.push(" "); starts.push(after); ends.push(start + i);
+        }
+        units.push(foldCase ? glyph.toLowerCase() : glyph); previous = glyph;
+        starts.push(start + i); ends.push(start + i + 1);
+        after = start + i + 1; last = glyph;
+      }
+      previous = foldCase ? previous.toLowerCase() : previous;
       continue;
     }
-    const value = match[3] ? ' ' : match[4] ? char.replace(/\s/g, '') : char >= '!' && char <= '~' ? char : char.normalize("NFKC").replace(/ſ/g, "s").replace(/ß/g, "ss").replace(/ẞ/g, "SS")
+    const value = match[4] ? ' ' : match[5] ? char.replace(/\s/g, '') : char >= '!' && char <= '~' ? char : char.normalize("NFKC").replace(/ſ/g, "s").replace(/ß/g, "ss").replace(/ẞ/g, "SS")
       .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"').replace(/\s/g, " ");
     for (const unit of foldCase ? value.toLowerCase() : value) {
       if (unit === " " && previous === " ") { ends[ends.length - 1] = offset; continue; }
@@ -195,11 +212,11 @@ function extendPageRange(from, to, a, x, step, exact = false, word = /^[\p{L}\p{
     && textDiff(from.slice(Math.min(a, aa), Math.max(a, aa)), to.slice(Math.min(x, xx), Math.max(x, xx)), false, 32).distance <= 32) { a = aa; x = xx; }
   return extendPageRange(from, to, a, x, step, true, word);
 }
-function comparisonParts(value) {
-  if (value.comparisonDiff?.html !== value.html || value.comparisonDiff.pdf !== value.pdf) {
+function comparisonParts(value, full = value.selection === true) {
+  if (value.comparisonDiff?.html !== value.html || value.comparisonDiff.pdf !== value.pdf || value.comparisonDiff.full !== full) {
     let offset = 0;
-    value.comparisonDiff = { html: value.html, pdf: value.pdf, rows: [], parts: (textDiff(value.html, value.pdf, true)?.parts || [{ html: value.html, pdf: value.pdf, changed: false }]).map(part => ({ ...part,
-      start: offset, end: offset += part.html.length, changed: part.changed && significantText(part.html) !== significantText(part.pdf) })) };
+    value.comparisonDiff = { html: value.html, pdf: value.pdf, full, rows: [], parts: (textDiff(value.html, value.pdf, true)?.parts || [{ html: value.html, pdf: value.pdf, changed: false }]).map(part => ({ ...part,
+      start: offset, end: offset += part.html.length, changed: part.changed && (full || significantText(part.html) !== significantText(part.pdf)) })) };
   }
   return value.comparisonDiff.parts;
 }
@@ -226,13 +243,29 @@ function* matchPositions(index, needle, { text }, anchors) {
     }
   }
 }
-function findMatches(index, queries, haystack, { anchors = false, fuzzy = false, before = '', after = '', wholeWords = false } = {}) {
+function findMatches(index, queries, haystack, { anchors = false, fuzzy = false, before = '', after = '', wholeWords = false, best = false } = {}) {
   const found = new Map(), word = char => !!char && /[\p{L}\p{N}_]/u.test(char);
+  let bestHit = null, bestTied = false;
+  const consider = match => {
+    const key = `${match.start}:${match.end}`;
+    if (found.has(key)) return;
+    found.set(key, match);
+    if (!best) return;
+    const begin = lowerBound(haystack.starts, match.start), end = lowerBound(haystack.starts, match.end);
+    const left = haystack.text.slice(Math.max(0, begin - 400), begin).trim(), right = haystack.text.slice(end, end + 400).trim();
+    let a = 0, b = 0;
+    while (a < before.length && a < left.length && before.at(-a - 1) === left.at(-a - 1)) a++;
+    while (b < after.length && b < right.length && after[b] === right[b]) b++;
+    const score = a + b;
+    if (!bestHit || score > bestHit.score) { bestHit = { ...match, score }; bestTied = false; }
+    else if (score === bestHit.score) bestTied = true;
+  };
   for (const query of queries) {
     const needle = anchors ? query : normalized(query).text.trim();
     if (fuzzy) {
       const size = [...needle].length, long = needle.length > 128;
-      if (size && size < 3 || !size && (before.length < 4 || after.length < 4) || needle.length > 2048 || before.length + after.length < 8 || (long && (before.length < 12 || after.length < 12))) return [];
+      if (size && size < 3 || !size && (before.length < 4 || after.length < 4) || needle.length > 2048
+        || before.length + after.length < 8 || (long && (before.length < 12 || after.length < 12))) return best ? null : [];
       const limit = !size ? 0 : long ? Math.min(32, Math.max(3, Math.floor(size * 0.05)))
         : Math.min(3, Math.max(1, Math.floor(size * 0.2)));
       const starts = new Set(), ends = new Set(), text = haystack.text;
@@ -252,7 +285,7 @@ function findMatches(index, queries, haystack, { anchors = false, fuzzy = false,
               if (long) ends.add(boundary);
               else for (let delta = -limit; delta <= limit; delta++) starts.add(boundary - needle.length + delta);
             }
-            if (starts.size > 200 || ends.size > 200) return [];
+            if (starts.size > 200 || ends.size > 200) return best ? null : [];
           }
           if (anchored) break;
         }
@@ -265,7 +298,7 @@ function findMatches(index, queries, haystack, { anchors = false, fuzzy = false,
         const distance = textDiff(needle, text.slice(begin, end), false, limit).distance;
         if (size && !distance || distance > limit) continue;
         const start = haystack.starts[begin], stop = size ? haystack.ends[end - 1] : start;
-        found.set(`${start}:${stop}`, { start, end: stop, approximate: true, distance });
+        consider({ start, end: stop, approximate: true, distance });
       }
     } else if (needle) {
       for (const at of matchPositions(index, needle, haystack, anchors)) {
@@ -273,11 +306,14 @@ function findMatches(index, queries, haystack, { anchors = false, fuzzy = false,
         const before = [...haystack.text.slice(Math.max(0, at - 2), at)].pop(), after = [...haystack.text.slice(end, end + 2)][0];
         if (wholeWords && (word(needle[0]) && word(before) || word([...needle].pop()) && word(after))) continue;
         const start = haystack.starts[at], stop = haystack.ends[end - 1];
-        found.set(`${start}:${stop}`, { start, end: stop });
+        consider({ start, end: stop });
         if (anchors && found.size > 1) return [...found.values()]; // Only unique anchors are useful.
       }
     }
   }
+  if (best && bestHit?.score >= Math.min(24, before.length + after.length)) return bestTied ? null : bestHit;
+  if (best && !fuzzy) return findMatches(index, queries, haystack, { anchors, fuzzy: true, before, after, wholeWords, best });
+  if (best) return null;
   return [...found.values()];
 }
 function pdfFontStyle(font, fallback = '', css = {}) {
