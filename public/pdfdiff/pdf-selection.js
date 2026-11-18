@@ -552,7 +552,7 @@
       else if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     if (!fontAt.text || fontAt.items.size !== fontAt.text.parts.length) return null;
-    const { raw, breaks } = fontAt.text;
+    const { raw, breaks, horizontal } = fontAt.text;
     const spans = new Map([...fontAt.items].map(([span, item]) => [item, span]));
     // The DOM supplies nodes and fonts; PDF text owns ordering, spaces and offsets.
     for (const part of fontAt.text.parts) {
@@ -571,7 +571,7 @@
       if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     observer.observe(layer, { subtree: true, childList: true, characterData: true, attributes: true });
-    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, breaks, observer, pdf, width: div.clientWidth, height: div.clientHeight });
+    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, breaks, horizontal, observer, pdf, width: div.clientWidth, height: div.clientHeight });
     layers.set(div, index);
     return index;
   }
@@ -625,10 +625,8 @@
       }
       let index = documentIndex, hit = null, number;
       for (const page of visible) {
-        let local = page.index && entry.index?.range(page.index, entry.start, entry.end, false, undefined, true);
-        if (local && window.PdfSelectionDiff.significantText(entry.text)
-          !== window.PdfSelectionDiff.significantText(page.index.raw.slice(local.start, local.end)))
-          local = page.index.search(entry, page.index.connections.get(entry.index)?.scope) || local;
+        const local = page.index && entry.index?.locate(page.index, entry, false,
+          page.index.connections.get(entry.index)?.scope, true, { visiblePage: true });
         if (!local || hit && local.approximate) continue;
         ({ index, number } = page);
         hit = local;

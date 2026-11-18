@@ -1,18 +1,17 @@
 // Text comparison and normalization; independent of document and review state.
 let diffComputer = null;
 const fontKeys = ['italic', 'bold'];
-function significantText(text) {
-  return text.normalize("NFKC").replace(/ſ/g, "s").replace(/ß/g, "ss").replace(/ẞ/g, "SS")
-    .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"').replace(/[\s\-\u00ad\u2010\u2011]/g, '');
-}
-function textDiff(left, right, details = false, limit = Infinity, condense = false) {
-  if (left === right) return { distance: 0, parts: details ? (left ? [{ html: left, pdf: right, changed: false }] : []) : undefined };
+const foldGlyphs = text => text.normalize('NFKC').replace(/ſ/g, 's').replace(/ß/g, 'ss').replace(/ẞ/g, 'SS')
+  .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"');
+const significantText = text => foldGlyphs(text).replace(/[\s\-\u00ad\u2010\u2011]/g, '');
+function textDiff(left, right, details = false, limit = Infinity, condense = false, update) {
+  if (left === right) return { distance: 0, parts: details ? (left ? [positionedPart(left, right, false)] : []) : undefined };
   // A bounded match cannot span more extra characters than its edit limit.
   if (Number.isFinite(limit) && Math.abs(left.length - right.length) > limit && Math.abs(Array.from(left).length - Array.from(right).length) > limit)
-    return { distance: limit + 1, parts: details ? [{ html: left, pdf: right, changed: true }] : undefined };
+    return { distance: limit + 1, parts: details ? [positionedPart(left, right, true)] : undefined };
   // Connections condense word runs before the same character refinement used by selections.
   if (condense || !diffComputer || !details && Number.isFinite(limit))
-    return localTextDiff(left, right, details, condense ? limit : details ? Math.min(limit, 128) : limit);
+    return localTextDiff(left, right, details, condense ? limit : details ? Math.min(limit, 128) : limit, undefined, true, update);
   const fallback = details ? localTextDiff(left, right, true, 128) : null;
   if (fallback?.distance <= 128) return fallback;
   try {
@@ -56,7 +55,7 @@ function textDiff(left, right, details = false, limit = Infinity, condense = fal
 const mixedWhitespace = (left, right) => !!left && !!right
   && /\s/u.test(left) !== /\s/u.test(right) && /[\p{L}\p{N}]/u.test(left + right);
 // Detailed unbounded text uses word alignment; bounded/token checks use the edit wavefront.
-function localTextDiff(left, right, details = false, limit = Infinity, equal = (a, b) => a === b, substitutions = true) {
+function localTextDiff(left, right, details = false, limit = Infinity, equal = (a, b) => a === b, substitutions = true, update) {
   const wordwise = details && typeof left === 'string' && !Number.isFinite(limit);
   if (wordwise) {
     const words = text => text.match(/[\p{L}\p{N}]+(?:[-\u2010\u2011][\p{L}\p{N}]+)*\s*|[^\s]\s*|\s+/gu) || [];
@@ -64,7 +63,7 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     equal = (a, b) => a.trimEnd() === b.trimEnd() || /^[.,\s]+$/u.test(a + b)
       || /^\d+\s*$/u.test(a) && /^\d+\s*$/u.test(b);
   }
-  const originalA = [...left], originalB = [...right];
+  const originalA = typeof left === 'string' ? [...left] : left, originalB = typeof right === 'string' ? [...right] : right;
   const { start, oldEnd: endA, newEnd: endB } = changedRange(originalA, originalB, equal);
   const a = originalA.slice(start, endA), b = originalB.slice(start, endB), n = a.length, m = b.length;
   const bound = Math.min(limit, details && typeof left === 'string' ? 128 : Infinity, Math.max(n, m));
@@ -103,12 +102,12 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     reversed.push({ html: move === 2 ? '' : a[previousX], pdf: move === 1 ? '' : b[previousY], changed: true });
     x = previousX; k = previousK;
   }
-  const parts = failed ? [{ html: originalA.join(''), pdf: originalB.join(''), changed: true }] : [];
+  const parts = failed ? [positionedPart(originalA.join(''), originalB.join(''), true)] : [];
   if (!failed) appendPart(parts, originalA.slice(0, start).join(''), originalB.slice(0, start).join(''), false);
   for (const part of reversed.reverse()) appendPart(parts, part.html, part.pdf, part.changed);
   if (!failed) appendPart(parts, originalA.slice(endA).join(''), originalB.slice(endB).join(''), false);
   if (!wordwise) return { distance, parts };
-  const diff = { distance: 0, parts: [] };
+  const diff = { distance: 0, parts: [], hunks: new Map() };
   let html = '', pdf = '';
   for (let i = 0; i <= parts.length; i++) {
     const span = parts[i];
@@ -116,9 +115,18 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     // Refine through punctuation-only matches instead of using them as word boundaries.
     if (span && !/[\p{L}\p{N}]/u.test((span.changed ? parts[i + 1] : span)?.html || '')) continue;
     const a = span ? html.trimEnd().length : html.length, b = span ? pdf.trimEnd().length : pdf.length;
-    const next = localTextDiff(html.slice(0, a), pdf.slice(0, b), true, 128);
-    diff.distance += next.distance;
-    for (const part of next.parts) appendPart(diff.parts, part.html, part.pdf, part.changed);
+    const leftText = html.slice(0, a), rightText = pdf.slice(0, b);
+    if (leftText === rightText) appendPart(diff.parts, leftText, rightText, false);
+    else {
+      const last = diff.parts.at(-1), start = last?.end ?? 0, targetStart = last?.targetEnd ?? 0;
+      const outside = update && (start + a <= update.start || start >= update.newEnd);
+      const old = outside && update.previous?.hunks?.get(targetStart);
+      const result = old && old.html === leftText && old.pdf === rightText ? old :
+        { html: leftText, pdf: rightText, ...localTextDiff(leftText, rightText, true, 128) };
+      diff.hunks.set(targetStart, result);
+      diff.distance += result.distance;
+      for (const part of result.parts) appendPart(diff.parts, part.html, part.pdf, part.changed);
+    }
     html = html.slice(a); pdf = pdf.slice(b);
     if (span && !span.changed) {
       let end = 0;
@@ -135,46 +143,47 @@ function changedRange(before, after, equal = (a, b) => a === b) {
   while (oldEnd > start && newEnd > start && equal(before[oldEnd - 1], after[newEnd - 1])) { oldEnd--; newEnd--; }
   return { start, oldEnd, newEnd };
 }
+function positionedPart(html, pdf, changed, start = 0, targetStart = 0) {
+  return { html, pdf, changed, start, end: start + html.length, targetStart, targetEnd: targetStart + pdf.length };
+}
 function appendPart(parts, html, pdf, changed) {
   const last = parts.at(-1), previous = parts.at(-2);
   const blank = part => part?.changed && (part.html || part.pdf) && !part.html.trim() && !part.pdf.trim();
   const lettered = part => part?.changed && /[\p{L}\p{N}]/u.test(part.html + part.pdf);
   const separate = blank(last) && lettered({ changed, html, pdf }) || blank({ changed, html, pdf }) && lettered(last);
-  if (changed && !pdf && last?.changed === false && previous?.changed && !previous.pdf && /^[\p{L}\p{N}]+$/u.test(last.html) && html.endsWith(last.html)) previous.html += last.html + html.slice(0, -last.html.length);
-  else if (last?.changed === changed && !separate) { last.html += html; last.pdf += pdf; }
-  else if (html || pdf) parts.push({ html, pdf, changed });
+  if (changed && !pdf && last?.changed === false && previous?.changed && !previous.pdf && /^[\p{L}\p{N}]+$/u.test(last.html) && html.endsWith(last.html)) {
+    previous.html += last.html + html.slice(0, -last.html.length);
+    previous.end += html.length;
+    last.start += html.length; last.end += html.length;
+  } else if (last?.changed === changed && !separate) {
+    last.html += html; last.end += html.length;
+    last.pdf += pdf; last.targetEnd += pdf.length;
+  } else if (html || pdf) parts.push(positionedPart(html, pdf, changed, last?.end, last?.targetEnd));
 }
 function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, foldCase = true) {
   if (typeof raw !== 'string') return result.start === 0 && result.end === raw.raw.length
     ? raw.normalized : normalized(raw.raw.slice(result.start, result.end));
-  let previous = result.text.at(-1) || "";
   const units = [], { starts, ends } = result;
-  for (const match of raw.matchAll(/((?<=[\p{L}\p{N}])[-\u2010\u2011]\s*\n\s*(?=[\p{L}\p{N}]))|((?<![A-Za-z0-9])(?:[A-Za-z0-9][^\S\r\n]+){2,}[A-Za-z0-9](?![A-Za-z0-9]))|([a-zA-Z0-9]+)|(\s+)|(\.(?:\s*\.){2,})|[\s\S]/gu)) {
-    const char = match[0], start = base + match.index, offset = start + char.length;
-    if (match[1] || char === "\u00ad") continue;
-    if (match[2] || match[3]) {
-      // Text layers sometimes separate every glyph in a word; source offsets still belong to each glyph.
-      let after = start, last = "";
-      for (let i = 0; i < char.length; i++) {
-        const glyph = char[i];
-        if (!/[A-Za-z0-9]/.test(glyph)) continue;
-        if (match[2] && /[a-z]/.test(last) && /[A-Z]/.test(glyph)) {
-          units.push(" "); starts.push(after); ends.push(start + i);
-        }
-        units.push(foldCase ? glyph.toLowerCase() : glyph); previous = glyph;
-        starts.push(start + i); ends.push(start + i + 1);
-        after = start + i + 1; last = glyph;
-      }
-      previous = foldCase ? previous.toLowerCase() : previous;
-      continue;
-    }
-    const value = match[4] ? ' ' : match[5] ? char.replace(/\s/g, '') : char >= '!' && char <= '~' ? char : char.normalize("NFKC").replace(/ſ/g, "s").replace(/ß/g, "ss").replace(/ẞ/g, "SS")
-      .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"').replace(/\s/g, " ");
+  let previous = result.text.at(-1);
+  const emit = (value, start, end) => {
     for (const unit of foldCase ? value.toLowerCase() : value) {
-      if (unit === " " && previous === " ") { ends[ends.length - 1] = offset; continue; }
+      if (unit === ' ' && previous === ' ') { ends[ends.length - 1] = end; continue; }
       units.push(unit); previous = unit;
-      for (let i = 0; i < unit.length; i++) { starts.push(start); ends.push(offset); }
+      for (let i = 0; i < unit.length; i++) { starts.push(start); ends.push(end); }
     }
+  };
+  for (const match of raw.matchAll(/((?<=[\p{L}\p{N}])[-\u2010\u2011]\s*\n\s*(?=[\p{L}\p{N}]))|((?<![A-Za-z0-9])(?:[A-Za-z0-9][^\S\r\n]+){2,}[A-Za-z0-9](?![A-Za-z0-9]))|([a-zA-Z0-9]+)|(\s+)|(\.(?:\s*\.){2,})|[\s\S]/gu)) {
+    const char = match[0], start = base + match.index, end = start + char.length;
+    if (match[1] || char === '\u00ad') continue;
+    if (match[2] || match[3]) {
+      let after = start, last = '';
+      for (const glyph of char.matchAll(/[A-Za-z0-9]/g)) {
+        const at = start + glyph.index;
+        if (match[2] && /[a-z]/.test(last) && /[A-Z]/.test(glyph[0])) emit(' ', after, at);
+        emit(glyph[0], at, at + 1);
+        after = at + 1; last = glyph[0];
+      }
+    } else emit(match[4] ? ' ' : match[5] ? char.replace(/\s/g, '') : foldGlyphs(char).replace(/\s/g, ' '), start, end);
   }
   result.text += units.join("");
   return result;
@@ -266,7 +275,7 @@ function extendAnchorRange(index, page, range, blocks) {
     const to = nextLine < 0 ? blocks[range.block + 1] : Math.min(nextLine, blocks[range.block + 1]);
     if (to - targetEnd <= 48) {
       const tail = letters(page.raw.slice(targetEnd, to)), stop = Math.min(index.raw.length, end + 49);
-      const edges = Array.from(index.raw.slice(end, stop).matchAll(/\r?\n|$/gu), match => end + match.index)
+      const edges = Array.from(index.raw.slice(end, stop).matchAll(/\s+|$/gu), match => end + match.index)
         .filter(at => at < stop || at === index.raw.length);
       const at = closestEdge(tail, edges, at => letters(index.raw.slice(end, at)), Math.floor(tail.length / 4));
       if (at !== undefined) { end = at; targetEnd = to; }
@@ -303,19 +312,17 @@ function* anchorRanges(index, page, anchors, size, blocks) {
     const adjacent = cost(anchor.at, anchor.start, limit);
     if (adjacent > limit) continue;
     i = nextIndex - 1;
-    let distance = adjacent;
     const overlaps = previous && previous.block === anchor.block && previous.b >= anchor.at && previous.y >= anchor.start;
     if (overlaps) {
       const budget = 128 - previous.distance;
       const suffix = next.end >= previous.y && previous.y >= previous.x
         ? cost(previous.b, previous.y, budget)
         : Infinity;
-      // The two confirmed paths meet at the previous anchor. Recheck the union only if this path exceeds the budget.
-      distance = suffix <= budget ? previous.distance + suffix : cost(previous.a, previous.x, 128);
-    }
-    if (overlaps && distance <= 128) {
-      Object.assign(previous, { b: end, y: next.end, distance });
-      continue;
+      const distance = suffix <= budget ? previous.distance + suffix : cost(previous.a, previous.x, 128);
+      if (distance <= 128) {
+        Object.assign(previous, { b: end, y: next.end, distance });
+        continue;
+      }
     }
     if (previous) yield extendAnchorRange(index, page, previous, blocks);
     previous = { a: anchor.at, b: end, x: anchor.start, y: next.end,
@@ -326,22 +333,19 @@ function* anchorRanges(index, page, anchors, size, blocks) {
 function* recoverWordRanges(left, right) {
   const words = left.includes('...') || right.includes('...') ? /\S+?\.(?=\.|\s|$)|\S+\s*|\s+/gu : /\S+\s*|\s+/gu;
   const substantial = /[\p{L}\p{N}]{3}/u;
-  let html = 0, pdf = 0;
   for (const part of localTextDiff(left.match(words) || [], right.match(words) || [], true, 512, undefined, false).parts) {
-    const start = html, from = pdf;
-    html += part.html.length; pdf += part.pdf.length;
     if (!substantial.test(part.html) || part.changed && !textDiff(part.html, part.pdf, true).parts
       .some(span => !span.changed && substantial.test(span.html))) continue;
-    yield [start, from, ...extendPageRange(left, right, html, pdf, 1, false, /^[\p{L}\p{N}\p{Pd}.]{2}$/u)];
+    yield [part.start, part.targetStart, ...extendPageRange(left, right, part.end, part.targetEnd, 1, false, /^[\p{L}\p{N}\p{Pd}.]{2}$/u)];
   }
 }
 function comparisonParts(value, full = value.selection === true) {
-  if (value.comparisonDiff?.html !== value.html || value.comparisonDiff.pdf !== value.pdf || value.comparisonDiff.full !== full) {
-    let offset = 0;
-    value.comparisonDiff = { html: value.html, pdf: value.pdf, full, rows: [], parts: (textDiff(value.html, value.pdf, true)?.parts || [{ html: value.html, pdf: value.pdf, changed: false }]).map(part => ({ ...part,
-      start: offset, end: offset += part.html.length, changed: part.changed && (full || significantText(part.html) !== significantText(part.pdf)) })) };
-  }
-  return value.comparisonDiff.parts;
+  let diff = value.comparisonDiff;
+  if (!diff || diff.html !== value.html || diff.pdf !== value.pdf)
+    value.comparisonDiff = diff = { html: value.html, pdf: value.pdf, rows: [], parts: textDiff(value.html, value.pdf, true).parts };
+  return full ? diff.parts : diff.reviewParts ||= diff.parts.map(part => ({
+    ...part, changed: part.changed && significantText(part.html) !== significantText(part.pdf)
+  }));
 }
 const ready = window.PdfSelectionOptions?.nativeEditor ? Promise.resolve() : import("/monaco/esm/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js")
     .then(({ DefaultLinesDiffComputer }) => diffComputer = new DefaultLinesDiffComputer())
@@ -368,10 +372,8 @@ function* matchPositions(index, needle, { text }, anchors) {
 }
 function findMatches(index, queries, haystack = index.normalized, {
   anchors = false, fuzzy = false, before = '', after = '', wholeWords = index.options?.wholeWords,
-  best = false, limit = Infinity, sample = 0, step = 0, page, blocks
+  best = false, limit = Infinity, contextual = false
 } = {}) {
-  const target = sample ? page?.normalized : null, connections = target && index.targetConnections(page, false);
-  const layout = sample && blocks, matches = [];
   const found = new Map(), word = char => !!char && /[\p{L}\p{N}_]/u.test(char);
   let bestHit = null, bestTied = false;
   const consider = match => {
@@ -380,21 +382,27 @@ function findMatches(index, queries, haystack = index.normalized, {
     found.set(key, match);
     if (!best) return;
     const begin = lowerBound(haystack.starts, match.start), end = lowerBound(haystack.starts, match.end);
-    const left = haystack.text.slice(Math.max(0, begin - 400), begin).trim(), right = haystack.text.slice(end, end + 400).trim();
-    let a = 0, b = 0;
-    while (a < before.length && a < left.length && before.at(-a - 1) === left.at(-a - 1)) a++;
-    while (b < after.length && b < right.length && after[b] === right[b]) b++;
-    const score = a + b;
+    let score;
+    if (contextual) {
+      // Score the whole short passage around its exact anchor, allowing one OCR substitution.
+      const from = begin - before.length, to = end + after.length;
+      if (from < 0 || to > haystack.text.length || word(haystack.text[from - 1]) && word(haystack.text[from])
+        || word(haystack.text[to - 1]) && word(haystack.text[to])) return;
+      score = before.length + after.length
+        - textDiff(before + after, haystack.text.slice(from, begin) + haystack.text.slice(end, to), false, 1).distance;
+    } else {
+      const left = haystack.text.slice(Math.max(0, begin - 400), begin).trim(), right = haystack.text.slice(end, end + 400).trim();
+      let a = 0, b = 0;
+      while (a < before.length && a < left.length && before.at(-a - 1) === left.at(-a - 1)) a++;
+      while (b < after.length && b < right.length && after[b] === right[b]) b++;
+      score = a + b;
+    }
     if (!bestHit || score > bestHit.score) { bestHit = { ...match, score }; bestTied = false; }
     else if (score === bestHit.score) bestTied = true;
   };
-  let block = -1, blockEnd;
-  for (const query of layout || queries) {
-    block++;
-    if (layout && block + 1 === layout.length) break;
-    const passage = layout ? target.text : query;
-    if (fuzzy && !sample) {
-      const needle = anchors ? passage : normalized(passage).text.trim();
+  for (const query of queries) {
+    const needle = anchors ? query : normalized(query).text.trim();
+    if (fuzzy) {
       const size = [...needle].length, long = needle.length > 128;
       if (size && size < 3 || !size && (before.length < 4 || after.length < 4) || needle.length > 2048
         || before.length + after.length < 8 || (long && (before.length < 12 || after.length < 12))) return best ? null : [];
@@ -403,7 +411,7 @@ function findMatches(index, queries, haystack = index.normalized, {
       const starts = new Set(), ends = new Set(), text = haystack.text;
       for (const [context, left] of [[before, true], [after, false]]) {
         if (context.length < 4) continue;
-        for (const size of [...new Set([Math.min(24, context.length), Math.min(12, context.length), ...(long ? [] : [4])])]) {
+        for (const size of long ? [24, 12] : [24, 12, 4]) {
           const anchor = left ? context.slice(-size) : context.slice(0, size);
           let anchored = false;
           for (const at of matchPositions(index, anchor, haystack)) {
@@ -434,57 +442,18 @@ function findMatches(index, queries, haystack = index.normalized, {
       }
       continue;
     }
-    const begin = layout ? blockEnd ?? lowerBound(target.starts, query) : 0;
-    const stop = layout ? lowerBound(target.starts, layout[block + 1]) : passage.length;
-    blockEnd = stop;
-    const last = stop - begin - sample;
-    if (last < 0) continue;
-    const firstMatch = matches.length, count = !sample ? 1 : step ? Math.ceil(last / step) + 1 : 5;
-    for (let i = 0, previous = -1; i < count; i++) {
-      const position = step ? Math.min(i * step, last) : Math.floor(last * i / 4);
-      if (position === previous) continue;
-      previous = position;
-      const at = begin + position, fragment = sample ? passage.slice(at, at + sample) : passage;
-      if (layout && !/\p{L}{2}/u.test(fragment)) continue;
-      let hit;
-      if (connections?.length) {
-        const start = target.starts[at], end = target.ends[at + sample - 1];
-        const connection = connections.find(item => item.targetStart <= start && item.targetEnd >= end);
-        const mapped = connection && index.range(page, start, end, true, connection);
-        if (mapped && !mapped.approximate) hit = mapped;
-      }
-      const needle = hit ? '' : anchors ? fragment : normalized(fragment).text.trim();
-      if (needle) for (const foundAt of matchPositions(index, needle, haystack, anchors)) {
-        const endAt = foundAt + needle.length;
-        if (wholeWords) {
-          const before = [...haystack.text.slice(Math.max(0, foundAt - 2), foundAt)].pop();
-          const after = [...haystack.text.slice(endAt, endAt + 2)][0];
-          if (word(needle[0]) && word(before) || word([...needle].pop()) && word(after)) continue;
-        }
-        const start = haystack.starts[foundAt], end = haystack.ends[endAt - 1];
-        if (!sample) {
-          consider({ start, end });
-          if (found.size >= limit || anchors && found.size > 1) return [...found.values()];
-        } else if (!hit) hit = { start, end };
-        else if (hit.start !== start || hit.end !== end) {
-          hit = null;
-          break;
-        }
-      }
-      if (hit) matches.push({
-        at, start: lowerBound(haystack.starts, hit.start), end: lowerBound(haystack.starts, hit.end),
-        ...(layout && { block, begin, stop })
-      });
-    }
-    // A block supported by only one sample also needs a unique hit on the PDF side.
-    if (layout && matches.length === firstMatch + 1) {
-      const { at } = matches[firstMatch];
-      if (page.matches([passage.slice(at, at + sample)], target, { anchors: true }).length > 1) matches.pop();
+    if (!needle) continue;
+    for (const at of matchPositions(index, needle, haystack, anchors)) {
+      const end = at + needle.length;
+      if (wholeWords && (word(needle[0]) && /[\p{L}\p{N}_]$/u.test(haystack.text.slice(Math.max(0, at - 2), at))
+        || word([...needle].at(-1)) && /^[\p{L}\p{N}_]/u.test(haystack.text.slice(end, end + 2)))) continue;
+      consider({ start: haystack.starts[at], end: haystack.ends[end - 1] });
+      if (found.size >= limit || anchors && !best && found.size > 1) return [...found.values()];
     }
   }
-  if (sample) return matches;
-  if (best && bestHit?.score >= Math.min(24, before.length + after.length)) return bestTied ? null : bestHit;
-  if (best && !fuzzy) return findMatches(index, queries, haystack, { anchors, fuzzy: true, before, after, wholeWords, best });
+  if (best && bestHit?.score >= (contextual ? before.length + after.length - 1 : Math.min(24, before.length + after.length)))
+    return bestTied ? null : bestHit;
+  if (best && !fuzzy && !anchors && !contextual) return findMatches(index, queries, haystack, { anchors, fuzzy: true, before, after, wholeWords, best });
   if (best) return null;
   return [...found.values()];
 }

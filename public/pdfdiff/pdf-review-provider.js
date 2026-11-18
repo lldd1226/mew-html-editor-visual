@@ -11,9 +11,9 @@ function sourceDecorations(index, items = [], fonts = true, text = true, hover, 
     const font = !item.comparison, start = !font && !item.comparison.html.trim() && /^\s/u.test(item.comparison.pdf) ? item.sourceEnd : item.sourceStart;
     const options = { description: font ? 'PDF font difference' : 'PDF OCR text difference', stickiness: 1,
       inlineClassName: font ? 'mew-font-diff-text' : 'mew-ocr-diff-text', hoverMessage: hover?.(item) };
-    const segments = index.sourceSegments(start, item.sourceEnd, font);
-    if (!font && (!segments.length || segments.every(segment => segment.start === segment.end))) {
-      if (!segments.length) segments.push(...index.sourceSegments(start, start));
+    const edits = !font && !item.selection && start === item.sourceStart && item.options?.[0]?.edits;
+    const segments = edits?.length && (item.comparison.html.trim() || item.comparison.pdf.trim()) ? edits : index.sourceSegments(start, item.sourceEnd, font);
+    if (!font && segments.every(segment => segment.start === segment.end)) {
       Object.assign(options, { inlineClassName: undefined, showIfCollapsed: true,
         before: { content: '\u200b', inlineClassName: 'mew-ocr-diff-insert', inlineClassNameAffectsLetterSpacing: true } });
     }
@@ -74,6 +74,53 @@ function pageData(page) {
   if (!data) pages.set(page, data = {});
   return data;
 }
+// A passage ends where text crosses its gutter. A wider gap can also separate short passages.
+function columnPassages(items, baseline) {
+  const rows = items.filter(item => item.height && item.str.trim()).map(item => ({
+    item, x: item.transform[4], end: item.transform[4] + item.width, y: baseline(item)
+  })).sort((a, b) => b.y - a.y);
+  let gutter, score = 0;
+  for (const x of new Set(rows.map(row => Math.floor(row.x - row.item.height * .5)))) {
+    let left = [], right = [], top = Infinity;
+    for (const row of [...rows, { x, y: -Infinity, end: x }]) {
+      const margin = (row.item?.height || 1) * .35;
+      if (row.end <= x + margin && row.x < x) left.push(row);
+      else if (row.x >= x - margin && row.end > x) right.push(row);
+      else {
+        const lines = (side, other) => new Set(side.filter(line => other.length
+          && line.y <= other[0].y + line.item.height * 2 && line.y >= other.at(-1).y - line.item.height * 2)
+          .map(line => Math.round(line.y / 3))).size;
+        const wide = side => side.some(line => line.item.width >= line.item.height * 4);
+        const count = Math.min(lines(left, right), lines(right, left));
+        if (count > score && wide(left) && wide(right)) {
+          const height = Math.max(left[0].item.height, right[0].item.height);
+          const starts = new Set(right.filter(line => line.x < x + height * 1.25)
+            .map(line => Math.round(line.y / 3))).size;
+          const gap = right.reduce((edge, line) => Math.min(edge, line.x), Infinity)
+            - left.reduce((edge, line) => Math.max(edge, line.end), -Infinity);
+          // For short passages, require aligned text on both sides of a wide gap.
+          const aligned = gap < height * 2.5 ? 0 : new Set(left.filter(a => /\p{L}{2}/u.test(a.item.str)
+            && right.some(b => Math.abs(a.y - b.y) <= height * .5 && /\p{L}{2}/u.test(b.item.str)))
+            .map(line => Math.round(line.y / 3))).size;
+          const single = aligned === 1 && gap >= height * 4
+            && Math.max(left[0].y, right[0].y) - Math.min(left.at(-1).y, right.at(-1).y) <= height * .5;
+          if (count >= 6 && starts >= 3 || aligned >= 2 && starts >= 2 || single) {
+            gutter = { x, top, bottom: row.y }; score = count;
+          }
+        }
+        left = []; right = []; top = row.y;
+      }
+    }
+  }
+  if (!gutter) return [items];
+  const passages = [[], [], [], []];
+  for (const item of items) {
+    const y = baseline(item);
+    passages[y >= gutter.top ? 0 : y <= gutter.bottom ? 3 : item.transform[4] < gutter.x ? 1 : 2].push(item);
+  }
+  if (!passages[1].length || !passages[2].length) return [items];
+  return passages.filter(part => part.length).flatMap(part => columnPassages(part, baseline));
+}
 function readPageText(page) {
   const data = pageData(page);
   return data.text ||= Promise.resolve().then(() => page.getTextContent()).then(content => {
@@ -83,7 +130,14 @@ function readPageText(page) {
           - window.PdfSelectionDiff.pdfTextBaseline(sorted[i - 1])) <= Math.max(item.height, sorted[i - 1].height) * 0.75), ordered = misaligned ? items : sorted;
     let raw = '', previous, previousBaseline, line;
     const parts = [], breaks = [];
-    for (const item of ordered) {
+    const passages = columnPassages(ordered, window.PdfSelectionDiff.pdfTextBaseline);
+    const boundaries = new Set(passages.slice(1).map(passage => passage[0]));
+    for (const item of passages.flat()) {
+      if (boundaries.has(item)) {
+        if (!raw.endsWith('\n')) raw += '\n';
+        breaks.push(raw.length);
+        previous = line = undefined;
+      }
       const baseline = window.PdfSelectionDiff.pdfTextBaseline(item), size = item.height;
       if (previous && !raw.endsWith('\n')) {
         const lineBreak = Math.abs(baseline - previousBaseline) > Math.max(size, previous.height) * (misaligned ? 0.75 : 0.5);
@@ -102,7 +156,7 @@ function readPageText(page) {
       raw += item.str + (item.hasEOL ? '\n' : '');
       previous = item; previousBaseline = baseline;
     }
-    return Object.assign(content, { raw, parts, breaks });
+    return Object.assign(content, { raw, parts, breaks, horizontal: boundaries.size > 0 });
   }).catch(error => {
     delete data.text;
     throw error;
@@ -222,7 +276,8 @@ class PdfLocator {
     let priority = [];
     if (context.onProgress && context.priority && reusable && previous !== this.index && prepared?.pdf === this.pdf
       && previous.fontsCurrent) {
-      const raw = changedRange(previous.raw, this.index.raw), source = changedRange(previous.source, this.index.source);
+      const raw = this.index.change?.before === previous.raw ? this.index.change : changedRange(previous.raw, this.index.raw);
+      const source = changedRange(previous.source, this.index.source);
       const delta = raw.newEnd - raw.oldEnd, sourceDelta = source.newEnd - source.oldEnd, suffix = previous.raw !== this.index.raw ? raw.oldEnd : 0;
       for (let at = lowerBound(this.review.items, Math.max(suffix, lowerBound(previous.ends, context.priority.offset - sourceDelta + 1)),
         item => item.reviewStart ?? item.sourceStart); at < this.review.items.length; at++) {
@@ -374,7 +429,7 @@ class PdfLocator {
       this.index = new window.PdfSelectionDiff.PdfConnections(this, documentModel);
       this.index.sourcePageKey = sourcePageKey;
       pairs.set(this.pdf, this.index);
-      if (previous) this.index.inherit(previous);
+      if (previous) this.index.update(null, { previous });
     }
     return this.index;
   }
@@ -417,7 +472,7 @@ class PdfLocator {
           const start = index.raw.length;
           const parts = content.parts.map(part => ({ ...part, start: start + part.start, end: start + part.end }));
           index.raw += content.raw;
-          index.pages.push({ number, start, end: index.raw.length, parts, breaks: content.breaks.map(at => start + at) });
+          index.pages.push({ number, start, end: index.raw.length, parts, horizontal: content.horizontal, breaks: content.breaks.map(at => start + at) });
           index.raw += "\n";
           if (!/[-\u2010\u2011]\s*$/.test(index.raw.slice(mappedStart))) {
             window.PdfSelectionDiff.normalized(index.raw.slice(mappedStart), mapped, mappedStart); mappedStart = index.raw.length;
