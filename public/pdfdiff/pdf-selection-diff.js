@@ -190,27 +190,150 @@ function lowerBound(values, value, key = entry => entry) {
 // Text indexing, matching and confirmed HTML/PDF range alignment.
 function extendPageRange(from, to, a, x, step, exact = false, word = /^[\p{L}\p{N}\p{Pd}]{2}$/u) {
   const offset = step < 0 ? -1 : 0;
-  // Only the first pass may cross spaces or standalone separators when the next glyph matches.
+  // The first pass can also align standalone separators and cross unmatched layout spaces.
+  const separator = (text, at) => /^[-–—]$/.test(text[at]) && text[at - 1] === ' ' && text[at + 1] === ' ';
   while (a + offset >= 0 && a + offset < from.length && x + offset >= 0 && x + offset < to.length) {
     const left = from[a + offset], right = to[x + offset];
-    if (!exact && step < 0 && /^[-–—]$/.test(left) && from[a + offset - 1] === ' ' && from[a + offset + 1] === ' '
-      && from[a + offset + step * 2] === right) { a += step * 2; continue; }
-    if (!exact && step < 0 && /^[-–—]$/.test(right) && to[x + offset - 1] === ' ' && to[x + offset + 1] === ' '
-      && to[x + offset + step * 2] === left) { x += step * 2; continue; }
-    if (left !== right && (exact || !(left === ' ' && from[a + offset + step] === right)
+    let same = left === right;
+    if (!exact && !same) {
+      const leftSeparator = separator(from, a + offset), rightSeparator = separator(to, x + offset);
+      if (leftSeparator && rightSeparator) same = true;
+      else if (leftSeparator && from[a + offset + step * 2] === right) { a += step * 2; continue; }
+      else if (rightSeparator && to[x + offset + step * 2] === left) { x += step * 2; continue; }
+    }
+    if (!same && (exact || !(left === ' ' && from[a + offset + step] === right)
       && !(right === ' ' && to[x + offset + step] === left))) break;
-    if (left === right || left === ' ') a += step;
-    if (left === right || right === ' ') x += step;
+    if (same || left === ' ') a += step;
+    if (same || right === ' ') x += step;
   }
-  if (exact) return [a, x];
+  if (exact || !word) return [a, x];
   // Keep OCR errors, dotted initials and wrapped compounds inside the same confirmed word.
   let aa = a, xx = x;
   while (aa > 0 && aa < from.length && Math.abs(a - aa) < 32 && word.test(from.slice(aa - 1, aa + 1))) aa += step;
   while (xx > 0 && xx < to.length && Math.abs(x - xx) < 32 && word.test(to.slice(xx - 1, xx + 1))) xx += step;
   if ((a !== aa || x !== xx) && !/[\p{L}\p{N}\p{Pd}]/u.test(from[aa + offset] || '')
-    && !/[\p{L}\p{N}\p{Pd}]/u.test(to[xx + offset] || '')
-    && textDiff(from.slice(Math.min(a, aa), Math.max(a, aa)), to.slice(Math.min(x, xx), Math.max(x, xx)), false, 32).distance <= 32) { a = aa; x = xx; }
-  return extendPageRange(from, to, a, x, step, true, word);
+    && !/[\p{L}\p{N}\p{Pd}]/u.test(to[xx + offset] || '')) { a = aa; x = xx; }
+  return extendPageRange(from, to, a, x, step, true);
+}
+const lineStart = (raw, at) => raw.lastIndexOf('\n', at - 1) + 1;
+const letters = text => text.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
+
+function closestEdge(fragment, points, textAt, limit) {
+  let closest;
+  for (const at of points) {
+    const distance = textDiff(textAt(at), fragment, false, limit).distance;
+    if (distance > limit) continue;
+    closest = at; limit = distance - 1;
+    if (distance === 0) break;
+  }
+  return closest;
+}
+
+function extendAnchorRange(index, page, range, blocks) {
+  const source = index.normalized, target = page.normalized;
+  const begin = range.begin ?? 0, stop = range.stop ?? target.text.length;
+  const passage = blocks ? target.text.slice(begin, stop) : target.text;
+  let [a, x] = extendPageRange(passage, source.text, range.a - begin, range.x, -1, false, blocks ? null : undefined);
+  a += begin;
+  const aa = Math.max(begin, lowerBound(target.starts, lineStart(page.raw, target.starts[a])));
+  const xx = lowerBound(source.starts, lineStart(index.raw, source.starts[x]));
+  if (a > aa && x > xx && a - aa <= 32 && x - xx <= 32
+    && /[\p{L}\p{N}]/u.test(source.text.slice(xx, x))
+    && (!/\p{L}/u.test(target.text.slice(aa, a)) || /\p{L}/u.test(source.text.slice(xx, x)))
+    && !/[\r\n]/.test(page.raw.slice(target.starts[a], target.ends[a]) + index.raw.slice(source.starts[x], source.ends[x]))) [a, x] = [aa, xx];
+  let [b, y] = extendPageRange(passage, source.text, range.b - begin, range.y, 1, false, blocks ? null : undefined);
+  if (!blocks && page.sourcePages?.length > 1 && /\p{L}/u.test(target.text[b] || '') && /\p{L}/u.test(source.text[y] || '')) {
+    const pdfLine = lineStart(page.raw, target.starts[b]), htmlLine = lineStart(index.raw, source.starts[y]);
+    // Crossing into the next line requires matching words beyond the break.
+    if (pdfLine > target.starts[range.b - 1] && htmlLine > source.starts[range.y - 1]
+      && !/\p{L}{2}/u.test(page.raw.slice(pdfLine, target.ends[b - 1]) + ' ' + index.raw.slice(htmlLine, source.ends[y - 1]))) {
+      b = lowerBound(target.starts, pdfLine - 1); y = lowerBound(source.starts, htmlLine - 1);
+    }
+  }
+  let start = source.starts[x], end = source.ends[y - 1], targetStart = target.starts[a], targetEnd = target.ends[begin + b - 1];
+  if (blocks) {
+    // Use the confirmed passage as context for short unmatched line edges.
+    const from = Math.max(blocks[range.block], lineStart(page.raw, targetStart));
+    const lead = significantText(page.raw.slice(from, targetStart));
+    if (lead && lead.length <= 32) {
+      const begin = Math.max(0, x - lead.length - 8);
+      const edges = Array.from({ length: x - begin }, (_, i) => begin + i)
+        .filter(at => Math.abs(x - at - lead.length) <= 4 || source.text[at] === ' ');
+      const at = closestEdge(lead, edges, at => significantText(source.text.slice(at, x)), Math.max(1, Math.floor(lead.length / 4)));
+      if (at !== undefined) { start = source.starts[at]; targetStart = from; }
+    }
+    const nextLine = page.raw.indexOf('\n', targetEnd);
+    const to = nextLine < 0 ? blocks[range.block + 1] : Math.min(nextLine, blocks[range.block + 1]);
+    if (to - targetEnd <= 48) {
+      const tail = letters(page.raw.slice(targetEnd, to)), stop = Math.min(index.raw.length, end + 49);
+      const edges = Array.from(index.raw.slice(end, stop).matchAll(/\r?\n|$/gu), match => end + match.index)
+        .filter(at => at < stop || at === index.raw.length);
+      const at = closestEdge(tail, edges, at => letters(index.raw.slice(end, at)), Math.floor(tail.length / 4));
+      if (at !== undefined) { end = at; targetEnd = to; }
+    }
+  }
+  return { start, end, targetStart, targetEnd, block: range.block };
+}
+function* anchorRanges(index, page, anchors, size, blocks) {
+  const source = index.normalized.text, target = page.normalized.text;
+  const maxDistance = 32;
+  // A content match can continue within a PDF block. Adjacent blocks may belong to unrelated HTML passages.
+  let previous;
+  for (let i = 0; i < anchors.length; i++) {
+    const anchor = anchors[i], following = anchors[i + 1];
+    if (!blocks && !following) break;
+    let next = following && following.block === anchor.block ? following : anchor, nextIndex = i + 1;
+    if (blocks && next.start - anchor.start - (next.at - anchor.at) > maxDistance) {
+      // A character difference can send an exact anchor to a later copy of the phrase.
+      for (let j = i + 2; j < anchors.length; j++) {
+        const candidate = anchors[j];
+        if (candidate.block !== anchor.block || candidate.at - anchor.at > size * 4) break;
+        if (candidate.start > anchor.start && candidate.start < next.start) {
+          next = candidate;
+          nextIndex = j;
+          break;
+        }
+      }
+    }
+    const end = next.at + size;
+    const length = Math.min(end, target.length) - anchor.at;
+    if (next !== anchor && next.start <= anchor.start || length > 2048) continue;
+    const cost = (pdfStart, htmlStart, budget) => textDiff(target.slice(pdfStart, end), source.slice(htmlStart, next.end), false, budget).distance;
+    const limit = Math.min(maxDistance, Math.max(12, Math.floor(length * .2)));
+    const adjacent = cost(anchor.at, anchor.start, limit);
+    if (adjacent > limit) continue;
+    i = nextIndex - 1;
+    let distance = adjacent;
+    const overlaps = previous && previous.block === anchor.block && previous.b >= anchor.at && previous.y >= anchor.start;
+    if (overlaps) {
+      const budget = 128 - previous.distance;
+      const suffix = next.end >= previous.y && previous.y >= previous.x
+        ? cost(previous.b, previous.y, budget)
+        : Infinity;
+      // The two confirmed paths meet at the previous anchor. Recheck the union only if this path exceeds the budget.
+      distance = suffix <= budget ? previous.distance + suffix : cost(previous.a, previous.x, 128);
+    }
+    if (overlaps && distance <= 128) {
+      Object.assign(previous, { b: end, y: next.end, distance });
+      continue;
+    }
+    if (previous) yield extendAnchorRange(index, page, previous, blocks);
+    previous = { a: anchor.at, b: end, x: anchor.start, y: next.end,
+      block: anchor.block, begin: anchor.begin, stop: anchor.stop, distance: adjacent };
+  }
+  if (previous) yield extendAnchorRange(index, page, previous, blocks);
+}
+function* recoverWordRanges(left, right) {
+  const words = left.includes('...') || right.includes('...') ? /\S+?\.(?=\.|\s|$)|\S+\s*|\s+/gu : /\S+\s*|\s+/gu;
+  const substantial = /[\p{L}\p{N}]{3}/u;
+  let html = 0, pdf = 0;
+  for (const part of localTextDiff(left.match(words) || [], right.match(words) || [], true, 512, undefined, false).parts) {
+    const start = html, from = pdf;
+    html += part.html.length; pdf += part.pdf.length;
+    if (!substantial.test(part.html) || part.changed && !textDiff(part.html, part.pdf, true).parts
+      .some(span => !span.changed && substantial.test(span.html))) continue;
+    yield [start, from, ...extendPageRange(left, right, html, pdf, 1, false, /^[\p{L}\p{N}\p{Pd}.]{2}$/u)];
+  }
 }
 function comparisonParts(value, full = value.selection === true) {
   if (value.comparisonDiff?.html !== value.html || value.comparisonDiff.pdf !== value.pdf || value.comparisonDiff.full !== full) {
@@ -243,7 +366,12 @@ function* matchPositions(index, needle, { text }, anchors) {
     }
   }
 }
-function findMatches(index, queries, haystack, { anchors = false, fuzzy = false, before = '', after = '', wholeWords = false, best = false } = {}) {
+function findMatches(index, queries, haystack = index.normalized, {
+  anchors = false, fuzzy = false, before = '', after = '', wholeWords = index.options?.wholeWords,
+  best = false, limit = Infinity, sample = 0, step = 0, page, blocks
+} = {}) {
+  const target = sample ? page?.normalized : null, connections = target && index.targetConnections(page, false);
+  const layout = sample && blocks, matches = [];
   const found = new Map(), word = char => !!char && /[\p{L}\p{N}_]/u.test(char);
   let bestHit = null, bestTied = false;
   const consider = match => {
@@ -260,9 +388,13 @@ function findMatches(index, queries, haystack, { anchors = false, fuzzy = false,
     if (!bestHit || score > bestHit.score) { bestHit = { ...match, score }; bestTied = false; }
     else if (score === bestHit.score) bestTied = true;
   };
-  for (const query of queries) {
-    const needle = anchors ? query : normalized(query).text.trim();
-    if (fuzzy) {
+  let block = -1, blockEnd;
+  for (const query of layout || queries) {
+    block++;
+    if (layout && block + 1 === layout.length) break;
+    const passage = layout ? target.text : query;
+    if (fuzzy && !sample) {
+      const needle = anchors ? passage : normalized(passage).text.trim();
       const size = [...needle].length, long = needle.length > 128;
       if (size && size < 3 || !size && (before.length < 4 || after.length < 4) || needle.length > 2048
         || before.length + after.length < 8 || (long && (before.length < 12 || after.length < 12))) return best ? null : [];
@@ -300,17 +432,57 @@ function findMatches(index, queries, haystack, { anchors = false, fuzzy = false,
         const start = haystack.starts[begin], stop = size ? haystack.ends[end - 1] : start;
         consider({ start, end: stop, approximate: true, distance });
       }
-    } else if (needle) {
-      for (const at of matchPositions(index, needle, haystack, anchors)) {
-        const end = at + needle.length;
-        const before = [...haystack.text.slice(Math.max(0, at - 2), at)].pop(), after = [...haystack.text.slice(end, end + 2)][0];
-        if (wholeWords && (word(needle[0]) && word(before) || word([...needle].pop()) && word(after))) continue;
-        const start = haystack.starts[at], stop = haystack.ends[end - 1];
-        consider({ start, end: stop });
-        if (anchors && found.size > 1) return [...found.values()]; // Only unique anchors are useful.
+      continue;
+    }
+    const begin = layout ? blockEnd ?? lowerBound(target.starts, query) : 0;
+    const stop = layout ? lowerBound(target.starts, layout[block + 1]) : passage.length;
+    blockEnd = stop;
+    const last = stop - begin - sample;
+    if (last < 0) continue;
+    const firstMatch = matches.length, count = !sample ? 1 : step ? Math.ceil(last / step) + 1 : 5;
+    for (let i = 0, previous = -1; i < count; i++) {
+      const position = step ? Math.min(i * step, last) : Math.floor(last * i / 4);
+      if (position === previous) continue;
+      previous = position;
+      const at = begin + position, fragment = sample ? passage.slice(at, at + sample) : passage;
+      if (layout && !/\p{L}{2}/u.test(fragment)) continue;
+      let hit;
+      if (connections?.length) {
+        const start = target.starts[at], end = target.ends[at + sample - 1];
+        const connection = connections.find(item => item.targetStart <= start && item.targetEnd >= end);
+        const mapped = connection && index.range(page, start, end, true, connection);
+        if (mapped && !mapped.approximate) hit = mapped;
       }
+      const needle = hit ? '' : anchors ? fragment : normalized(fragment).text.trim();
+      if (needle) for (const foundAt of matchPositions(index, needle, haystack, anchors)) {
+        const endAt = foundAt + needle.length;
+        if (wholeWords) {
+          const before = [...haystack.text.slice(Math.max(0, foundAt - 2), foundAt)].pop();
+          const after = [...haystack.text.slice(endAt, endAt + 2)][0];
+          if (word(needle[0]) && word(before) || word([...needle].pop()) && word(after)) continue;
+        }
+        const start = haystack.starts[foundAt], end = haystack.ends[endAt - 1];
+        if (!sample) {
+          consider({ start, end });
+          if (found.size >= limit || anchors && found.size > 1) return [...found.values()];
+        } else if (!hit) hit = { start, end };
+        else if (hit.start !== start || hit.end !== end) {
+          hit = null;
+          break;
+        }
+      }
+      if (hit) matches.push({
+        at, start: lowerBound(haystack.starts, hit.start), end: lowerBound(haystack.starts, hit.end),
+        ...(layout && { block, begin, stop })
+      });
+    }
+    // A block supported by only one sample also needs a unique hit on the PDF side.
+    if (layout && matches.length === firstMatch + 1) {
+      const { at } = matches[firstMatch];
+      if (page.matches([passage.slice(at, at + sample)], target, { anchors: true }).length > 1) matches.pop();
     }
   }
+  if (sample) return matches;
   if (best && bestHit?.score >= Math.min(24, before.length + after.length)) return bestTied ? null : bestHit;
   if (best && !fuzzy) return findMatches(index, queries, haystack, { anchors, fuzzy: true, before, after, wholeWords, best });
   if (best) return null;
@@ -334,4 +506,4 @@ function pdfTextBaseline(item) {
 }
 
 window.PdfSelectionDiff = { pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonParts, documentIndex, findMatches, ready };
-export { pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonParts, documentIndex, findMatches, ready };
+export { pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, anchorRanges, recoverWordRanges, comparisonParts, documentIndex, findMatches, ready };

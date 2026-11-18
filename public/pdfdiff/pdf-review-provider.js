@@ -81,19 +81,28 @@ function readPageText(page) {
       Math.round((window.PdfSelectionDiff.pdfTextBaseline(b) - window.PdfSelectionDiff.pdfTextBaseline(a)) / Math.max(a.height, b.height)) || a.transform[4] - b.transform[4]), misaligned = sorted.some((item, i) =>
         i && item.transform[4] < sorted[i - 1].transform[4] && Math.abs(window.PdfSelectionDiff.pdfTextBaseline(item)
           - window.PdfSelectionDiff.pdfTextBaseline(sorted[i - 1])) <= Math.max(item.height, sorted[i - 1].height) * 0.75), ordered = misaligned ? items : sorted;
-    let raw = '', previous = null;
-    const parts = [];
+    let raw = '', previous, previousBaseline, line;
+    const parts = [], breaks = [];
     for (const item of ordered) {
+      const baseline = window.PdfSelectionDiff.pdfTextBaseline(item), size = item.height;
       if (previous && !raw.endsWith('\n')) {
-        const lineBreak = Math.abs(window.PdfSelectionDiff.pdfTextBaseline(item) - window.PdfSelectionDiff.pdfTextBaseline(previous)) > Math.max(item.height, previous.height) * (misaligned ? 0.75 : 0.5);
+        const lineBreak = Math.abs(baseline - previousBaseline) > Math.max(size, previous.height) * (misaligned ? 0.75 : 0.5);
         if (lineBreak) raw += '\n';
-        else if (item.transform[4] - previous.transform[4] - previous.width > Math.max(item.height, previous.height) * 0.08) raw += ' ';
+        else if (item.transform[4] - previous.transform[4] - previous.width > Math.max(size, previous.height) * 0.08) raw += ' ';
+      }
+      if (size && /\p{L}{2}/u.test(item.str)) {
+        const gap = line && baseline - line.baseline, height = Math.max(line?.size ?? 0, size);
+        if (gap < -height * 1.8) {
+          const start = raw.lastIndexOf('\n') + 1;
+          if (start > (breaks.at(-1) ?? 0)) breaks.push(start);
+        }
+        if (!line || Math.abs(gap) > height * .6 || size > line.size) line = { baseline, size };
       }
       parts.push({ start: raw.length, end: raw.length + item.str.length, item });
       raw += item.str + (item.hasEOL ? '\n' : '');
-      previous = item;
+      previous = item; previousBaseline = baseline;
     }
-    return Object.assign(content, { raw, parts });
+    return Object.assign(content, { raw, parts, breaks });
   }).catch(error => {
     delete data.text;
     throw error;
@@ -408,7 +417,7 @@ class PdfLocator {
           const start = index.raw.length;
           const parts = content.parts.map(part => ({ ...part, start: start + part.start, end: start + part.end }));
           index.raw += content.raw;
-          index.pages.push({ number, start, end: index.raw.length, parts });
+          index.pages.push({ number, start, end: index.raw.length, parts, breaks: content.breaks.map(at => start + at) });
           index.raw += "\n";
           if (!/[-\u2010\u2011]\s*$/.test(index.raw.slice(mappedStart))) {
             window.PdfSelectionDiff.normalized(index.raw.slice(mappedStart), mapped, mappedStart); mappedStart = index.raw.length;

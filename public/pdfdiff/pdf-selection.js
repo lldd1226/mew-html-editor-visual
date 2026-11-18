@@ -326,7 +326,10 @@
         if (viewer !== instance) return;
         if (event === "textlayerrendered") clearLayer(instance.getPageView(data?.pageNumber - 1)?.div);
         if (["pagesinit", "scalechanging", "rotationchanging"].includes(event)) { clearLayers(); review.highlights.clearHighlights(); }
-        queueWarm(data?.pageNumber);
+        if (event === "textlayerrendered" && performance.now() - lastEdit >= editIdleDelay) {
+          warm([data.pageNumber]);
+        }
+        else queueWarm(data?.pageNumber);
         if (contexts.length || reviewPointer || defaultPointer) schedule();
       };
       instance.eventBus.on(event, update);
@@ -549,7 +552,7 @@
       else if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     if (!fontAt.text || fontAt.items.size !== fontAt.text.parts.length) return null;
-    const { raw } = fontAt.text;
+    const { raw, breaks } = fontAt.text;
     const spans = new Map([...fontAt.items].map(([span, item]) => [item, span]));
     // The DOM supplies nodes and fonts; PDF text owns ordering, spaces and offsets.
     for (const part of fontAt.text.parts) {
@@ -568,7 +571,7 @@
       if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     observer.observe(layer, { subtree: true, childList: true, characterData: true, attributes: true });
-    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, observer, pdf, width: div.clientWidth, height: div.clientHeight });
+    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, breaks, observer, pdf, width: div.clientWidth, height: div.clientHeight });
     layers.set(div, index);
     return index;
   }
@@ -578,15 +581,24 @@
     const visible = review.locator.environment.getVisiblePages?.() || [], pageIndexes = visible.map(page => page.index);
     for (const source of new Set(entries.map(entry => entry.index).filter(Boolean)))
       source.getDifferences(pageIndexes);
+    const hasLayoutBreaks = documentIndex?.pages?.some(page => page.breaks?.length);
     entries = entries.flatMap(entry => {
-      if (!visibleOnly && !entry.marked) return [entry];
-      const connections = entry.index?.livePairs.filter(connection => pageIndexes.includes(connection.target) || connection.target === documentIndex);
+      const documentRanges = hasLayoutBreaks ? entry.index?.targetConnections(documentIndex)
+        .filter(range => range.start < entry.end && range.end > entry.start).sort((a, b) => a.start - b.start) : undefined;
+      if (!visibleOnly && !entry.marked && !documentRanges?.some((range, i) => {
+        const previous = documentRanges[i - 1];
+        return previous && (previous.targetStart > range.targetStart
+          || /\S/u.test(documentIndex.raw.slice(previous.targetEnd, range.targetStart)));
+      })) return [entry];
+      const connections = documentRanges?.length ? documentRanges
+        : entry.index?.livePairs.filter(connection => pageIndexes.includes(connection.target) || connection.target === documentIndex);
       if (!connections?.length || connections.some(range => range.start <= entry.start && range.end >= entry.end)) return [entry];
       const ranges = [...connections,
         ...entry.index.prepared.differences.items
           .filter(item => item.missing).map(item => ({ start: item.sourceStart, end: item.sourceEnd }))]
         .map(range => [Math.max(entry.start, range.start), Math.min(entry.end, range.end)]).filter(([start, end]) => end > start);
-      return ranges.length ? ranges.map(([start, end]) => entry.index.entry(start, end, entry.marked)) : [entry];
+      return ranges.length ? ranges.sort(([a], [b]) => a - b)
+        .map(([start, end]) => entry.index.entry(start, end, entry.marked)) : [entry];
     });
     const locations = entries.map(entry => {
       const absent = review.locator.textEnabled && entry.index
@@ -613,18 +625,25 @@
       }
       let index = documentIndex, hit = null, number;
       for (const page of visible) {
-        hit = page.index && entry.index?.range(page.index, entry.start, entry.end, false, undefined, true);
-        if (hit && window.PdfSelectionDiff.significantText(entry.text)
-          !== window.PdfSelectionDiff.significantText(page.index.raw.slice(hit.start, hit.end)))
-          hit = page.index.search(entry, page.index.connections.get(entry.index)?.scope) || hit;
-        if (!hit) continue;
+        let local = page.index && entry.index?.range(page.index, entry.start, entry.end, false, undefined, true);
+        if (local && window.PdfSelectionDiff.significantText(entry.text)
+          !== window.PdfSelectionDiff.significantText(page.index.raw.slice(local.start, local.end)))
+          local = page.index.search(entry, page.index.connections.get(entry.index)?.scope) || local;
+        if (!local || hit && local.approximate) continue;
         ({ index, number } = page);
-        break;
+        hit = local;
+        if (!hit.approximate) break;
       }
-      if (!hit && index) hit = entry.index
-        ? visibleOnly ? entry.index.range(index, entry.start, entry.end, false, undefined, true)
-          : entry.index.locate(index, entry, false, index.connections.get(entry.index)?.scope, true)
-        : !visibleOnly && index.search(entry);
+      if (documentIndex && (!hit || hit.approximate)) {
+        // A page-local OCR difference can be an exact match on another page.
+        const mapped = !entry.index ? !visibleOnly && documentIndex.search(entry)
+          : hit || visibleOnly ? entry.index.range(documentIndex, entry.start, entry.end, false, undefined, true)
+            : entry.index.locate(documentIndex, entry, false, documentIndex.connections.get(entry.index)?.scope, true);
+        if (mapped && (!hit || !mapped.approximate)) {
+          index = documentIndex;
+          hit = mapped;
+        }
+      }
       if (!hit) return { entry, targets: [], queries: entry.index ? [] : [entry.text] };
       const connection = hit.connection;
       const counterpart = index.raw.slice(hit.start, hit.end);
@@ -644,11 +663,11 @@
           start: sourceRange?.start ?? entry.start, end: sourceRange?.end ?? entry.end });
         return target;
       });
-      return { entry, targets, notice: entry.marked && difference && {
+      return { entry, targets, approximate: hit.approximate, notice: entry.marked && difference && {
         ...difference, source: entry.index && { index: entry.index, start: entry.start, end: entry.end } } };
     });
     // Reader searches stay within the current file's corresponding PDF pages.
-    if (visibleOnly || documentIndex || locations.every(location => location.targets.length)) return locations;
+    if (visibleOnly || documentIndex || locations.every(location => location.targets.length && !location.approximate)) return locations;
     return review.locator.indexDocument(pdf, scope).then(index => index ? findLocations(pdf, entries) : locations);
   }
 
