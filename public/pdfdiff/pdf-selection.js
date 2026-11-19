@@ -575,100 +575,6 @@
     layers.set(div, index);
     return index;
   }
-  function findLocations(pdf, entries, visibleOnly = false) {
-    const scope = window.ReaderUI?.getPdfSourcePages?.();
-    const documentIndex = review.locator.getDocumentIndex(pdf, scope);
-    const visible = review.locator.environment.getVisiblePages?.() || [], pageIndexes = visible.map(page => page.index);
-    for (const source of new Set(entries.map(entry => entry.index).filter(Boolean)))
-      source.getDifferences(pageIndexes);
-    const hasLayoutBreaks = documentIndex?.pages?.some(page => page.breaks?.length);
-    entries = entries.flatMap(entry => {
-      const documentRanges = hasLayoutBreaks ? entry.index?.targetConnections(documentIndex)
-        .filter(range => range.start < entry.end && range.end > entry.start).sort((a, b) => a.start - b.start) : undefined;
-      if (!visibleOnly && !entry.marked && !documentRanges?.some((range, i) => {
-        const previous = documentRanges[i - 1];
-        return previous && (previous.targetStart > range.targetStart
-          || /\S/u.test(documentIndex.raw.slice(previous.targetEnd, range.targetStart)));
-      })) return [entry];
-      const connections = documentRanges?.length ? documentRanges
-        : entry.index?.livePairs.filter(connection => pageIndexes.includes(connection.target) || connection.target === documentIndex);
-      if (!connections?.length || connections.some(range => range.start <= entry.start && range.end >= entry.end)) return [entry];
-      const ranges = [...connections,
-        ...entry.index.prepared.differences.items
-          .filter(item => item.missing).map(item => ({ start: item.sourceStart, end: item.sourceEnd }))]
-        .map(range => [Math.max(entry.start, range.start), Math.min(entry.end, range.end)]).filter(([start, end]) => end > start);
-      return ranges.length ? ranges.sort(([a], [b]) => a - b)
-        .map(([start, end]) => entry.index.entry(start, end, entry.marked)) : [entry];
-    });
-    const locations = entries.map(entry => {
-      const absent = review.locator.textEnabled && entry.index
-        && entry.index.prepared.differences.items
-        .find(item => item.missing && (entry.start === entry.end ? entry.marked && entry.start >= item.sourceStart && entry.start <= item.sourceEnd
-          : entry.start < item.sourceEnd && entry.end > item.sourceStart));
-      if (absent) {
-        const source = { index: entry.index, start: entry.start < entry.end ? Math.max(entry.start, absent.sourceStart) : absent.sourceStart,
-          end: entry.start < entry.end ? Math.min(entry.end, absent.sourceEnd) : absent.sourceEnd };
-        const difference = { html: entry.index.raw.slice(source.start, source.end), pdf: '', missing: absent.missing };
-        const mapped = documentIndex && entry.index.missingRange(documentIndex, absent.sourceStart, absent.sourceEnd);
-        const targets = mapped ? documentIndex.pages.flatMap(page => {
-          if (mapped.start < page.start || mapped.end > page.end || mapped.endBias && mapped.start === page.start) return [];
-          const range = { ...mapped, start: mapped.start - page.start, end: mapped.end - page.start };
-          return [{ pageNumber: page.number, range,
-            item: page.parts.find(part => part.end >= mapped.start)?.item,
-            start: source.start, end: source.end, marked: true, text: documentIndex.raw.slice(mapped.start, mapped.end), source, difference }];
-        }) : visible.flatMap(({ number, index }) => {
-          const range = index?.raw.trim() && entry.index.missingRange(index, absent.sourceStart, absent.sourceEnd);
-          return range ? [{ pageNumber: number, range,
-            start: source.start, end: source.end, marked: true, text: '', source, difference }] : [];
-        });
-        return { entry, targets, queries: [], notice: { ...difference, source } };
-      }
-      let index = documentIndex, hit = null, number;
-      for (const page of visible) {
-        const local = page.index && entry.index?.locate(page.index, entry, false,
-          page.index.connections.get(entry.index)?.scope, true, { visiblePage: true });
-        if (!local || hit && local.approximate) continue;
-        ({ index, number } = page);
-        hit = local;
-        if (!hit.approximate) break;
-      }
-      if (documentIndex && (!hit || hit.approximate)) {
-        // A page-local OCR difference can be an exact match on another page.
-        const mapped = !entry.index ? !visibleOnly && documentIndex.search(entry)
-          : hit || visibleOnly ? entry.index.range(documentIndex, entry.start, entry.end, false, undefined, true)
-            : entry.index.locate(documentIndex, entry, false, documentIndex.connections.get(entry.index)?.scope, true);
-        if (mapped && (!hit || !mapped.approximate)) {
-          index = documentIndex;
-          hit = mapped;
-        }
-      }
-      if (!hit) return { entry, targets: [], queries: entry.index ? [] : [entry.text] };
-      const connection = hit.connection;
-      const counterpart = index.raw.slice(hit.start, hit.end);
-      const difference = entry.difference || (hit.approximate || entry.text !== counterpart
-        ? { html: entry.text, pdf: counterpart } : null);
-      const pages = index.pages || [{ number, start: 0, end: index.raw.length, parts: index.parts }];
-      const targets = pages.filter(page => hit.start === hit.end ? hit.start >= page.start && hit.start <= page.end
-        : hit.start < page.end && hit.end > page.start).map(page => {
-        const start = Math.max(hit.start, page.start), end = Math.min(hit.end, page.end);
-        const target = { pageNumber: page.number, item: page.parts.find(part => part.end > start)?.item,
-          difference, layer: index.layer, range: index.layer && { start, end },
-          marked: entry.marked, text: index.raw.slice(start, end), before: index.raw.slice(Math.max(page.start, start - 160), start),
-          after: index.raw.slice(end, Math.min(page.end, end + 160)) };
-        if (target.difference && entry.index) target.source = { index: entry.index, start: entry.start, end: entry.end };
-        const sourceRange = entry.marked || entry.start === entry.end ? entry : entry.index?.range(index, start, end, true, connection);
-        if (sourceRange || hit.start === hit.end) Object.assign(target, { index: entry.index,
-          start: sourceRange?.start ?? entry.start, end: sourceRange?.end ?? entry.end });
-        return target;
-      });
-      return { entry, targets, approximate: hit.approximate, notice: entry.marked && difference && {
-        ...difference, source: entry.index && { index: entry.index, start: entry.start, end: entry.end } } };
-    });
-    // Reader searches stay within the current file's corresponding PDF pages.
-    if (visibleOnly || documentIndex || locations.every(location => location.targets.length && !location.approximate)) return locations;
-    return review.locator.indexDocument(pdf, scope).then(index => index ? findLocations(pdf, entries) : locations);
-  }
-
   function nativeBoxes(div, queries, targets = []) {
     const index = layerIndex(div);
     if (!index) return { boxes: [], count: 0, pending: true };
@@ -692,7 +598,7 @@
     const pointer = reviewPointer || defaultPointer;
     if (!pointer || contexts.length) { review.highlights.clearHighlights(true); return; }
     if (stopped || !currentPointer(pointer)) { api.clearReviewPointer(pointer.editor); return; }
-    const found = findLocations(pointer.pdf, pointer.entries, !reviewPointer), locations = Array.isArray(found) ? found : await found;
+    const found = review.locator.findLocations(pointer.pdf, pointer.entries, !reviewPointer), locations = Array.isArray(found) ? found : await found;
     if (contexts.length || (reviewPointer || defaultPointer) !== pointer) return;
     if (!currentPointer(pointer)) { api.clearReviewPointer(pointer.editor); return; }
     const visible = new Set(), targets = locations.flatMap(location => location.targets);
@@ -741,7 +647,7 @@
     if (!locationSearch || locationSearch.pdf !== pdf) {
       report("searching", { error: null });
       const entries = contexts.slice(), marked = entries.every(entry => entry.marked);
-      const found = findLocations(pdf, entries, marked);
+      const found = review.locator.findLocations(pdf, entries, marked);
       const search = locationSearch = { pdf, locations: Array.isArray(found)
         && (!marked || found.some(location => location.targets.length)) ? found : null };
       const complete = locations => {
@@ -752,7 +658,7 @@
       // A review group can lose its visible-page mapping for one frame after a
       // replacement; fall back to the whole document instead of marking nothing.
       if (!search.locations) Promise.resolve(found).then(locations => marked
-        && !locations.some(location => location.targets.length) ? findLocations(pdf, entries, false) : locations)
+        && !locations.some(location => location.targets.length) ? review.locator.findLocations(pdf, entries, false) : locations)
         .then(complete, error => {
           console.warn("[PDF selection highlight] Context search unavailable:", error);
           complete(entries.map(entry => ({ entry, targets: [] })));

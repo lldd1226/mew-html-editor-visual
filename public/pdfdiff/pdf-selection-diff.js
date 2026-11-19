@@ -1,3 +1,5 @@
+const forwardRangeKeys = ['start', 'end', 'targetStart', 'targetEnd'];
+const reverseRangeKeys = ['targetStart', 'targetEnd', 'start', 'end'];
 // Text comparison and normalization; independent of document and review state.
 let diffComputer = null;
 const fontKeys = ['italic', 'bold'];
@@ -13,8 +15,7 @@ class diffIndex {
     this.targetStart = targetStart; this.targetEnd = targetStart + pdf.length;
   }
   get inconsistent() {
-    return this.editorDiff ? !!(this.editorDiff.reviewRanges?.length || this.fontItems?.length)
-      : this.changed && significantText(this.html) !== significantText(this.pdf);
+    return this.changed && significantText(this.html) !== significantText(this.pdf);
   }
   get sourceEdge() { return this.start + this.html.trimEnd().length; }
   get targetEdge() { return this.targetStart + this.pdf.trimEnd().length; }
@@ -22,23 +23,45 @@ class diffIndex {
     this.html += html; this.pdf += pdf;
     this.end = end; this.targetEnd = targetEnd;
   }
-  extend(end, targetEnd) {
-    this.append(this.index.raw.slice(this.end, end), this.target.raw.slice(this.targetEnd, targetEnd), end, targetEnd);
-    this.changed = this.html !== this.pdf;
-    return this;
+  appendPart(html, pdf, changed) {
+    const last = this.parts.at(-1), previous = this.parts.at(-2);
+    const blank = (html, pdf) => (html || pdf) && !html.trim() && !pdf.trim();
+    const lettered = /[\p{L}\p{N}]/u;
+    const separate = changed && last?.changed && (blank(last.html, last.pdf) && lettered.test(html + pdf)
+      || blank(html, pdf) && lettered.test(last.html + last.pdf));
+    if (changed && !pdf && last?.changed === false && previous?.changed && !previous.pdf && /^[\p{L}\p{N}]+$/u.test(last.html) && html.endsWith(last.html)) {
+      previous.append(last.html + html.slice(0, -last.html.length), '');
+      last.start += html.length; last.end += html.length;
+    } else if (last?.changed === changed && !separate) last.append(html, pdf);
+    else if (html || pdf) this.parts.push(new diffIndex(html, pdf, last?.end, last?.targetEnd, changed));
   }
   static between(index, start, end, target, targetStart, targetEnd, previous) {
-    const value = new diffIndex('', '', start, targetStart, false, previous);
+    const value = new diffIndex(index.raw.slice(start, end), target.raw.slice(targetStart, targetEnd), start, targetStart, undefined, previous);
+    value.end = end; value.targetEnd = targetEnd;
     Object.defineProperties(value, { index: { value: index }, target: { value: target } });
-    return value.extend(end, targetEnd);
+    return value;
   }
   copy(index, delta, reverse = false) {
-    const copy = reverse
+    return reverse
       ? diffIndex.between(this.index, this.start, this.end, index, this.targetStart + delta, this.targetEnd + delta, this)
       : diffIndex.between(index, this.start + delta, this.end + delta, this.target, this.targetStart, this.targetEnd, this);
-    copy.gap = undefined;
-    return copy;
   }
+}
+
+function mapDiffRange(diff, a, b, reverse = false, marked = false) {
+  const ranges = diff.parts, [begin, stop, mappedBegin, mappedEnd] = reverse ? reverseRangeKeys : forwardRangeKeys;
+  let low = lowerBound(ranges, a, span => span[stop]), high = lowerBound(ranges, b + 1, span => span[begin]) - 1;
+  const touches = span => {
+    const left = span[begin], right = span[stop];
+    if (a === b) return span.changed && (left === right || marked && !(reverse ? span.pdf : span.html).trim());
+    return left === right && significantText(reverse ? span.html : span.pdf) || (right > a && left < b);
+  };
+  while (low <= high && !touches(ranges[low])) low++;
+  while (low <= high && !touches(ranges[high])) high--;
+  if (low > high) return null;
+  const left = ranges[low], right = ranges[high];
+  return { start: left[mappedBegin] + (left.changed ? 0 : Math.max(0, a - left[begin])),
+    end: right.changed ? right[mappedEnd] : right[mappedBegin] + Math.min(b, right[stop]) - right[begin] };
 }
 
 function textDiff(left, right, details = false, limit = Infinity, condense = false, update) {
@@ -68,8 +91,11 @@ function textDiff(left, right, details = false, limit = Infinity, condense = fal
       return range => [starts[range.startLineNumber - 1] + range.startColumn - 1,
         starts[range.endLineNumber - 1] + range.endColumn - 1];
     };
-    const offsetA = offsets(left), offsetB = offsets(right), parts = [];
-    let a = 0, b = 0, distance = 0;
+    const offsetA = offsets(left), offsetB = offsets(right);
+    const diff = details ? new diffIndex(left, right) : {};
+    diff.distance = 0;
+    diff.parts = details ? [] : undefined;
+    let a = 0, b = 0;
     for (const change of alignment.changes) {
       if (!change.innerChanges?.length) throw new Error("Missing Monaco character ranges");
       for (const { originalRange: x, modifiedRange: y } of change.innerChanges) {
@@ -80,20 +106,16 @@ function textDiff(left, right, details = false, limit = Infinity, condense = fal
         const html = left.slice(startA, endA), pdf = right.slice(startB, endB);
         // Refine each hunk even when the whole passage exceeds the edit budget.
         const refined = details ? localTextDiff(html, pdf, true, 128) : null;
-        distance += refined?.distance <= 128 ? refined.distance : Math.max([...html].length, [...pdf].length);
+        diff.distance += refined?.distance <= 128 ? refined.distance : Math.max([...html].length, [...pdf].length);
         if (details) {
-          appendPart(parts, left.slice(a, startA), right.slice(b, startB), false);
-          for (const part of refined.parts) appendPart(parts, part.html, part.pdf, part.changed);
+          diff.appendPart(left.slice(a, startA), right.slice(b, startB), false);
+          for (const part of refined.parts) diff.appendPart(part.html, part.pdf, part.changed);
         }
         a = endA; b = endB;
       }
     }
     if (left.slice(a) !== right.slice(b)) throw new Error("Incomplete Monaco ranges");
-    if (details) appendPart(parts, left.slice(a), right.slice(b), false);
-    if (!details) return { distance, parts: undefined };
-    const diff = new diffIndex(left, right);
-    diff.distance = distance;
-    diff.parts = parts;
+    if (details) diff.appendPart(left.slice(a), right.slice(b), false);
     return diff;
   } catch { /* Retry Monaco on the next comparison. */ }
   return fallback && limit >= 128 ? fallback : localTextDiff(left, right, details, limit);
@@ -139,6 +161,9 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
   const failed = distance > bound || previous[n - m + distance] !== n;
   if (failed) distance = bound + 1;
   if (!details) return { distance };
+  const diff = new diffIndex(typeof source === 'string' ? source : originalA.join(''), typeof target === 'string' ? target : originalB.join(''));
+  diff.parts = [];
+  diff.distance = distance;
   const reversed = [];
   let x = n, k = n - m;
   for (let score = failed ? 0 : distance; score > 0; score--) {
@@ -149,13 +174,14 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     reversed.push({ html: move === 2 ? '' : a[previousX], pdf: move === 1 ? '' : b[previousY], changed: true });
     x = previousX; k = previousK;
   }
-  const diff = new diffIndex(typeof source === 'string' ? source : originalA.join(''), typeof target === 'string' ? target : originalB.join(''));
-  const parts = diff.parts = failed ? [new diffIndex(diff.html, diff.pdf, 0, 0, true)] : [];
-  if (!failed) appendPart(parts, originalA.slice(0, start).join(''), originalB.slice(0, start).join(''), false);
-  for (const part of reversed.reverse()) appendPart(parts, part.html, part.pdf, part.changed);
-  if (!failed) appendPart(parts, originalA.slice(endA).join(''), originalB.slice(endB).join(''), false);
-  diff.distance = distance;
+  if (failed) diff.parts.push(new diffIndex(diff.html, diff.pdf, 0, 0, true));
+  else {
+    diff.appendPart(originalA.slice(0, start).join(''), originalB.slice(0, start).join(''), false);
+    for (const part of reversed.reverse()) diff.appendPart(part.html, part.pdf, part.changed);
+    diff.appendPart(originalA.slice(endA).join(''), originalB.slice(endB).join(''), false);
+  }
   if (!wordwise) return diff;
+  const parts = diff.parts;
   diff.distance = 0; diff.parts = []; diff.hunks = new Map();
   let html = '', pdf = '';
   for (let i = 0; i <= parts.length; i++) {
@@ -165,7 +191,7 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     if (span && !/[\p{L}\p{N}]/u.test((span.changed ? parts[i + 1] : span)?.html || '')) continue;
     const a = span ? html.trimEnd().length : html.length, b = span ? pdf.trimEnd().length : pdf.length;
     const leftText = html.slice(0, a), rightText = pdf.slice(0, b);
-    if (leftText === rightText) appendPart(diff.parts, leftText, rightText, false);
+    if (leftText === rightText) diff.appendPart(leftText, rightText, false);
     else {
       const last = diff.parts.at(-1), start = last?.end ?? 0, targetStart = last?.targetEnd ?? 0;
       const outside = update && (start + a <= update.start || start >= update.newEnd);
@@ -173,13 +199,13 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
       const result = old && old.html === leftText && old.pdf === rightText ? old : localTextDiff(leftText, rightText, true, 128);
       diff.hunks.set(targetStart, result);
       diff.distance += result.distance;
-      for (const part of result.parts) appendPart(diff.parts, part.html, part.pdf, part.changed);
+      for (const part of result.parts) diff.appendPart(part.html, part.pdf, part.changed);
     }
     html = html.slice(a); pdf = pdf.slice(b);
     if (span && !span.changed) {
       let end = 0;
       while (end < html.length && end < pdf.length && html[end] === pdf[end]) end++;
-      appendPart(diff.parts, html.slice(0, end), pdf.slice(0, end), false);
+      diff.appendPart(html.slice(0, end), pdf.slice(0, end), false);
       html = html.slice(end); pdf = pdf.slice(end);
     }
   }
@@ -190,18 +216,6 @@ function changedRange(before, after, equal = (a, b) => a === b) {
   while (start < oldEnd && start < newEnd && equal(before[start], after[start])) start++;
   while (oldEnd > start && newEnd > start && equal(before[oldEnd - 1], after[newEnd - 1])) { oldEnd--; newEnd--; }
   return { start, oldEnd, newEnd };
-}
-function appendPart(parts, html, pdf, changed) {
-  const last = parts.at(-1), previous = parts.at(-2);
-  const blank = (html, pdf) => (html || pdf) && !html.trim() && !pdf.trim();
-  const lettered = /[\p{L}\p{N}]/u;
-  const separate = changed && last?.changed && (blank(last.html, last.pdf) && lettered.test(html + pdf)
-    || blank(html, pdf) && lettered.test(last.html + last.pdf));
-  if (changed && !pdf && last?.changed === false && previous?.changed && !previous.pdf && /^[\p{L}\p{N}]+$/u.test(last.html) && html.endsWith(last.html)) {
-    previous.append(last.html + html.slice(0, -last.html.length), '');
-    last.start += html.length; last.end += html.length;
-  } else if (last?.changed === changed && !separate) last.append(html, pdf);
-  else if (html || pdf) parts.push(new diffIndex(html, pdf, last?.end, last?.targetEnd, changed));
 }
 function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, foldCase = true) {
   const units = [], { starts, ends } = result;
@@ -265,9 +279,6 @@ function extendPageRange(from, to, a, x, step, exact = false, word = /^[\p{L}\p{
     && !/[\p{L}\p{N}\p{Pd}]/u.test(to[xx + offset] || '')) { a = aa; x = xx; }
   return extendPageRange(from, to, a, x, step, true);
 }
-const lineStart = (raw, at) => raw.lastIndexOf('\n', at - 1) + 1;
-const letters = text => text.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
-
 function closestEdge(fragment, points, textAt, limit) {
   let closest;
   for (const at of points) {
@@ -279,121 +290,48 @@ function closestEdge(fragment, points, textAt, limit) {
   return closest;
 }
 
-function extendAnchorRange(index, page, range, blocks) {
-  const source = index.normalized, target = page.normalized;
-  const begin = range.begin ?? 0, stop = range.stop ?? target.text.length;
-  const passage = blocks ? target.text.slice(begin, stop) : target.text;
-  let [a, x] = extendPageRange(passage, source.text, range.a - begin, range.x, -1, false, blocks ? null : undefined);
-  a += begin;
-  const aa = Math.max(begin, lowerBound(target.starts, lineStart(page.raw, target.starts[a])));
-  const xx = lowerBound(source.starts, lineStart(index.raw, source.starts[x]));
-  if (a > aa && x > xx && a - aa <= 32 && x - xx <= 32
-    && /[\p{L}\p{N}]/u.test(source.text.slice(xx, x))
-    && (!/\p{L}/u.test(target.text.slice(aa, a)) || /\p{L}/u.test(source.text.slice(xx, x)))
-    && !/[\r\n]/.test(page.raw.slice(target.starts[a], target.ends[a]) + index.raw.slice(source.starts[x], source.ends[x]))) [a, x] = [aa, xx];
-  let [b, y] = extendPageRange(passage, source.text, range.b - begin, range.y, 1, false, blocks ? null : undefined);
-  if (!blocks && page.sourcePages?.length > 1 && /\p{L}/u.test(target.text[b] || '') && /\p{L}/u.test(source.text[y] || '')) {
-    const pdfLine = lineStart(page.raw, target.starts[b]), htmlLine = lineStart(index.raw, source.starts[y]);
-    // Crossing into the next line requires matching words beyond the break.
-    if (pdfLine > target.starts[range.b - 1] && htmlLine > source.starts[range.y - 1]
-      && !/\p{L}{2}/u.test(page.raw.slice(pdfLine, target.ends[b - 1]) + ' ' + index.raw.slice(htmlLine, source.ends[y - 1]))) {
-      b = lowerBound(target.starts, pdfLine - 1); y = lowerBound(source.starts, htmlLine - 1);
-    }
-  }
-  let start = source.starts[x], end = source.ends[y - 1], targetStart = target.starts[a], targetEnd = target.ends[begin + b - 1];
-  if (blocks) {
-    // Use the confirmed passage as context for short unmatched line edges.
-    const from = Math.max(blocks[range.block], lineStart(page.raw, targetStart));
-    const lead = significantText(page.raw.slice(from, targetStart));
-    if (lead && lead.length <= 32) {
-      const begin = Math.max(0, x - lead.length - 8);
-      const edges = Array.from({ length: x - begin }, (_, i) => begin + i)
-        .filter(at => Math.abs(x - at - lead.length) <= 4 || source.text[at] === ' ');
-      const at = closestEdge(lead, edges, at => significantText(source.text.slice(at, x)), Math.max(1, Math.floor(lead.length / 4)));
-      if (at !== undefined) { start = source.starts[at]; targetStart = from; }
-    }
-    const nextLine = page.raw.indexOf('\n', targetEnd);
-    const to = nextLine < 0 ? blocks[range.block + 1] : Math.min(nextLine, blocks[range.block + 1]);
-    if (to - targetEnd <= 48) {
-      const tail = letters(page.raw.slice(targetEnd, to)), stop = Math.min(index.raw.length, end + 49);
-      const edges = Array.from(index.raw.slice(end, stop).matchAll(/\s+|$/gu), match => end + match.index)
-        .filter(at => at < stop || at === index.raw.length);
-      const at = closestEdge(tail, edges, at => letters(index.raw.slice(end, at)), Math.floor(tail.length / 4));
-      if (at !== undefined) { end = at; targetEnd = to; }
-    }
-  }
-  return { start, end, targetStart, targetEnd, block: range.block };
-}
-function* anchorRanges(index, page, anchors, size, blocks) {
-  const source = index.normalized.text, target = page.normalized.text;
-  const maxDistance = 32;
-  // A content match can continue within a PDF block. Adjacent blocks may belong to unrelated HTML passages.
-  let previous;
-  for (let i = 0; i < anchors.length; i++) {
-    const anchor = anchors[i], following = anchors[i + 1];
-    if (!blocks && !following) break;
-    let next = following && following.block === anchor.block ? following : anchor, nextIndex = i + 1;
-    if (blocks && next.start - anchor.start - (next.at - anchor.at) > maxDistance) {
-      // A character difference can send an exact anchor to a later copy of the phrase.
-      for (let j = i + 2; j < anchors.length; j++) {
-        const candidate = anchors[j];
-        if (candidate.block !== anchor.block || candidate.at - anchor.at > size * 4) break;
-        if (candidate.start > anchor.start && candidate.start < next.start) {
-          next = candidate;
-          nextIndex = j;
-          break;
+const overlapsDifference = (item, start, end) => item.sourceStart <= end && item.sourceEnd >= start
+  && (item.sourceEnd > start || item.sourceStart === start) && (item.sourceStart < end || item.sourceEnd === end);
+function* matchingChanges(raw, text, notice, selectedStart, accept) {
+  const changes = comparisonIndex(notice).parts.filter(part => part.changed), [change] = changes;
+  if (!change) return;
+  for (const anchor of text) {
+    if (anchor.missing) continue;
+    offsets: for (let offset = anchor.comparison.html.indexOf(change.html); offset >= 0;
+      offset = change.html ? anchor.comparison.html.indexOf(change.html, offset + 1) : -1) {
+      const start = anchor.sourceStart + offset - change.start, end = start + notice.html.length;
+      if (start === selectedStart || start < 0 || raw.slice(start, end) !== notice.html
+        || accept && !accept(anchor)) continue;
+      let matched = 0;
+      const stop = lowerBound(text, end + 1, item => item.sourceStart);
+      for (let at = lowerBound(text, start, item => item.sourceEnd); at < stop; at++) {
+        const { comparison, sourceStart, missing } = text[at];
+        if (!overlapsDifference(text[at], start, end)) continue;
+        if (missing) continue offsets;
+        for (const part of comparisonIndex(comparison).parts) {
+          if (!(comparison.selection === true ? part.changed : part.inconsistent)) continue;
+          const from = sourceStart + part.start, a = Math.max(start, from), b = Math.min(end, sourceStart + part.end);
+          if (a > b) continue;
+          const expected = changes[matched++], left = a - from, right = b - from;
+          if (!expected || expected.start !== a - start || expected.end !== b - start || expected.html !== part.html.slice(left, right)) continue offsets;
+          if (expected.pdf !== (left === 0 && right === part.html.length ? part.pdf
+            : part.html.length === part.pdf.length ? part.pdf.slice(left, right) : null)) continue offsets;
         }
       }
+      if (matched !== changes.length) continue;
+      yield start;
     }
-    const end = next.at + size;
-    const length = Math.min(end, target.length) - anchor.at;
-    if (next !== anchor && next.start <= anchor.start || length > 2048) continue;
-    const cost = (pdfStart, htmlStart, budget) => textDiff(target.slice(pdfStart, end), source.slice(htmlStart, next.end), false, budget).distance;
-    const limit = Math.min(maxDistance, Math.max(12, Math.floor(length * .2)));
-    const adjacent = cost(anchor.at, anchor.start, limit);
-    if (adjacent > limit) continue;
-    i = nextIndex - 1;
-    const overlaps = previous && previous.block === anchor.block && previous.b >= anchor.at && previous.y >= anchor.start;
-    if (overlaps) {
-      const budget = 128 - previous.distance;
-      const suffix = next.end >= previous.y && previous.y >= previous.x
-        ? cost(previous.b, previous.y, budget)
-        : Infinity;
-      const distance = suffix <= budget ? previous.distance + suffix : cost(previous.a, previous.x, 128);
-      if (distance <= 128) {
-        previous.b = end; previous.y = next.end; previous.distance = distance;
-        continue;
-      }
-    }
-    if (previous) yield extendAnchorRange(index, page, previous, blocks);
-    previous = { a: anchor.at, b: end, x: anchor.start, y: next.end,
-      block: anchor.block, begin: anchor.begin, stop: anchor.stop, distance: adjacent };
-  }
-  if (previous) yield extendAnchorRange(index, page, previous, blocks);
-}
-function* recoverWordRanges(left, right) {
-  const words = left.includes('...') || right.includes('...') ? /\S+?\.(?=\.|\s|$)|\S+\s*|\s+/gu : /\S+\s*|\s+/gu;
-  const substantial = /[\p{L}\p{N}]{3}/u;
-  for (const part of localTextDiff(left.match(words) || [], right.match(words) || [], true, 512, undefined, false).parts) {
-    if (!substantial.test(part.html) || part.changed && !textDiff(part.html, part.pdf, true).parts
-      .some(span => !span.changed && substantial.test(span.html))) continue;
-    yield [part.start, part.targetStart, ...extendPageRange(left, right, part.end, part.targetEnd, 1, false, /^[\p{L}\p{N}\p{Pd}.]{2}$/u)];
   }
 }
 function comparisonIndex(value) {
-  let diff = value.comparisonDiff;
-  if (!diff || diff.html !== value.html || diff.pdf !== value.pdf)
-    value.comparisonDiff = diff = textDiff(value.html, value.pdf, true);
-  return diff;
+  if (!value.comparisonDiff || value.comparisonDiff.html !== value.html || value.comparisonDiff.pdf !== value.pdf)
+    value.comparisonDiff = textDiff(value.html, value.pdf, true);
+  return value.comparisonDiff;
 }
 const ready = window.PdfSelectionOptions?.nativeEditor ? Promise.resolve() : import("/monaco/esm/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js")
     .then(({ DefaultLinesDiffComputer }) => diffComputer = new DefaultLinesDiffComputer())
     .catch(() => null);
 
-function documentIndex(documents, pdf, numbers) {
-  const index = documents?.get(pdf)?.get(numbers ? `pages:${numbers.join(',')}` : '');
-  return index?.normalized ? index : undefined;
-}
 function* matchPositions(index, needle, { text }, anchors) {
   if (!anchors || text.length < 65536) {
     for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) yield at;
@@ -496,22 +434,5 @@ function findMatches(index, queries, haystack = index.normalized, {
   if (best) return null;
   return [...found.values()];
 }
-function pdfFontStyle(font, fallback = '', css = {}) {
-  const name = font?.name || fallback;
-  // Tesseract placeholder flags do not describe the recognized text.
-  if (/glyphlessfont/i.test(name)) return { name, italic: null, bold: null,
-    reason: 'GlyphLessFont 占位字体未保留 OCR 粗斜体信息' };
-  const italic = /italic|oblique/i.test(css.fontStyle || '')
-    || (typeof font?.italic === 'boolean' ? font.italic : /italic|oblique|kursiv/i.test(name) ? true : null);
-  const bold = /bold/i.test(css.fontWeight || '') || Number(css.fontWeight) >= 600 || font?.black === true
-    || (typeof font?.bold === 'boolean' ? font.bold : /bold|black|heavy|demi|semibold|fett/i.test(name) ? true : null);
-  return { name, italic, bold };
-}
-
-function pdfTextBaseline(item) {
-  const [a, b, , , x, y] = item.transform; // Compare baselines at the same horizontal origin on tilted scans.
-  return y - (a ? x * b / a : 0);
-}
-
-window.PdfSelectionDiff = { diffIndex, pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, documentIndex, findMatches, ready };
-export { diffIndex, pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, anchorRanges, recoverWordRanges, comparisonIndex, documentIndex, findMatches, ready };
+window.PdfSelectionDiff = { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, closestEdge, overlapsDifference, matchingChanges, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
+export { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, closestEdge, overlapsDifference, matchingChanges, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
