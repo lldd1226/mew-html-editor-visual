@@ -700,9 +700,8 @@
         }
       } else if (!scrolled) {
         scrolled = true;
-        const item = target.item;
-        instance.scrollPageIntoView({ pageNumber: target.pageNumber,
-          destArray: item ? [null, { name: "XYZ" }, item.transform[4], item.transform[5] + item.height, null] : null });
+        // Let the text layer render before applying the bounded anchor scroll.
+        if (target.pageNumber !== instance.currentPageNumber) instance.scrollPageIntoView({ pageNumber: target.pageNumber });
       }
       if (!current()) return;
     }
