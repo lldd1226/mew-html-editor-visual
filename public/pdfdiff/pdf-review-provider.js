@@ -147,31 +147,40 @@ function readPageText(page) {
     const sorted = [...items].sort((a, b) => Math.round((b.y - a.y) / Math.max(a.height, b.height)) || a.x - b.x);
     const misaligned = sorted.some((row, i) => i && row.x < sorted[i - 1].x
       && Math.abs(row.y - sorted[i - 1].y) <= Math.max(row.height, sorted[i - 1].height) * .75);
-    let raw = '', previous, line;
-    const parts = [], breaks = [], passages = columnPassages(misaligned ? items : sorted);
-    for (const passage of passages) for (const [i, row] of passage.entries()) {
-      if (!i && parts.length) {
-        if (!raw.endsWith('\n')) raw += '\n';
-        breaks.push(raw.length);
-        previous = line = undefined;
+    const rows = misaligned ? items : sorted;
+    data.columnText = () => {
+      const passages = columnPassages(rows);
+      return passages.length > 1 ? assemble(passages) : null;
+    };
+    return assemble([rows]);
+
+    function assemble(passages) {
+      let raw = '', previous, line;
+      const parts = [], breaks = [];
+      for (const passage of passages) for (const [i, row] of passage.entries()) {
+        if (!i && parts.length) {
+          if (!raw.endsWith('\n')) raw += '\n';
+          breaks.push(raw.length);
+          previous = line = undefined;
+        }
+        const { item, y, height: size } = row;
+        if (previous && !raw.endsWith('\n')) {
+          const height = Math.max(size, previous.height);
+          if (Math.abs(y - previous.y) > height * (misaligned ? .75 : .5)) raw += '\n';
+          else if (row.x - previous.x - previous.item.width > height * .08) raw += ' ';
+        }
+        if (size && row.word) {
+          const gap = line && y - line.y, height = Math.max(line?.height ?? 0, size);
+          const start = gap < -height * 1.8 ? raw.lastIndexOf('\n') + 1 : 0;
+          if (start > (breaks.at(-1) ?? 0)) breaks.push(start);
+          if (!line || Math.abs(gap) > height * .6 || size > line.height) line = row;
+        }
+        parts.push({ start: raw.length, end: raw.length + item.str.length, item });
+        raw += item.str + (item.hasEOL ? '\n' : '');
+        previous = row;
       }
-      const { item, y, height: size } = row;
-      if (previous && !raw.endsWith('\n')) {
-        const height = Math.max(size, previous.height);
-        if (Math.abs(y - previous.y) > height * (misaligned ? .75 : .5)) raw += '\n';
-        else if (row.x - previous.x - previous.item.width > height * .08) raw += ' ';
-      }
-      if (size && row.word) {
-        const gap = line && y - line.y, height = Math.max(line?.height ?? 0, size);
-        const start = gap < -height * 1.8 ? raw.lastIndexOf('\n') + 1 : 0;
-        if (start > (breaks.at(-1) ?? 0)) breaks.push(start);
-        if (!line || Math.abs(gap) > height * .6 || size > line.height) line = row;
-      }
-      parts.push({ start: raw.length, end: raw.length + item.str.length, item });
-      raw += item.str + (item.hasEOL ? '\n' : '');
-      previous = row;
+      return { ...content, raw, parts, breaks, horizontal: passages.length > 1 };
     }
-    return Object.assign(content, { raw, parts, breaks, horizontal: passages.length > 1 });
   }).catch(error => { delete data.text; throw error; });
 }
 function readPageFonts(page) {
@@ -553,24 +562,50 @@ class PdfLocator {
     }
     return anchors;
   }
-  async indexDocument(pdf, numbers) {
+  async indexDocument(pdf, numbers, source) {
     numbers = numbers ? [...numbers] : undefined;
     const documents = this.documents.get(pdf) || this.documents.set(pdf, new Map()).get(pdf);
     const key = numbers ? `pages:${numbers.join(',')}` : '', task = documents.get(key)?.task;
     if (task) return task;
-    const { PdfConnections, normalized } = window.PdfSelectionDiff;
+    const { PdfConnections, normalized, significantText } = window.PdfSelectionDiff;
+    if (numbers) source ??= this.environment.getSourceIndex?.();
     const index = new PdfConnections(this, { pdf, sourcePages: numbers, raw: '', pages: [], normalized: null });
     documents.set(key, index);
     return index.task = Promise.resolve().then(async () => {
-    let mappedStart = 0, mapped;
+      let mappedStart = 0, mapped;
       for (const number of numbers || Array.from({ length: pdf.numPages }, (_, i) => i + 1)) {
         if (!this.environment.isCurrent(pdf)) return null;
         await this.environment.waitForIdle(pdf);
         if (!this.environment.isCurrent(pdf)) return null;
-        const content = await readPageText(await pdf.getPage(number));
+        const page = await pdf.getPage(number), ordinary = await readPageText(page);
         if (!this.environment.isCurrent(pdf)) return null;
+        const columns = source && pageData(page).columnText();
+        let content = ordinary;
+        if (columns) {
+          const limit = Math.min(significantText(source.raw).length, significantText(ordinary.raw).length);
+          let best = 0;
+          for (const layout of [ordinary, columns]) {
+            if (best >= limit) break;
+            const target = new PdfConnections(source, { ...layout, sourcePages: [number] });
+            source.connect(target);
+            const matched = [];
+            for (const connection of source.targetConnections(target)) {
+              const diff = source.compare(connection, undefined, { textOnly: true });
+              for (const part of diff?.parts || []) if (!part.changed)
+                matched.push([connection.start + part.start, connection.start + part.end]);
+            }
+            let score = 0, edge = 0;
+            for (const [start, end] of matched.sort((a, b) => a[0] - b[0])) {
+              if (end <= edge) continue;
+              score += source.raw.slice(Math.max(edge, start), end).replace(/[\s\-\u00ad\u2010\u2011]/gu, '').length;
+              edge = end;
+            }
+            if (score > best) { best = score; content = layout; }
+          }
+        }
         const start = index.raw.length, end = start + content.raw.length;
         index.pages.push({ number, start, end, horizontal: content.horizontal,
+          columnText: content.horizontal ? content : undefined,
           parts: content.parts.map(part => ({ ...part, start: start + part.start, end: start + part.end })),
           breaks: content.breaks.map(at => start + at) });
         index.raw += content.raw + '\n';
@@ -589,8 +624,11 @@ class PdfLocator {
     }
   }
   getDocumentIndex(pdf, numbers) { return window.PdfSelectionDiff.documentIndex(this.documents, pdf, numbers); }
+  columnText(pdf, number) {
+    return this.getDocumentIndex(pdf, this.environment.getSourcePages?.())?.pages.find(page => page.number === number)?.columnText;
+  }
   async indexFonts(pdf, source, signal, numbers) {
-    const index = await this.indexDocument(pdf, numbers);
+    const index = await this.indexDocument(pdf, numbers, numbers && source);
     if (!index || signal?.aborted) return null;
     source?.connect();
     const ranges = source?.pairs.filter(connection => connection.target === index);

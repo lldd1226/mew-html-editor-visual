@@ -51,11 +51,15 @@
   Object.assign(review.locator.options, options);
   Object.assign(review.locator.environment, {
     document, getPdf: () => viewer?.pdfDocument, getSourcePages: sourcePages,
+    getSourceIndex() {
+      const editor = currentEditor();
+      return editor?.document && review.locator.editorSourceIndex(editor.document);
+    },
     getTargets() {
       const pdf = viewer?.pdfDocument, numbers = sourcePages();
       if (window.ReaderUI?.getSourceEditor && !currentEditor()) return [];
-      return [...layers.values()].filter(page => page.pdf === pdf
-        && (!numbers || numbers.includes(Number(page.layer.closest('.page')?.dataset.pageNumber))));
+      return [...layers.values()].filter(page => page.pdf === pdf && (!numbers || numbers.includes(page.number))
+        && page.columnText === review.locator.columnText(pdf, page.number));
     },
     getVisiblePages: (numbers = sourcePages()) => visiblePages().filter(number => !numbers || numbers.includes(number)).map(number => ({ number, index: layerIndex(viewer.getPageView(number - 1)?.div) })),
     isCurrent: pdf => selectionHighlight && !stopped && viewer?.pdfDocument === pdf,
@@ -538,24 +542,26 @@
   function layerIndex(div) {
     const layer = div?.querySelector(".textLayer");
     if (!layer || !layer.getClientRects().length) return null;
+    const number = Number(div.dataset.pageNumber) || viewer?.currentPageNumber;
+    const pdf = viewer?.pdfDocument, columnText = review.locator.columnText(pdf, number);
     const cached = layers.get(div);
-    if (cached?.layer === layer && cached.pdf === viewer?.pdfDocument && cached.width === div.clientWidth && cached.height === div.clientHeight && !clearLayer(div, cached.observer.takeRecords())) return cached;
+    if (cached?.layer === layer && cached.pdf === pdf && cached.columnText === columnText
+      && cached.width === div.clientWidth && cached.height === div.clientHeight && !clearLayer(div, cached.observer.takeRecords())) return cached;
     clearLayer(div);
     const parts = [];
-    const number = Number(div.dataset.pageNumber) || viewer?.currentPageNumber;
     const view = viewer?.getPageView(number - 1);
-    const pdf = viewer?.pdfDocument;
     const fontAt = review.layerFonts(view, layer, () => {
       if (stopped || !selectionHighlight || viewer?.pdfDocument !== pdf) return;
       clearLayer(div); queueWarm(number);
       if (!document.getSelection()?.isCollapsed) selectFromPdf();
       else if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
-    if (!fontAt.text || fontAt.items.size !== fontAt.text.parts.length) return null;
-    const { raw, breaks, horizontal } = fontAt.text;
+    const text = columnText || fontAt.text;
+    if (!text || fontAt.items.size !== text.parts.length) return null;
+    const { raw, breaks, horizontal } = text;
     const spans = new Map([...fontAt.items].map(([span, item]) => [item, span]));
     // The DOM supplies nodes and fonts; PDF text owns ordering, spaces and offsets.
-    for (const part of fontAt.text.parts) {
+    for (const part of text.parts) {
       const span = spans.get(part.item), font = fontAt(span);
       const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
       let start = part.start, node;
@@ -571,7 +577,7 @@
       if (contexts.length || reviewPointer || defaultPointer) schedule();
     });
     observer.observe(layer, { subtree: true, childList: true, characterData: true, attributes: true });
-    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, breaks, horizontal, observer, pdf, width: div.clientWidth, height: div.clientHeight });
+    const index = new window.PdfSelectionDiff.PdfConnections(review.locator, { layer, raw, parts, breaks, horizontal, observer, pdf, number, columnText, width: div.clientWidth, height: div.clientHeight });
     layers.set(div, index);
     return index;
   }
