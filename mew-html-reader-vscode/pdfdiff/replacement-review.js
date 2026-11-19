@@ -294,7 +294,8 @@ if (typeof module === 'object' && module.exports) {
         marks.set(editor, state);
       }
       if (state.key?.length === key.length && key.every((value, i) => value === state.key[i])) return;
-      state.collection.set(decorations());
+      state.values = decorations();
+      state.collection.set(state.values);
       editor.render?.(true);
       state.key = key;
     }
@@ -308,12 +309,14 @@ if (typeof module === 'object' && module.exports) {
         const mark = collection.getRange(i);
         if (event?.lineRange ? mark?.intersectRanges(event.lineRange) : mark?.containsPosition(position)
           && (mark.isEmpty() || event?.source === 'keyboard' || position.lineNumber !== mark.endLineNumber || position.column !== mark.endColumn
-            || box && event.clientX < box.left + editor.getScrolledVisiblePosition(position)?.left * box.width / node.offsetWidth)) return mark;
+            || box && event.clientX < box.left + editor.getScrolledVisiblePosition(position)?.left * box.width / node.offsetWidth))
+          return { range: mark, item: marks.get(editor)?.values?.[i]?.reviewItem };
         // Missing text beside a space must also be reachable from that space.
         if (!event?.lineRange && mark?.isEmpty() && position.lineNumber === mark.startLineNumber
           && position.column + 1 === mark.startColumn && /^\s$/u.test(editor.getModel().getValueInRange({
             startLineNumber: position.lineNumber, startColumn: position.column,
-            endLineNumber: mark.startLineNumber, endColumn: mark.startColumn }))) return mark;
+            endLineNumber: mark.startLineNumber, endColumn: mark.startColumn })))
+          return { range: mark, item: marks.get(editor)?.values?.[i]?.reviewItem };
       }
       return null;
     }
@@ -346,7 +349,8 @@ if (typeof module === 'object' && module.exports) {
   function message(text) { get('status').textContent = text; get('status').hidden = !text; }
   function current(state = session) {
     const selected = state?.selection, range = selected?.queueRange;
-    return range && state.position >= range[0] && state.position <= range[1] ? selected : state?.items[state.position];
+    const item = state?.items?.[state.position];
+    return range && state.position >= range[0] && state.position <= range[1] && !item?.font ? selected : item;
   }
   function selectedEdits(all = false) {
     return session.content?.[all ? 'allEdits' : 'edits'] || (all ? session.items : session.provider.matchingItems?.(current(), session.context, session.items) || [current()])
@@ -359,12 +363,8 @@ if (typeof module === 'object' && module.exports) {
     const documentModel = editor.document, diff = window.PdfSelectionDiff;
     revisionMarks.updateSource(editor, key, () => [...edits.flatMap(edit => {
       if (edit.options) return [edit];
-      let offset = edit.start;
-      return diff.textDiff(model.getValueInRange(documentModel.rangeAt(edit.start, edit.end)), edit.text, true).parts.flatMap(part => {
-        const start = offset;
-        offset += part.html.length;
-        return part.changed ? [{ start, end: offset, text: part.pdf }] : [];
-      });
+      return diff.textDiff(model.getValueInRange(documentModel.rangeAt(edit.start, edit.end)), edit.text, true).parts
+        .flatMap(part => part.changed ? [{ start: edit.start + part.start, end: edit.start + part.end, text: part.pdf }] : []);
     }).map(edit => ({
       range: documentModel.rangeAt(edit.start, edit.end),
       options: edit.options || { description: 'Revision preview', stickiness: 1, showIfCollapsed: true,
@@ -518,8 +518,8 @@ if (typeof module === 'object' && module.exports) {
     get('save').textContent = session?.manualPending ? '更新中....' : '替换&保存';
     const blocked = !currentVersion || !!session?.applying;
     const range = current()?.queueRange || [session?.position ?? 0, session?.position ?? 0];
-    get('prev').disabled = blocked || range[0] <= 0;
-    get('next').disabled = blocked || range[1] >= session.items.length - 1;
+    get('prev').disabled = blocked || (session?.position ?? 0) <= 0;
+    get('next').disabled = blocked || (session?.position ?? 0) >= session.items.length - 1;
     get('position').textContent = session ? `${range[0] === range[1] ? Math.min(range[0] + 1, session.items.length) : `${range[0] + 1}–${range[1] + 1}`} / ${session.items.length}${session.partial ? '+' : ''}` : '';
   }
   function subscribe(target, event, callback) {
@@ -735,8 +735,7 @@ if (typeof module === 'object' && module.exports) {
   }
   function navigate(direction) {
     if (!valid() || session.applying) return;
-    const range = current()?.queueRange;
-    const next = (range ? range[direction > 0 ? 1 : 0] : session.position) + direction;
+    const next = session.position + direction;
     if (next >= 0 && next < session.items.length) { session.position = next; render(); }
   }
   function queuePlace() {

@@ -15,7 +15,7 @@ function fixture() {
   const disposable = { dispose() {} };
   const range = { contains: () => true, intersection: () => range, union: () => range };
   const document = { uri: 'source.html', version: 1 };
-  const editor = { document, viewColumn: 2, selection: { isEmpty: true, active: {} } };
+  const editor = { document, viewColumn: 2, selection: { ...range, isEmpty: true, active: {} } };
   const panel = {
     active: true,
     reveal() { panel.active = true; calls.push('pdf'); },
