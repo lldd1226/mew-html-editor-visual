@@ -5,17 +5,15 @@ const foldGlyphs = text => text.normalize('NFKC').replace(/ſ/g, 's').replace(/�
   .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"');
 const significantText = text => foldGlyphs(text).replace(/[\s\-\u00ad\u2010\u2011]/g, '');
 // An aligned interval: text, coordinates and discrepancy metadata travel together.
-class ConnectionIndex {
+class diffIndex {
   constructor(html, pdf, start = 0, targetStart = 0, changed = html !== pdf, previous) {
     if (previous) Object.assign(this, previous);
     this.html = html; this.pdf = pdf; this.changed = changed;
     this.start = start; this.end = start + html.length;
     this.targetStart = targetStart; this.targetEnd = targetStart + pdf.length;
   }
-  get significant() { return [significantText(this.html), significantText(this.pdf)]; }
-  get blank() { return [!this.html.trim(), !this.pdf.trim()]; }
   get inconsistent() {
-    return this.editorDiff ? !!(this.editorDiff.reviewRanges?.length || this.editorDiff.fontItems?.length)
+    return this.editorDiff ? !!(this.editorDiff.reviewRanges?.length || this.fontItems?.length)
       : this.changed && significantText(this.html) !== significantText(this.pdf);
   }
   get sourceEdge() { return this.start + this.html.trimEnd().length; }
@@ -30,25 +28,29 @@ class ConnectionIndex {
     return this;
   }
   static between(index, start, end, target, targetStart, targetEnd, previous) {
-    const value = new ConnectionIndex('', '', start, targetStart, false, previous);
+    const value = new diffIndex('', '', start, targetStart, false, previous);
     Object.defineProperties(value, { index: { value: index }, target: { value: target } });
     return value.extend(end, targetEnd);
   }
   copy(index, delta, reverse = false) {
     const copy = reverse
-      ? ConnectionIndex.between(this.index, this.start, this.end, index, this.targetStart + delta, this.targetEnd + delta, this)
-      : ConnectionIndex.between(index, this.start + delta, this.end + delta, this.target, this.targetStart, this.targetEnd, this);
+      ? diffIndex.between(this.index, this.start, this.end, index, this.targetStart + delta, this.targetEnd + delta, this)
+      : diffIndex.between(index, this.start + delta, this.end + delta, this.target, this.targetStart, this.targetEnd, this);
     copy.gap = undefined;
-    if (this.editorDiff) copy.editorDiff = { ...this.editorDiff };
     return copy;
   }
 }
 
 function textDiff(left, right, details = false, limit = Infinity, condense = false, update) {
-  if (left === right) return { distance: 0, parts: details ? (left ? [new ConnectionIndex(left, right, 0, 0, false)] : []) : undefined };
   // A bounded match cannot span more extra characters than its edit limit.
-  if (Number.isFinite(limit) && Math.abs(left.length - right.length) > limit && Math.abs(Array.from(left).length - Array.from(right).length) > limit)
-    return { distance: limit + 1, parts: details ? [new ConnectionIndex(left, right, 0, 0, true)] : undefined };
+  if (left === right || Number.isFinite(limit) && Math.abs(left.length - right.length) > limit && Math.abs(Array.from(left).length - Array.from(right).length) > limit) {
+    const distance = left === right ? 0 : limit + 1;
+    if (!details) return { distance, parts: undefined };
+    const diff = new diffIndex(left, right);
+    diff.distance = distance;
+    diff.parts = left || right ? [new diffIndex(left, right)] : [];
+    return diff;
+  }
   // Connections condense word runs before the same character refinement used by selections.
   if (condense || !diffComputer || !details && Number.isFinite(limit))
     return localTextDiff(left, right, details, condense ? limit : details ? Math.min(limit, 128) : limit, undefined, true, update);
@@ -88,7 +90,11 @@ function textDiff(left, right, details = false, limit = Infinity, condense = fal
     }
     if (left.slice(a) !== right.slice(b)) throw new Error("Incomplete Monaco ranges");
     if (details) appendPart(parts, left.slice(a), right.slice(b), false);
-    return { distance, parts: details ? parts : undefined };
+    if (!details) return { distance, parts: undefined };
+    const diff = new diffIndex(left, right);
+    diff.distance = distance;
+    diff.parts = parts;
+    return diff;
   } catch { /* Retry Monaco on the next comparison. */ }
   return fallback && limit >= 128 ? fallback : localTextDiff(left, right, details, limit);
 }
@@ -96,6 +102,7 @@ const mixedWhitespace = (left, right) => !!left && !!right
   && /\s/u.test(left) !== /\s/u.test(right) && /[\p{L}\p{N}]/u.test(left + right);
 // Detailed unbounded text uses word alignment; bounded/token checks use the edit wavefront.
 function localTextDiff(left, right, details = false, limit = Infinity, equal = (a, b) => a === b, substitutions = true, update) {
+  const source = left, target = right;
   const wordwise = details && typeof left === 'string' && !Number.isFinite(limit);
   if (wordwise) {
     const words = text => text.match(/[\p{L}\p{N}]+(?:[-\u2010\u2011][\p{L}\p{N}]+)*\s*|[^\s]\s*|\s+/gu) || [];
@@ -103,7 +110,7 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     equal = (a, b) => a.trimEnd() === b.trimEnd() || /^[.,\s]+$/u.test(a + b)
       || /^\d+\s*$/u.test(a) && /^\d+\s*$/u.test(b);
   }
-  const originalA = typeof left === 'string' ? [...left] : left, originalB = typeof right === 'string' ? [...right] : right;
+  const originalA = Array.isArray(left) ? left : [...left], originalB = Array.isArray(right) ? right : [...right];
   const { start, oldEnd: endA, newEnd: endB } = changedRange(originalA, originalB, equal);
   const a = originalA.slice(start, endA), b = originalB.slice(start, endB), n = a.length, m = b.length;
   const bound = Math.min(limit, details && typeof left === 'string' ? 128 : Infinity, Math.max(n, m));
@@ -142,12 +149,14 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     reversed.push({ html: move === 2 ? '' : a[previousX], pdf: move === 1 ? '' : b[previousY], changed: true });
     x = previousX; k = previousK;
   }
-  const parts = failed ? [new ConnectionIndex(originalA.join(''), originalB.join(''), 0, 0, true)] : [];
+  const diff = new diffIndex(typeof source === 'string' ? source : originalA.join(''), typeof target === 'string' ? target : originalB.join(''));
+  const parts = diff.parts = failed ? [new diffIndex(diff.html, diff.pdf, 0, 0, true)] : [];
   if (!failed) appendPart(parts, originalA.slice(0, start).join(''), originalB.slice(0, start).join(''), false);
   for (const part of reversed.reverse()) appendPart(parts, part.html, part.pdf, part.changed);
   if (!failed) appendPart(parts, originalA.slice(endA).join(''), originalB.slice(endB).join(''), false);
-  if (!wordwise) return { distance, parts };
-  const diff = { distance: 0, parts: [], hunks: new Map() };
+  diff.distance = distance;
+  if (!wordwise) return diff;
+  diff.distance = 0; diff.parts = []; diff.hunks = new Map();
   let html = '', pdf = '';
   for (let i = 0; i <= parts.length; i++) {
     const span = parts[i];
@@ -161,8 +170,7 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
       const last = diff.parts.at(-1), start = last?.end ?? 0, targetStart = last?.targetEnd ?? 0;
       const outside = update && (start + a <= update.start || start >= update.newEnd);
       const old = outside && update.previous?.hunks?.get(targetStart);
-      const result = old && old.html === leftText && old.pdf === rightText ? old :
-        { html: leftText, pdf: rightText, ...localTextDiff(leftText, rightText, true, 128) };
+      const result = old && old.html === leftText && old.pdf === rightText ? old : localTextDiff(leftText, rightText, true, 128);
       diff.hunks.set(targetStart, result);
       diff.distance += result.distance;
       for (const part of result.parts) appendPart(diff.parts, part.html, part.pdf, part.changed);
@@ -193,7 +201,7 @@ function appendPart(parts, html, pdf, changed) {
     previous.append(last.html + html.slice(0, -last.html.length), '');
     last.start += html.length; last.end += html.length;
   } else if (last?.changed === changed && !separate) last.append(html, pdf);
-  else if (html || pdf) parts.push(new ConnectionIndex(html, pdf, last?.end, last?.targetEnd, changed));
+  else if (html || pdf) parts.push(new diffIndex(html, pdf, last?.end, last?.targetEnd, changed));
 }
 function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, foldCase = true) {
   const units = [], { starts, ends } = result;
@@ -372,11 +380,11 @@ function* recoverWordRanges(left, right) {
     yield [part.start, part.targetStart, ...extendPageRange(left, right, part.end, part.targetEnd, 1, false, /^[\p{L}\p{N}\p{Pd}.]{2}$/u)];
   }
 }
-function comparisonParts(value) {
+function comparisonIndex(value) {
   let diff = value.comparisonDiff;
   if (!diff || diff.html !== value.html || diff.pdf !== value.pdf)
-    value.comparisonDiff = diff = { html: value.html, pdf: value.pdf, rows: [], parts: textDiff(value.html, value.pdf, true).parts };
-  return diff.parts;
+    value.comparisonDiff = diff = textDiff(value.html, value.pdf, true);
+  return diff;
 }
 const ready = window.PdfSelectionOptions?.nativeEditor ? Promise.resolve() : import("/monaco/esm/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js")
     .then(({ DefaultLinesDiffComputer }) => diffComputer = new DefaultLinesDiffComputer())
@@ -505,5 +513,5 @@ function pdfTextBaseline(item) {
   return y - (a ? x * b / a : 0);
 }
 
-window.PdfSelectionDiff = { pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonParts, documentIndex, findMatches, ready };
-export { ConnectionIndex, pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, anchorRanges, recoverWordRanges, comparisonParts, documentIndex, findMatches, ready };
+window.PdfSelectionDiff = { diffIndex, pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, documentIndex, findMatches, ready };
+export { diffIndex, pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, anchorRanges, recoverWordRanges, comparisonIndex, documentIndex, findMatches, ready };
