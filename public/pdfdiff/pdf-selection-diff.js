@@ -4,11 +4,51 @@ const fontKeys = ['italic', 'bold'];
 const foldGlyphs = text => text.normalize('NFKC').replace(/ſ/g, 's').replace(/ß/g, 'ss').replace(/ẞ/g, 'SS')
   .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"');
 const significantText = text => foldGlyphs(text).replace(/[\s\-\u00ad\u2010\u2011]/g, '');
+// An aligned interval: text, coordinates and discrepancy metadata travel together.
+class ConnectionIndex {
+  constructor(html, pdf, start = 0, targetStart = 0, changed = html !== pdf, previous) {
+    if (previous) Object.assign(this, previous);
+    this.html = html; this.pdf = pdf; this.changed = changed;
+    this.start = start; this.end = start + html.length;
+    this.targetStart = targetStart; this.targetEnd = targetStart + pdf.length;
+  }
+  get significant() { return [significantText(this.html), significantText(this.pdf)]; }
+  get blank() { return [!this.html.trim(), !this.pdf.trim()]; }
+  get inconsistent() {
+    return this.editorDiff ? !!(this.editorDiff.reviewRanges?.length || this.editorDiff.fontItems?.length)
+      : this.changed && significantText(this.html) !== significantText(this.pdf);
+  }
+  get sourceEdge() { return this.start + this.html.trimEnd().length; }
+  get targetEdge() { return this.targetStart + this.pdf.trimEnd().length; }
+  append(html, pdf, end = this.end + html.length, targetEnd = this.targetEnd + pdf.length) {
+    this.html += html; this.pdf += pdf;
+    this.end = end; this.targetEnd = targetEnd;
+  }
+  extend(end, targetEnd) {
+    this.append(this.index.raw.slice(this.end, end), this.target.raw.slice(this.targetEnd, targetEnd), end, targetEnd);
+    this.changed = this.html !== this.pdf;
+    return this;
+  }
+  static between(index, start, end, target, targetStart, targetEnd, previous) {
+    const value = new ConnectionIndex('', '', start, targetStart, false, previous);
+    Object.defineProperties(value, { index: { value: index }, target: { value: target } });
+    return value.extend(end, targetEnd);
+  }
+  copy(index, delta, reverse = false) {
+    const copy = reverse
+      ? ConnectionIndex.between(this.index, this.start, this.end, index, this.targetStart + delta, this.targetEnd + delta, this)
+      : ConnectionIndex.between(index, this.start + delta, this.end + delta, this.target, this.targetStart, this.targetEnd, this);
+    copy.gap = undefined;
+    if (this.editorDiff) copy.editorDiff = { ...this.editorDiff };
+    return copy;
+  }
+}
+
 function textDiff(left, right, details = false, limit = Infinity, condense = false, update) {
-  if (left === right) return { distance: 0, parts: details ? (left ? [positionedPart(left, right, false)] : []) : undefined };
+  if (left === right) return { distance: 0, parts: details ? (left ? [new ConnectionIndex(left, right, 0, 0, false)] : []) : undefined };
   // A bounded match cannot span more extra characters than its edit limit.
   if (Number.isFinite(limit) && Math.abs(left.length - right.length) > limit && Math.abs(Array.from(left).length - Array.from(right).length) > limit)
-    return { distance: limit + 1, parts: details ? [positionedPart(left, right, true)] : undefined };
+    return { distance: limit + 1, parts: details ? [new ConnectionIndex(left, right, 0, 0, true)] : undefined };
   // Connections condense word runs before the same character refinement used by selections.
   if (condense || !diffComputer || !details && Number.isFinite(limit))
     return localTextDiff(left, right, details, condense ? limit : details ? Math.min(limit, 128) : limit, undefined, true, update);
@@ -102,7 +142,7 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
     reversed.push({ html: move === 2 ? '' : a[previousX], pdf: move === 1 ? '' : b[previousY], changed: true });
     x = previousX; k = previousK;
   }
-  const parts = failed ? [positionedPart(originalA.join(''), originalB.join(''), true)] : [];
+  const parts = failed ? [new ConnectionIndex(originalA.join(''), originalB.join(''), 0, 0, true)] : [];
   if (!failed) appendPart(parts, originalA.slice(0, start).join(''), originalB.slice(0, start).join(''), false);
   for (const part of reversed.reverse()) appendPart(parts, part.html, part.pdf, part.changed);
   if (!failed) appendPart(parts, originalA.slice(endA).join(''), originalB.slice(endB).join(''), false);
@@ -143,26 +183,19 @@ function changedRange(before, after, equal = (a, b) => a === b) {
   while (oldEnd > start && newEnd > start && equal(before[oldEnd - 1], after[newEnd - 1])) { oldEnd--; newEnd--; }
   return { start, oldEnd, newEnd };
 }
-function positionedPart(html, pdf, changed, start = 0, targetStart = 0) {
-  return { html, pdf, changed, start, end: start + html.length, targetStart, targetEnd: targetStart + pdf.length };
-}
 function appendPart(parts, html, pdf, changed) {
   const last = parts.at(-1), previous = parts.at(-2);
-  const blank = part => part?.changed && (part.html || part.pdf) && !part.html.trim() && !part.pdf.trim();
-  const lettered = part => part?.changed && /[\p{L}\p{N}]/u.test(part.html + part.pdf);
-  const separate = blank(last) && lettered({ changed, html, pdf }) || blank({ changed, html, pdf }) && lettered(last);
+  const blank = (html, pdf) => (html || pdf) && !html.trim() && !pdf.trim();
+  const lettered = /[\p{L}\p{N}]/u;
+  const separate = changed && last?.changed && (blank(last.html, last.pdf) && lettered.test(html + pdf)
+    || blank(html, pdf) && lettered.test(last.html + last.pdf));
   if (changed && !pdf && last?.changed === false && previous?.changed && !previous.pdf && /^[\p{L}\p{N}]+$/u.test(last.html) && html.endsWith(last.html)) {
-    previous.html += last.html + html.slice(0, -last.html.length);
-    previous.end += html.length;
+    previous.append(last.html + html.slice(0, -last.html.length), '');
     last.start += html.length; last.end += html.length;
-  } else if (last?.changed === changed && !separate) {
-    last.html += html; last.end += html.length;
-    last.pdf += pdf; last.targetEnd += pdf.length;
-  } else if (html || pdf) parts.push(positionedPart(html, pdf, changed, last?.end, last?.targetEnd));
+  } else if (last?.changed === changed && !separate) last.append(html, pdf);
+  else if (html || pdf) parts.push(new ConnectionIndex(html, pdf, last?.end, last?.targetEnd, changed));
 }
 function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, foldCase = true) {
-  if (typeof raw !== 'string') return result.start === 0 && result.end === raw.raw.length
-    ? raw.normalized : normalized(raw.raw.slice(result.start, result.end));
   const units = [], { starts, ends } = result;
   let previous = result.text.at(-1);
   const emit = (value, start, end) => {
@@ -320,7 +353,7 @@ function* anchorRanges(index, page, anchors, size, blocks) {
         : Infinity;
       const distance = suffix <= budget ? previous.distance + suffix : cost(previous.a, previous.x, 128);
       if (distance <= 128) {
-        Object.assign(previous, { b: end, y: next.end, distance });
+        previous.b = end; previous.y = next.end; previous.distance = distance;
         continue;
       }
     }
@@ -339,13 +372,11 @@ function* recoverWordRanges(left, right) {
     yield [part.start, part.targetStart, ...extendPageRange(left, right, part.end, part.targetEnd, 1, false, /^[\p{L}\p{N}\p{Pd}.]{2}$/u)];
   }
 }
-function comparisonParts(value, full = value.selection === true) {
+function comparisonParts(value) {
   let diff = value.comparisonDiff;
   if (!diff || diff.html !== value.html || diff.pdf !== value.pdf)
     value.comparisonDiff = diff = { html: value.html, pdf: value.pdf, rows: [], parts: textDiff(value.html, value.pdf, true).parts };
-  return full ? diff.parts : diff.reviewParts ||= diff.parts.map(part => ({
-    ...part, changed: part.changed && significantText(part.html) !== significantText(part.pdf)
-  }));
+  return diff.parts;
 }
 const ready = window.PdfSelectionOptions?.nativeEditor ? Promise.resolve() : import("/monaco/esm/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js")
     .then(({ DefaultLinesDiffComputer }) => diffComputer = new DefaultLinesDiffComputer())
@@ -475,4 +506,4 @@ function pdfTextBaseline(item) {
 }
 
 window.PdfSelectionDiff = { pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonParts, documentIndex, findMatches, ready };
-export { pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, anchorRanges, recoverWordRanges, comparisonParts, documentIndex, findMatches, ready };
+export { ConnectionIndex, pdfTextBaseline, pdfFontStyle, fontKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, anchorRanges, recoverWordRanges, comparisonParts, documentIndex, findMatches, ready };

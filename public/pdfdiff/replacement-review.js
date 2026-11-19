@@ -292,12 +292,8 @@
     const documentModel = editor.document, diff = window.PdfSelectionDiff;
     revisionMarks.updateSource(editor, key, () => [...edits.flatMap(edit => {
       if (edit.options) return [edit];
-      let offset = edit.start;
-      return diff.textDiff(model.getValueInRange(documentModel.rangeAt(edit.start, edit.end)), edit.text, true).parts.flatMap(part => {
-        const start = offset;
-        offset += part.html.length;
-        return part.changed ? [{ start, end: offset, text: part.pdf }] : [];
-      });
+      return diff.textDiff(model.getValueInRange(documentModel.rangeAt(edit.start, edit.end)), edit.text, true).parts
+        .flatMap(part => part.changed ? [{ start: edit.start + part.start, end: edit.start + part.end, text: part.pdf }] : []);
     }).map(edit => ({
       range: documentModel.rangeAt(edit.start, edit.end),
       options: edit.options || { description: 'Revision preview', stickiness: 1, showIfCollapsed: true,

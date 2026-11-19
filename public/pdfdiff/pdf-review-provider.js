@@ -45,12 +45,13 @@ function fontSummary(runs, field) {
 }
 function comparisonRows(value, compact = true, missing = value?.missing, full = value?.selection === true) {
   if (typeof value?.html !== 'string' || typeof value?.pdf !== 'string') return [];
-  let parts = window.PdfSelectionDiff.comparisonParts(value, full);
+  const change = full ? 'changed' : 'inconsistent';
+  let parts = window.PdfSelectionDiff.comparisonParts(value);
   const rows = value.comparisonDiff.rows, key = Number(compact) + 2 * !!missing + 4 * !!full;
   // Expanded rows carry live source indices and offsets; only compact rows are reusable.
   if (compact && rows[key]) return rows[key];
   if (compact) {
-    const first = parts.findIndex(part => part.changed), last = parts.findLastIndex(part => part.changed);
+    const first = parts.findIndex(part => part[change]), last = parts.findLastIndex(part => part[change]);
     if (first >= 0) {
       // Keep every changed run, including unchanged text between distant edits.
       // Reuse the original character diff rather than computing it again on a crop.
@@ -63,8 +64,9 @@ function comparisonRows(value, compact = true, missing = value?.missing, full = 
   }
   return rows[key] = (missing && !value.pdf.trim() ? ['html'] : ['html', 'pdf']).map(side => ({
     label: side.toUpperCase(), parts: parts.map(part => {
-      const empty = part.changed && !part[side].trim() && !!part[side === 'html' ? 'pdf' : 'html'].trim();
-      return { ...part, changed: part.changed && !missing, text: empty ? '' : part[side], source: !compact && value.source
+      const changed = !!part[change];
+      const empty = changed && !part[side].trim() && !!part[side === 'html' ? 'pdf' : 'html'].trim();
+      return { ...part, changed: changed && !missing, text: empty ? '' : part[side], source: !compact && value.source
         ? { index: value.source.index, start: value.source.start + part.start, end: value.source.start + part.end } : undefined };
     })
   }));
@@ -319,7 +321,7 @@ class PdfLocator {
     if (!data.partial && source && this.index.raw.slice(source.start, source.end) === notice.html) {
       const overlaps = (item, start, end) => !item.font && item.sourceStart <= end && item.sourceEnd >= start
         && (item.sourceEnd > start || item.sourceStart === start) && (item.sourceStart < end || item.sourceEnd === end);
-      const changes = notice.missing ? [] : window.PdfSelectionDiff.comparisonParts(notice, true).filter(part => part.changed);
+      const changes = notice.missing ? [] : window.PdfSelectionDiff.comparisonParts(notice).filter(part => part.changed);
       const covered = data.items.flatMap((item, at) => overlaps(item, source.start, source.end) ? [at] : []);
       if (!notice.missing && (!changes.length || covered.some(at => data.items[at].missing))) return data;
       const makeSelection = (start, queueRange) => ({
@@ -346,7 +348,7 @@ class PdfLocator {
           const faults = text.slice(lowerBound(text, start, item => item.sourceEnd), lowerBound(text, end + 1, item => item.sourceStart))
             .filter(item => overlaps(item, start, end));
           const parts = faults.flatMap(item => item.missing ? [{ missing: true }] : window.PdfSelectionDiff.comparisonParts(item.comparison)
-            .filter(part => part.changed).map(part => {
+            .filter(part => item.comparison.selection === true ? part.changed : part.inconsistent).map(part => {
               const a = Math.max(start, item.sourceStart + part.start), b = Math.min(end, item.sourceStart + part.end);
               const left = a - item.sourceStart - part.start, right = b - item.sourceStart - part.start;
               return { start: a - start, end: b - start, html: part.html.slice(left, right),
@@ -392,7 +394,7 @@ class PdfLocator {
     const change = value.font ? [value.text, ...fontKeys.flatMap(key => [value.htmlFont[key], value.font[key]])]
         : [value.comparison?.html, value.comparison?.pdf];
     return JSON.stringify([!!value.font, !!value.selection, change,
-      ...(value.selection && window.PdfSelectionDiff.comparisonParts(value.comparison, true).some(part => !part.changed && part.html.length) ? [] : [prefix, suffix])]);
+      ...(value.selection && window.PdfSelectionDiff.comparisonParts(value.comparison).some(part => !part.changed && part.html.length) ? [] : [prefix, suffix])]);
   }
   cacheReview(data) {
     Object.assign(data, { entries: [], edits: [], plans: [] });
@@ -429,7 +431,7 @@ class PdfLocator {
       this.index = new window.PdfSelectionDiff.PdfConnections(this, documentModel);
       this.index.sourcePageKey = sourcePageKey;
       pairs.set(this.pdf, this.index);
-      if (previous) this.index.update(null, { previous });
+      if (previous) this.index.connect(null, { previous });
     }
     return this.index;
   }
@@ -493,7 +495,7 @@ class PdfLocator {
   async indexFonts(pdf, source, signal, numbers) {
     const index = await this.indexDocument(pdf, numbers);
     if (!index || signal?.aborted) return null;
-    source?.update();
+    source?.connect();
     const ranges = source?.pairs.filter(connection => connection.target === index);
     for (const entry of index.pages) {
       if (entry.parts.every(part => part.font)
@@ -572,7 +574,7 @@ async function onDifference(event) {
   const changed = candidateId && kind !== 'font' ? notices[0] : notices.find(value =>
     typeof value.html === 'string' && typeof value.pdf === 'string'
     && (!value.source || value.source.index.raw.slice(value.source.start, value.source.end) === value.html)
-    && window.PdfSelectionDiff.comparisonParts(value).some(part => part.changed));
+    && window.PdfSelectionDiff.comparisonParts(value).some(part => value.selection === true ? part.changed : part.inconsistent));
   const notice = changed || notices.find(value => value.source) || notices[0];
   if (!notice || changed && !locator.textEnabled || !changed && (!notice.source || !model)) return;
   const request = { ...data, notice, kind: changed ? kind : 'font' };
