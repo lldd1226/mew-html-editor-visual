@@ -170,7 +170,8 @@ helper. `comparisonParts()` stays in the diff script; provider row presentation,
 review queues, popup state and measured geometry keep their existing owners.
 Each HTML index builds its entity-decoding template on demand; its
 environment supplies the current PDF, page indexes, idle scheduling and cancellation.
-Selection retains `findLocations()` for visible-page assembly and document loading.
+`PdfLocator.findLocations()` controls visible-page and document loading;
+`PdfConnections.locations()` assembles page mappings and missing-text targets.
 `pdf-selection.js` captures selections, supplies that environment, and uses its
 results to scroll and publish selection mappings. `pdf-review-provider.js` supplies
 PDF ranges and source decorations to its own `ReviewHighlights` instance.
@@ -191,8 +192,10 @@ ranges against the saved OCR sequence before producing text or format notices.
 and canonical format runs. `local-ocr-text-reader.js` loads that saved data and
 owns all frontend PDF font reading, including text-layer font lookup, operator
 inspection, shared font tasks, and PDF.js fallback when the cache is unavailable.
-`pdf-selection-diff.js` delegates font reading to it and retains source/page
-scope selection, format-run comparison, and edits.
+`pdf-review-provider.js` owns frontend text/font reading and candidate assembly.
+`pdf-selection-diff.js` owns character mappings, `pdf-connection.js` owns page
+connections and the source edits used by PDF review. `editor-core.js` owns
+HTML parsing, edit validation and document commits.
 The browser owns HTML bold/italic interpretation,
 format comparison and source format edits. `differences()` classifies text changes
 and unchanged font runs in one traversal per connection; candidates and decorations

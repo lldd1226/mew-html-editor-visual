@@ -1,4 +1,4 @@
-import { diffIndex, fontKeys, textDiff, localTextDiff, extendPageRange, changedRange, normalized, lowerBound, significantText, closestEdge, findMatches, mapDiffRange, forwardRangeKeys, reverseRangeKeys } from './pdf-selection-diff.js';
+import { diffIndex, fontKeys, textDiff, localTextDiff, extendPageRange, changedRange, normalized, lowerBound, significantText, findMatches, mapDiffRange, forwardRangeKeys, reverseRangeKeys } from './pdf-selection-diff.js';
 const covers = (range, start, end, [begin, stop] = forwardRangeKeys) => range[begin] <= start && range[stop] >= end;
 const overlaps = (range, start, end, [begin, stop] = forwardRangeKeys) => range[begin] < end && range[stop] > start;
 
@@ -55,6 +55,7 @@ class PdfConnections {
     if (this.normalized !== null) this.normalized ||= normalized(this.raw);
   }
   get pairs() { return this.prepared?.pairs || []; }
+  get #fullIndex() { return documentIndex(this.documents, this.pdf, this.environment.getSourcePages?.()); }
   targetConnections(target, prepared = true) {
     const ranges = value => {
       const state = this.connections.get(value);
@@ -110,11 +111,11 @@ class PdfConnections {
     if (tags.some(tag => tag.fontCloseStart === undefined || !['i', 'em', 'b', 'strong', 'span'].includes(tag.name))) return [];
     // Move adjacent boundaries when adding a single format to unwrapped text.
     if (!tags.length && keys.length === 1 && font[keys[0]]) {
-      const key = keys[0], opening = key === 'italic' ? /^<(i|em)>$/i : /^<(b|strong)>$/i;
+      const opening = keys[0] === 'italic' ? /^<(i|em)>$/i : /^<(b|strong)>$/i;
       const adjacent = before => {
         let at = before ? start - 1 : end;
         while (at >= 0 && at < this.raw.length && /[^\S\r\n]/u.test(this.raw[at])) at += before ? -1 : 1;
-        return this.formats[at]?.tags?.findLast(tag => tag[key] === true
+        return this.formats[at]?.tags?.findLast(tag => tag[keys[0]] === true
           && opening.test(tag.open)
           && tag.fontCloseStart !== undefined && (before ? tag.rawEnd <= start : tag.rawStart >= end)
           && /^[^\S\r\n]*$/u.test(this.source.slice(before ? tag.closeEnd : sourceEnd,
@@ -176,10 +177,10 @@ class PdfConnections {
   textEdits(start, end, replacement) {
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start
       || end > this.raw.length || typeof replacement !== 'string') throw new Error('无效的可见文字替换范围');
-    const segments = this.sourceSegments(start, end, !this.raw.slice(start, end).trim() && !replacement.trim());
-    const text = replacement.replace(/[&<>]/g, char => char === '&' ? '&amp;' : char === '<' ? '&lt;' : '&gt;');
-    return segments.map((segment, i) => ({ ...segment, text: i ? '' : text,
-      expected: this.source.slice(segment.start, segment.end) }));
+    return this.sourceSegments(start, end, !this.raw.slice(start, end).trim() && !replacement.trim())
+      .map((segment, i) => ({ ...segment,
+        text: i ? '' : replacement.replace(/[&<>]/g, char => char === '&' ? '&amp;' : char === '<' ? '&lt;' : '&gt;'),
+        expected: this.source.slice(segment.start, segment.end) }));
   }
   // Compare this snapshot; the caller selects the current editor index explicitly.
   getDifferences(pages = [], update) {
@@ -192,118 +193,104 @@ class PdfConnections {
   }
   connect(pages = [], update) {
     const scoped = pages !== null && !Array.isArray(pages), prepare = pages !== null && update?.prepare !== false;
-    const previousState = this.prepared;
-    const full = scoped ? null : documentIndex(this.documents, this.pdf, this.environment.getSourcePages?.()) || previousState?.full;
+    const prior = this.prepared, full = scoped ? null : this.#fullIndex || prior?.full;
     const targets = new Set((scoped ? [pages] : [full, ...(pages || []), ...(this.environment.getTargets?.() || [])]).filter(Boolean));
-    const previous = !this.change && update?.previous;
+    const previous = !this.change && update?.previous, unchanged = previous?.raw === this.raw;
     if (previous) this.change = { ...(update.change || changedRange(previous.raw, this.raw)), before: previous.raw };
-    if (!previous && prepare && !scoped && previousState?.pdf === this.pdf && previousState.full === full && previousState.pages?.length === targets.size
-      && previousState.pages.every((page, i) => targets.has(page) && this.targetConnections(page) === previousState.connections[i])) return previousState;
+    const { start, oldEnd, newEnd } = this.change || {}, change = newEnd - oldEnd, insertion = start === oldEnd;
+    const shift = (a, b) => b <= start ? 0 : a >= oldEnd ? change : null;
+    if (!previous && prepare && !scoped && prior && prior.pdf === this.pdf && prior.full === full
+      && prior.pages?.length === targets.size && prior.pages.every((page, i) => targets.has(page) && this.targetConnections(page) === prior.connections[i])) return prior;
+
     for (const page of targets) {
-      const preparePage = prepare && (scoped || page !== previousState?.full);
+      const preparePage = prepare && (scoped || page !== prior?.full);
       if (!previous && !preparePage) continue;
-      const state = this.connections.get(page) || {};
-      this.connections.set(page, state);
-      const cached = previous && previous.connections.get(page), original = cached?.ranges || noConnections;
-      const { preparedRanges: prepared, scope } = cached || {};
-      const migrated = scope && prepared && prepared !== original ? new Map() : null;
-      for (const items of migrated ? [original, prepared] : previous ? [original] : noConnections) {
-        const { start, oldEnd, newEnd } = this.change, change = newEnd - oldEnd;
-        const shift = (a, b) => b <= start ? 0 : a >= oldEnd ? change : null;
-        const live = items === original, retained = [];
+      let state = this.connections.get(page);
+      if (!state) this.connections.set(page, state = {});
+      const cached = previous && previous.connections.get(page), reverse = previous && page.connections.get(previous);
+      if (reverse) {
+        const ranges = [];
+        for (const item of reverse.ranges || noConnections) {
+          const delta = shift(item.targetStart, item.targetEnd);
+          if (delta !== null) ranges.push(Object.assign(item.copy(this, delta, true), { gap: undefined }));
+        }
+        if (ranges.length || unchanged && reverse.scope !== undefined)
+          page.connections.set(this, { ...(unchanged ? reverse : {}), ranges: ranges.length ? ranges : undefined });
+      }
+
+      const live = cached?.ranges || noConnections, prepared = cached?.preparedRanges, scope = cached?.scope;
+      const migrated = scope && prepared && prepared !== live ? new Map() : null;
+      for (const items of migrated ? [live, prepared] : cached ? [live] : noConnections) {
+        const isLive = items === live, retained = [];
         for (const item of items) {
-          let kept = live ? undefined : migrated.get(item);
+          let kept = isLive ? undefined : migrated.get(item);
           if (kept === undefined) {
-            const delta = start === oldEnd && item.end === start && item.start < start ? null : shift(item.start, item.end);
-            if (delta !== null) {
-              kept = item.copy(this, delta);
-              kept.gap = undefined;
-              if (kept.comparisonContext && kept.comparisonVersion === previous.textVersion
-                && this.formats?.slice(kept.start, kept.end).every((style, i) => {
-                  const at = item.start + i, old = previous.formats[at];
-                  return style.italic === old.italic && style.bold === old.bold && style.name === old.name
-                    && style.definition?.open === old.definition?.open
-                    && (!i || (style === this.formats[kept.start + i - 1]) === (old === previous.formats[at - 1]));
-                })) kept.comparisonVersion = this.textVersion;
-            } else if (!(item.start > start || item.end < oldEnd)) {
-              // A prepared pair can reach an edit before its raw-text comparison is read.
+            const delta = insertion && item.start < start && item.end === start ? null : shift(item.start, item.end);
+            kept = delta === null ? null : Object.assign(item.copy(this, delta), { gap: undefined });
+            if (kept?.comparisonContext && kept.comparisonVersion === previous.textVersion
+              && this.formats?.slice(kept.start, kept.end).every((style, i, styles) => {
+                const old = previous.formats[item.start + i];
+                const sameRun = !i || (style === styles[i - 1]) === (old === previous.formats[item.start + i - 1]);
+                return sameRun && style.italic === old.italic && style.bold === old.bold
+                  && style.name === old.name && style.definition?.open === old.definition?.open;
+              })) kept.comparisonVersion = this.textVersion;
+            if (!kept && covers(item, start, oldEnd)) {
               if (!item.editorDiff && previous.pairs.includes(item)) previous.compare(item, undefined, { textOnly: true });
               const diff = item.editorDiff;
               if (diff && diff.reliable !== false) {
-                // Keep unchanged missing tails out of the new alignment.
-                const last = diff.parts?.findLast(part => part.pdf.trim());
-                const end = last && item.start + last.end >= oldEnd ? item.start + last.end : item.end;
-                kept = this.remember(item.start, end + change, page, item.targetStart, item.targetEnd,
+                const tailEnd = item.start + (diff.parts?.findLast(part => part.pdf.trim())?.end ?? item.end - item.start);
+                kept = this.remember(item.start, (tailEnd >= oldEnd ? tailEnd : item.end) + change, page, item.targetStart, item.targetEnd,
                   { previous: item, change: { start: start - item.start, newEnd: newEnd - item.start, previous: diff } });
               }
             }
-            if (live) migrated?.set(item, kept ?? null);
+            if (isLive) migrated?.set(item, kept ?? null);
           }
           if (kept) retained.push(kept);
         }
-        if (!live || retained.length) state[live ? 'ranges' : 'preparedRanges'] = retained;
-        if (!live) break;
-        const reverseScope = page.connections.get(previous);
-        const reverse = (reverseScope?.ranges || []).flatMap(item => {
-          const delta = shift(item.targetStart, item.targetEnd);
-          return delta === null ? [] : [Object.assign(item.copy(this, delta, true), { gap: undefined })];
-        });
-        const unchanged = previous.raw === this.raw;
-        if (reverse.length || unchanged && reverseScope?.scope !== undefined)
-          page.connections.set(this, { ...(unchanged ? reverseScope : {}), ranges: reverse.length ? reverse : undefined });
-        if (!scope) break;
-        const { start: a, end: b } = scope, delta = shift(a, b);
-        if (delta === null && !(retained.length && retained.length === original.length && a <= start && b >= oldEnd
-          && (prepared === original || prepared?.every(item => migrated.has(item))))) break;
-        Object.assign(state, { prepared: cached.prepared, scope: { start: a + (delta ?? 0), end: b + (delta ?? change) } });
-        if (!migrated) state.preparedRanges = prepared === original ? retained : undefined;
+        if (!isLive || retained.length) state[isLive ? 'ranges' : 'preparedRanges'] = retained;
+        if (!isLive || !scope) break;
+        const delta = shift(scope.start, scope.end);
+        const coversEdit = retained.length && retained.length === live.length && covers(scope, start, oldEnd);
+        if (delta === null && !(coversEdit && (prepared === live || migrated && prepared.every(item => migrated.has(item))))) break;
+        Object.assign(state, { prepared: cached.prepared, scope: { start: scope.start + (delta ?? 0), end: scope.end + (delta ?? change) } });
+        if (!migrated) state.preparedRanges = prepared === live ? retained : undefined;
       }
-      if (preparePage) this.#connectPage(page, state, full);
-    }
-    if (scoped) return this.connections.get(pages)?.scope;
-    if (!prepare) return previousState;
-    pages = [...targets];
-    const pairs = this.targetConnections(pages), snapshots = [];
-    for (const page of pages) {
-      const state = this.connections.get(page);
-      if (!page.pages && state) {
-        const shared = state.preparedRanges === state.ranges;
-        for (const key of shared ? ['ranges'] : ['ranges', 'preparedRanges']) {
-          const ranges = state[key];
-          const kept = ranges?.filter(item => !pairs.some(other => other.target !== page && !other.target.pages
-            && covers(other, item.start, item.end)
-            && (other.start < item.start || other.end > item.end)));
-          if (kept?.length !== ranges?.length) state[key] = kept;
-        }
-        if (shared) state.preparedRanges = state.ranges;
-      }
-      snapshots.push(this.targetConnections(page));
-    }
-    this.prepared = { pdf: this.pdf, full, pages, connections: snapshots, pairs };
-    return this.prepared;
-  }
-  #connectPage(page, state, full) {
-    if (page === full && !full.sourcePages) full.connect(this);
-    const entry = matchingPage(full, page), projected = entry && full.sourcePages?.length > 1 ? new Set() : null;
-    if (entry) {
-      for (const pair of this.targetConnections(full)) {
+
+      if (!preparePage) continue;
+      if (page === full && !full.sourcePages) full.#connectPage(this);
+      const entry = matchingPage(full, page), projected = entry && full.sourcePages?.length > 1 ? new Set() : null;
+      for (const pair of entry ? this.targetConnections(full) : noConnections) {
         const from = Math.max(entry.start, pair.targetStart), to = Math.min(entry.end, pair.targetEnd);
         if (from >= to) continue;
         const hit = from === pair.targetStart && to === pair.targetEnd ? pair : this.range(full, from, to, true, pair);
-        const mapping = hit && this.remember(hit.start, hit.end, page, from - entry.start, to - entry.start,
-          hit === pair && { connection: pair });
+        const mapping = hit && this.remember(hit.start, hit.end, page, from - entry.start, to - entry.start, hit === pair && { connection: pair });
         if (mapping) projected?.add(mapping);
       }
+      const ranges = projected?.size && state.ranges.filter(item => projected.has(item));
+      if (ranges) Object.assign(state, { prepared: true, preparedRanges: ranges, scope: connectionBounds(ranges) });
+      else this.#connectPage(page, state);
     }
-    const projectedRanges = projected?.size && state.ranges.filter(item => projected.has(item));
-    if (projectedRanges) {
-      Object.assign(state, { prepared: true, preparedRanges: projectedRanges, scope: connectionBounds(projectedRanges) });
+    if (scoped || !prepare) return scoped ? this.connections.get(pages)?.scope : prior;
+    const allPages = [...targets], pairs = this.targetConnections(allPages), connections = [];
+    for (const page of allPages) {
+      const state = this.connections.get(page);
+      if (!page.pages && state) for (const ranges of new Set([state.ranges, state.preparedRanges])) {
+        const kept = ranges?.filter(item => !pairs.some(other => other.target !== page && !other.target.pages
+          && (other.start < item.start || other.end > item.end) && covers(other, item.start, item.end)));
+        if (kept?.length === ranges?.length) continue;
+        if (state.ranges === ranges) state.ranges = kept;
+        if (state.preparedRanges === ranges) state.preparedRanges = kept;
+      }
+      connections.push(this.targetConnections(page));
     }
-    if (state.prepared) return;
-
-    const htmlRaw = this.raw, pdfRaw = page.raw, pageEnd = pdfRaw.length;
-    const source = this.normalized, target = page.normalized;
+    return this.prepared = { pdf: this.pdf, full, pages: allPages, connections, pairs };
+  }
+  #connectPage(page, state = this.connections.get(page)) {
+    if (state?.prepared) return;
+    if (!state) this.connections.set(page, state = {});
+    const pageEnd = page.raw.length;
     const pageCount = page.sourcePages?.length, partial = page.layer && this.environment.getSourcePages?.()?.length > 1;
+    const multiPage = pageCount > 1;
     const horizontal = page.horizontal || page.pages?.some(entry => entry.horizontal), recover = !!(pageCount || page.layer);
     // Use detected passages as boundaries, since physical page turns can split words.
     const blocks = page.pages?.some(entry => entry.breaks?.length) ? page.pages.flatMap(p => [p.start, ...(p.breaks || []), p.end])
@@ -313,187 +300,166 @@ class PdfConnections {
       this.remember(pair.targetStart, pair.targetEnd, page, pair.start, pair.end, { connection: pair, reverse: true });
     let scope = reverse.some(pair => pair.start === 0 && pair.end === pageEnd)
       ? connectionBounds(reverse, true) : state.ranges?.find(item => item.targetStart === 0 && item.targetEnd === pageEnd);
-    if (!blocks && !partial && recover) scope ||= this.remember(0, htmlRaw.length, page, 0, pageEnd, { recover });
-    const [hit, duplicate] = scope || blocks ? noConnections : this.matches([pdfRaw], source, { limit: 2 });
+    if (!blocks && !partial && recover) scope ||= this.remember(0, this.raw.length, page, 0, pageEnd, { recover });
+    const [hit, duplicate] = scope || blocks ? noConnections : this.matches([page.raw], undefined, { limit: 2 });
     if (hit && !duplicate) scope = this.remember(hit.start, hit.end, page, 0, pageEnd) || hit;
 
-    const size = blocks ? horizontal ? 12 : 16 : 24;
-    const sourceBegin = htmlRaw.length - htmlRaw.trimStart().length;
-    const anchors = !scope && target.text.length >= size ? this.matches(page, source, size, blocks, horizontal) : [];
-    let groups = 0, previous;
-    // Store merged ranges in the part of the anchor array already scanned.
-    for (let i = 0, count = anchors.length - Number(!blocks); i < count; i++) {
-      const anchor = anchors[i], following = anchors[i + 1], range = anchors[groups - 1];
-      let next = following && following.block === anchor.block ? following : anchor;
-      if (blocks && next.start - anchor.start - (next.at - anchor.at) > 32)
-        next = anchors.slice(i + 2, lowerBound(anchors, anchor.at + size * 4 + 1, item => item.at))
-          .find(item => item.block === anchor.block && item.start > anchor.start && item.start < next.start) || next;
-      const targetEnd = next.at + size, length = Math.min(targetEnd, target.text.length) - anchor.at;
-      if (next !== anchor && next.start <= anchor.start || length > 2048) continue;
-      const cost = (at, start, budget) => textDiff(
-        target.text.slice(at, targetEnd), source.text.slice(start, next.end), false, budget).distance;
-      const limit = Math.min(32, Math.max(12, Math.floor(length * .2))), adjacent = cost(anchor.at, anchor.start, limit);
-      if (adjacent > limit) continue;
-      if (next !== anchor) i = anchors.indexOf(next, i + 1) - 1;
-      if (range && range.block === anchor.block && range.targetEnd >= anchor.at && range.end >= anchor.start) {
-        const budget = 128 - range.distance, suffix = next.end >= range.end ? cost(range.targetEnd, range.end, budget) : Infinity;
-        const distance = suffix <= budget ? range.distance + suffix : cost(range.at, range.start, 128);
-        if (distance <= 128) {
-          Object.assign(range, { targetEnd, end: next.end, distance });
-          continue;
-        }
-      }
-      anchors[groups++] = { ...anchor, targetEnd, end: next.end, distance: adjacent };
-    }
-
-    for (const range of anchors.slice(0, groups)) {
-      const begin = range.begin ?? 0;
-      const passage = blocks ? target.text.slice(begin, range.stop) : target.text, word = blocks ? null : undefined;
-      let [pdfStart, htmlStart] = extendPageRange(passage, source.text, range.at - begin, range.start, -1, false, word);
-      let [pdfStop, htmlStop] = extendPageRange(passage, source.text, range.targetEnd - begin, range.end, 1, false, word);
+    const sourceBegin = this.raw.length - this.raw.trimStart().length;
+    const pdf = page.normalized, html = this.normalized;
+    const word = blocks ? null : undefined;
+    const passageEdges = blocks ? [true, false] : noConnections;
+    let previous;
+    const matchedRanges = scope ? []
+      : this.matches([pdf.text], html, { page, blocks, contextual: horizontal, align: true });
+    for (const range of matchedRanges) {
+      const { block, begin, stop } = range;
+      const text = pdf.text.slice(begin, stop);
+      const blockStart = blocks?.[block], blockEnd = blocks?.[block + 1];
+      let [pdfStart, htmlStart] = extendPageRange(text, html.text, range.at - begin, range.start, -1, false, word);
+      let [pdfStop, htmlStop] = extendPageRange(text, html.text, range.targetEnd - begin, range.end, 1, false, word);
       pdfStart += begin;
       pdfStop += begin;
-      const pdfLine = lineStart(pdfRaw, target.starts[pdfStart]), htmlLine = lineStart(htmlRaw, source.starts[htmlStart]);
-      const pdfLead = Math.max(begin, lowerBound(target.starts, pdfLine)), htmlLead = lowerBound(source.starts, htmlLine);
-      const lead = pdfStart > pdfLead && pdfStart - pdfLead <= 32 && htmlStart - htmlLead <= 32 ? source.text.slice(htmlLead, htmlStart) : '';
-      if (/[\p{L}\p{N}]/u.test(lead) && (!/\p{L}/u.test(target.text.slice(pdfLead, pdfStart)) || /\p{L}/u.test(lead))
-        && !/[\r\n]/.test(pdfRaw.slice(target.starts[pdfStart], target.ends[pdfStart])
-          + htmlRaw.slice(source.starts[htmlStart], source.ends[htmlStart]))) {
+      const pdfLine = lineStart(page.raw, pdf.starts[pdfStart]);
+      const pdfLead = Math.max(begin, lowerBound(pdf.starts, pdfLine));
+      const htmlLead = lowerBound(html.starts, lineStart(this.raw, html.starts[htmlStart]));
+      const lead = pdfStart > pdfLead && pdfStart - pdfLead <= 32 && htmlStart - htmlLead <= 32
+        ? html.text.slice(htmlLead, htmlStart) : '';
+      if ((/\p{L}/u.test(lead) || /\p{N}/u.test(lead) && !/\p{L}/u.test(pdf.text.slice(pdfLead, pdfStart)))
+        && !/[\r\n]/.test(page.raw.slice(pdf.starts[pdfStart], pdf.ends[pdfStart]) + this.raw.slice(html.starts[htmlStart], html.ends[htmlStart])))
         [pdfStart, htmlStart] = [pdfLead, htmlLead];
+      if (!blocks && multiPage && /\p{L}/u.test(pdf.text[pdfStop] || '') && /\p{L}/u.test(html.text[htmlStop] || '')) {
+        const pdfNextLine = lineStart(page.raw, pdf.starts[pdfStop]), htmlNextLine = lineStart(this.raw, html.starts[htmlStop]);
+        if (pdfNextLine > pdf.starts[range.targetEnd - 1] && htmlNextLine > html.starts[range.end - 1]
+          && !/\p{L}{2}/u.test(page.raw.slice(pdfNextLine, pdf.ends[pdfStop - 1]) + ' ' + this.raw.slice(htmlNextLine, html.ends[htmlStop - 1])))
+          [pdfStop, htmlStop] = [lowerBound(pdf.starts, pdfNextLine - 1), lowerBound(html.starts, htmlNextLine - 1)];
       }
-      if (!blocks && pageCount > 1 && /\p{L}/u.test(target.text[pdfStop] || '') && /\p{L}/u.test(source.text[htmlStop] || '')) {
-        const pdfNextLine = lineStart(pdfRaw, target.starts[pdfStop]), htmlNextLine = lineStart(htmlRaw, source.starts[htmlStop]);
-        if (pdfNextLine > target.starts[range.targetEnd - 1] && htmlNextLine > source.starts[range.end - 1]
-          && !/\p{L}{2}/u.test(pdfRaw.slice(pdfNextLine, target.ends[pdfStop - 1]) + ' '
-            + htmlRaw.slice(htmlNextLine, source.ends[htmlStop - 1]))) {
-          [pdfStop, htmlStop] = [lowerBound(target.starts, pdfNextLine - 1), lowerBound(source.starts, htmlNextLine - 1)];
-        }
-      }
-      let start = source.starts[htmlStart], end = source.ends[htmlStop - 1];
-      let targetStart = target.starts[pdfStart], targetEnd = target.ends[pdfStop - 1];
-      if (blocks) {
-        for (const leading of [true, false]) {
-          const edge = leading ? Math.max(blocks[range.block], pdfLine) : blocks[range.block + 1];
-          const lineEnd = leading ? -1 : pdfRaw.indexOf('\n', targetEnd), bound = lineEnd < 0 ? edge : Math.min(lineEnd, edge);
-          const fragment = leading ? significantText(pdfRaw.slice(bound, targetStart))
-            : bound - targetEnd <= 48 ? letters(pdfRaw.slice(targetEnd, bound)) : null;
-          if (fragment === null || leading && (!fragment || fragment.length > 32)) continue;
-          const first = Math.max(0, htmlStart - fragment.length - 8), stop = Math.min(htmlRaw.length, end + 49);
-          const edges = leading ? Array.from({ length: htmlStart - first }, (_, i) => first + i)
-            .filter(at => Math.abs(htmlStart - at - fragment.length) <= 4 || source.text[at] === ' ')
-            : Array.from(htmlRaw.slice(end, stop).matchAll(/\s+|$/gu), match => end + match.index)
-              .filter(at => at < stop || at === htmlRaw.length);
-          const at = closestEdge(fragment, edges, at => leading ? significantText(source.text.slice(at, htmlStart)) : letters(htmlRaw.slice(end, at)),
-            Math.max(Number(leading), Math.floor(fragment.length / 4)));
-          if (at !== undefined && leading) [start, targetStart] = [source.starts[at], bound];
-          else if (at !== undefined) [end, targetEnd] = [at, bound];
+      let start = html.starts[htmlStart], end = html.ends[htmlStop - 1];
+      let targetStart = pdf.starts[pdfStart], targetEnd = pdf.ends[pdfStop - 1];
+      for (const leading of passageEdges) {
+        const edge = leading ? Math.max(blockStart, pdfLine) : blockEnd;
+        const lineEnd = leading ? -1 : page.raw.indexOf('\n', targetEnd), bound = lineEnd < 0 ? edge : Math.min(lineEnd, edge);
+        const fragment = leading ? significantText(page.raw.slice(bound, targetStart))
+          : bound - targetEnd <= 48 ? letters(page.raw.slice(targetEnd, bound)) : null;
+        if (fragment === null || leading && (!fragment || fragment.length > 32)) continue;
+        const first = leading ? Math.max(0, htmlStart - fragment.length - 8) : end;
+        const stop = leading ? htmlStart : Math.min(this.raw.length, end + 49);
+        let limit = Math.max(Number(leading), Math.floor(fragment.length / 4));
+        for (const { index } of (leading ? html.text : this.raw).slice(first, stop).matchAll(leading ? /./gs : /\s+|$/gu)) {
+          const at = first + index;
+          if (leading ? Math.abs(stop - at - fragment.length) > 4 && html.text[at] !== ' '
+            : !(at < stop || at === this.raw.length)) continue;
+          const text = leading ? significantText(html.text.slice(at, stop)) : letters(this.raw.slice(first, at));
+          const { distance } = textDiff(text, fragment, false, limit);
+          if (distance > limit) continue;
+          if (leading) [start, targetStart] = [html.starts[at], bound];
+          else [end, targetEnd] = [at, bound];
+          if (!distance) break;
+          limit = distance - 1;
         }
       }
       const sourceEnd = previous?.end ?? sourceBegin, pdfEnd = previous?.targetEnd ?? 0;
       const gap = !blocks && !partial && (previous ? start > sourceEnd && targetStart > pdfEnd : pageCount && start <= 2048)
         && this.remember(sourceEnd, start, page, pdfEnd, targetStart, { recover });
-      const next = this.remember(start, end, page, targetStart, targetEnd, { adjacent: previous, blockStart: blocks?.[range.block] });
+      const next = this.remember(start, end, page, targetStart, targetEnd, { adjacent: previous, blockStart });
       if (!recover && gap === null && next) previous.gap = { next, connection: null };
       previous = next;
     }
     if (!blocks && pageCount && previous) {
       let start = previous.end;
-      const stop = pageCount > 1 ? previous.targetStart + /^\s*/u.exec(pdfRaw.slice(previous.targetStart))[0].length : pageEnd;
-      if (pageCount > 1) {
-        for (const item of state.ranges
+      if (multiPage) {
+        const stop = previous.targetStart + /^\s*/u.exec(page.raw.slice(previous.targetStart))[0].length;
+        for (const item of this.targetConnections(page, false)
           .filter(pair => !pair.recovered && pair.targetStart < previous.targetStart && pair.targetEnd <= stop)
           .sort((a, b) => a.start - b.start)) {
           if (item.start <= start) start = Math.max(start, item.end);
         }
       }
-      if (htmlRaw.length - start <= 2048 && significantText(htmlRaw.slice(start)))
-        this.remember(start, htmlRaw.trimEnd().length, page, previous.targetEnd, pdfRaw.trimEnd().length, { recover });
+      if (this.raw.length - start <= 2048 && significantText(this.raw.slice(start)))
+        this.remember(start, this.raw.trimEnd().length, page, previous.targetEnd, page.raw.trimEnd().length, { recover });
     }
-    let bySource = [...(state.ranges || noConnections)].sort((a, b) => a.start - b.start);
-    for (const [start, end, next] of connectionGaps(bySource, sourceBegin)) {
-      if (end - start <= 32) {
-        const hit = page.search({
-          text: htmlRaw.slice(start, end),
-          before: '',
-          after: htmlRaw.slice(end, Math.min(next.end, end + 24))
-        }, { start: Math.max(0, next.targetStart - (end - start) - 32), end: next.targetEnd });
-        if (hit && hit.end <= next.targetStart && this.remember(start, end, page, hit)) bySource = null;
-      }
+    const pages = blocks || multiPage || partial ? page.pages || (blocks && [{ start: 0, end: pageEnd, breaks: page.breaks }]) : null;
+    this.#recoverPageGaps(page, pages, sourceBegin);
+    const preparedRanges = state.ranges || noConnections;
+    Object.assign(state, { prepared: true, preparedRanges,
+      scope: preparedRanges.length && (!scope || blocks) ? connectionBounds(preparedRanges) : scope || null });
+  }
+  #recoverPageGaps(page, pages, sourceBegin) {
+    const sourceGaps = () => connectionGaps([...this.targetConnections(page, false)].sort((a, b) => a.start - b.start), 0, this.raw.length);
+    const gaps = [...sourceGaps()];
+    let recovered = false;
+    for (const [from, end, next] of gaps) {
+      const start = Math.max(from, sourceBegin);
+      if (!next || end <= start || end - start > 32) continue;
+      const hit = page.search({ text: this.raw.slice(start, end), before: '',
+        after: this.raw.slice(end, Math.min(next.end, end + 24))
+      }, { start: Math.max(0, next.targetStart - (end - start) - 32), end: next.targetEnd });
+      if (hit && hit.end <= next.targetStart && this.remember(start, end, page, hit)) recovered = true;
     }
-
-    const ranges = state.ranges || noConnections, stops = [], proposed = [];
-    const pages = (blocks || (pageCount > 1 || partial) && page.pages) && (page.pages || [{ start: 0, end: pageEnd, breaks: page.breaks }]);
-    const byTarget = pages && [...ranges].sort((a, b) => a.targetStart - b.targetStart);
+    const byTarget = pages && gaps.length && [...this.targetConnections(page, false)].sort((a, b) => a.targetStart - b.targetStart);
+    if (!byTarget?.length) return;
+    const stops = [];
     let first = 0, scanned = 0;
-    for (const { start, end, breaks } of ranges.length && pages || noConnections) {
-      while (byTarget[first]?.targetEnd <= start) first++;
-      const touching = byTarget.slice(first, lowerBound(byTarget, end, item => item.targetStart));
-      const footer = touching[0]?.targetEnd ?? breaks?.at(-1);
-      for (const [from, to] of connectionGaps(touching, footer ?? end, end, true)) {
-        const raw = pdfRaw.slice(from, to), view = compact(normalized(raw, undefined, from));
-        const ends = new Set(Array.from(raw.matchAll(/[\r\n–—-]|$/gu),
-          mark => lowerBound(view.ends, from + mark.index + 1)));
-        for (const stop of ends) {
-          if (!stop) continue;
-          const end = view.ends[stop - 1], line = lineStart(pdfRaw, end);
-          const label = line >= from && /^[^\S\r\n]*\S+[^\S\r\n]+/u.exec(pdfRaw.slice(line, end));
-          stops.push({ from, view, stop, end, body: label ? lowerBound(view.starts, line + label[0].length) : -1 });
+    for (const passage of pages) {
+      while (byTarget[first]?.targetEnd <= passage.start) first++;
+      const touching = byTarget.slice(first, lowerBound(byTarget, passage.end, item => item.targetStart));
+      for (const [from, to] of connectionGaps(touching, touching[0]?.targetEnd ?? passage.breaks?.at(-1) ?? passage.end, passage.end, true)) {
+        const raw = page.raw.slice(from, to), view = compact(normalized(raw, undefined, from));
+        let last = 0;
+        for (const mark of raw.matchAll(/[\r\n–—-]|$/gu)) {
+          const stop = lowerBound(view.ends, from + mark.index + 1);
+          if (stop === last) continue;
+          last = stop;
+          const end = view.ends[stop - 1], line = lineStart(page.raw, end);
+          const label = line >= from && /^[^\S\r\n]*\S+[^\S\r\n]+/u.exec(page.raw.slice(line, end));
+          stops.push({ from, view, length: stop, end, body: label ? lowerBound(view.starts, line + label[0].length) : -1 });
         }
       }
     }
 
-    const lines = /\S[^\r\n]*/gu;
-    const gaps = stops.length
-      ? connectionGaps(bySource ?? [...ranges].sort((a, b) => a.start - b.start), 0, htmlRaw.length)
-      : noConnections;
-    for (const [from, to] of gaps) {
-      lines.lastIndex = Math.max(scanned, lineStart(htmlRaw, from));
-      for (let line; (line = lines.exec(htmlRaw)) && line.index < to; scanned = lines.lastIndex) {
-        const start = line.index, text = line[0].trimEnd(), end = start + text.length, space = text.search(/\s/u);
-        if (start < from || end > to) continue;
-        for (const bodyStart of space > 0 ? [start, start + space] : [start]) {
-          const needle = normalized(htmlRaw.slice(bodyStart, end)).text.replace(/[\s\-\u00ad\u2010\u2011]/gu, '');
+    if (!stops.length) return;
+    const lines = /\S[^\r\n]*/gu, proposed = [];
+    for (const [from, to] of recovered ? sourceGaps() : gaps) {
+      lines.lastIndex = Math.max(scanned, lineStart(this.raw, from));
+      for (let line; (line = lines.exec(this.raw)) && line.index < to; scanned = lines.lastIndex) {
+        const text = line[0].trimEnd(), end = line.index + text.length, space = text.search(/\s/u);
+        if (line.index < from || end > to) continue;
+        for (const bodyStart of space > 0 ? [line.index, line.index + space] : [line.index]) {
+          const needle = normalized(this.raw.slice(bodyStart, end)).text.replace(/[\s\-\u00ad\u2010\u2011]/gu, '');
           if (needle.length < 8 || !/\p{L}.*\p{L}.*\p{L}/u.test(needle)) continue;
           let hit, best = Math.min(3, Math.floor(needle.length / 4));
           for (const stop of stops) {
-            const { view, stop: length, body } = stop, suffix = length - needle.length;
-            const exact = suffix >= 0 && view.text.startsWith(needle, suffix);
-            const i = exact ? suffix : bodyStart > start ? body : -1;
+            const suffix = stop.length - needle.length;
+            const exact = suffix >= 0 && stop.view.text.startsWith(needle, suffix);
+            const i = exact ? suffix : bodyStart > line.index ? stop.body : -1;
             if (i < 0) continue;
-            const at = view.starts[i], distance = exact ? 0 : textDiff(needle, view.text.slice(i, length), false, best).distance;
-            if (distance > best || /^\p{L}/u.test(needle) && /\p{L}/u.test(pdfRaw[at - 1] || '')) continue;
-            hit = hit === undefined || distance < best ? { stop, at, start, end, bodyStart } : null;
+            const at = stop.view.starts[i];
+            const distance = exact ? 0 : textDiff(needle, stop.view.text.slice(i, stop.length), false, best).distance;
+            if (distance > best || /^\p{L}/u.test(needle) && /\p{L}/u.test(page.raw[at - 1] || '')) continue;
+            hit = hit === undefined || distance < best ? { stop, at, start: line.index, end, bodyStart } : null;
             best = distance;
             if (best === 0 && hit === null) break;
           }
-          if (hit !== undefined) {
-            if (hit) proposed.push(hit);
-            break;
-          }
+          if (hit === undefined) continue;
+          if (hit) proposed.push(hit);
+          break;
         }
       }
     }
     for (const [i, { stop, at, start, end, bodyStart }] of proposed.sort((a, b) => a.at - b.at).entries()) {
       const prior = proposed[i - 1], from = prior?.stop.view === stop.view ? prior.stop.end : stop.from;
       if (prior?.stop.end > at || proposed[i + 1]?.at < stop.end) continue;
-      const label = bodyStart > start && /(?:^|\s)\S+\s*$/u.exec(pdfRaw.slice(from, at));
+      const label = bodyStart > start && /(?:^|\s)\S+\s*$/u.exec(page.raw.slice(from, at));
       this.remember(start, end, page, label ? at - label[0].trimStart().length : at, stop.end);
     }
-    const preparedRanges = state.ranges || noConnections;
-    Object.assign(state, {
-      prepared: true,
-      preparedRanges,
-      scope: preparedRanges.length && (!scope || blocks) ? connectionBounds(preparedRanges) : scope || null
-    });
   }
   get livePairs() { return this.targetConnections(this.prepared?.pages || [], false); }
   compare(connection, update, { textOnly = false } = {}) {
-    const { target, comparisonContext: context } = connection;
+    const context = connection.comparisonContext;
     if (!update && context && connection.comparisonVersion === this.textVersion && connection.editorDiff === context[0]
-      && target?.parts === context[1] && target?.pages === context[2] && target?.fontVersion === context[3])
+      && connection.target?.parts === context[1] && connection.target?.pages === context[2] && connection.target?.fontVersion === context[3])
       return connection.editorDiff.reliable ? connection.editorDiff : null;
     if (!connection.editorDiff || update) connection.editorDiff = textDiff(connection.html ?? this.raw.slice(connection.start, connection.end),
-      connection.pdf ?? target.raw.slice(connection.targetStart, connection.targetEnd), true, Infinity, true, update);
+      connection.pdf ?? connection.target.raw.slice(connection.targetStart, connection.targetEnd), true, Infinity, true, update);
     const diff = connection.editorDiff, parts = diff.parts ||= [];
     diff.reliable ??= diff.distance <= 256 || !parts.some(part => part.inconsistent
       && (significantText(part.html).length > 256 || significantText(part.pdf).length > 256));
@@ -501,26 +467,25 @@ class PdfConnections {
     if (!diff.reviewRanges) {
       diff.reviewRanges = connection.spans ? [] : parts.filter(part => part.inconsistent);
       if (connection.spans) {
-        const left = this.normalized, right = target.normalized;
+        const left = this.normalized, right = connection.target.normalized;
         const h = lowerBound(left.starts, connection.start), p = lowerBound(right.starts, connection.targetStart);
-        const reversed = connection.reversedSpans;
-        const [start, , from] = reversed ? reverseRangeKeys : forwardRangeKeys;
-        const html = reversed ? 'pdf' : 'html', pdf = reversed ? 'html' : 'pdf';
+        const [start, , from] = connection.reversedSpans ? reverseRangeKeys : forwardRangeKeys;
+        const html = connection.reversedSpans ? 'pdf' : 'html', pdf = connection.reversedSpans ? 'html' : 'pdf';
         for (const span of connection.spans) if (span.changed) {
           const i = h + span[start], j = p + span[from];
           const a = left.starts[i] ?? left.ends.at(-1), x = right.starts[j] ?? right.ends.at(-1);
           const b = span[html] ? left.ends[i + span[html].length - 1] : a;
           const y = span[pdf] ? right.ends[j + span[pdf].length - 1] : x;
-          const sourceText = this.raw.slice(a, b), targetText = target.raw.slice(x, y);
+          const sourceText = this.raw.slice(a, b), targetText = connection.target.raw.slice(x, y);
           if (significantText(sourceText) !== significantText(targetText))
             diff.reviewRanges.push(new diffIndex(sourceText, targetText, a - connection.start, x - connection.targetStart, true));
         }
       }
     }
     connection.comparisonVersion = this.textVersion;
-    connection.comparisonContext = [diff, target?.parts, target?.pages, target?.fontVersion];
+    connection.comparisonContext = [diff, connection.target?.parts, connection.target?.pages, connection.target?.fontVersion];
     connection.fontItems = [];
-    const runs = this.formats && target ? target.fontRuns(connection.targetStart, connection.targetEnd) : [];
+    const runs = this.formats && connection.target ? connection.target.fontRuns(connection.targetStart, connection.targetEnd) : [];
     for (const part of runs.length ? diff.parts : []) {
       const start = connection.start + part.start, pdfStart = connection.targetStart + part.targetStart, pdfEnd = connection.targetStart + part.targetEnd;
       let i = lowerBound(runs, pdfStart + Number(pdfStart < pdfEnd), font => font.end);
@@ -577,9 +542,8 @@ class PdfConnections {
       const html = left.text, pdf = right.text;
       if (!html && !pdf) return null;
       diff = textDiff(html, pdf, true, !recover || Math.max(html.length, pdf.length) <= 128 ? Infinity : 128, recover);
-      const rejected = diff.distance > 128 && diff.parts.some(part => part.changed && Math.max(part.html.length, part.pdf.length) > 128)
-        || recover && diff.distance > 32 && !diff.parts.some(part => !part.changed && /[\p{L}\p{N}]{2}/u.test(part.html));
-      if (rejected) {
+      if (diff.distance > 128 && diff.parts.some(part => part.changed && Math.max(part.html.length, part.pdf.length) > 128)
+        || recover && diff.distance > 32 && !diff.parts.some(part => !part.changed && /[\p{L}\p{N}]{2}/u.test(part.html))) {
         if (!recover) return null;
         const words = html.includes('...') || pdf.includes('...') ? /\S+?\.(?=\.|\s|$)|\S+\s*|\s+/gu : /\S+\s*|\s+/gu;
         const body = /[\p{L}\p{N}]{3}/u;
@@ -606,8 +570,7 @@ class PdfConnections {
     if (previous?.editorDiff) this.compare(connection, change || {});
     const ranges = state.ranges = (state.ranges === state.preparedRanges ? state.ranges?.slice() : state.ranges) || [];
     for (let i = ranges.length - 1; i >= 0; i--) {
-      const item = ranges[i];
-      if (item === connection || item.start === start && item.end === end) ranges.splice(i, 1);
+      if (ranges[i] === connection || ranges[i].start === start && ranges[i].end === end) ranges.splice(i, 1);
     }
     ranges.unshift(connection);
     ranges.length = Math.min(ranges.length, Math.max(16, this.raw.length));
@@ -631,7 +594,7 @@ class PdfConnections {
       }
     }
     if (!connection) {
-      if (target.normalized && !this.connections.get(target)?.prepared) this.connect(target);
+      if (target.normalized) this.#connectPage(target);
       connections = [...this.targetConnections(target, false)].sort((a, b) => a[begin] - b[begin]).flatMap((b, i, ordered) => {
         const gap = ordered[i - 1]?.gap;
         return gap?.next === b && gap.connection ? [gap.connection, b] : [b];
@@ -676,11 +639,11 @@ class PdfConnections {
   missingRange(target, start, end = start) {
     let ranges = this.prepared?.differences?.items?.missingRanges;
     if (!ranges?.context) ranges = this.candidates([target], undefined, true).missingRanges;
-    const { context } = ranges;
+    const context = ranges.context;
     if (start === undefined || !context) return ranges;
-    const hit = ranges.find(range => !range.resolved && range.sourceStart <= start && range.sourceEnd >= end), a = hit?.edge;
+    const hit = ranges.find(range => !range.resolved && range.sourceStart <= start && range.sourceEnd >= end);
     if (!hit?.matched) return null;
-    const parts = ranges.parts ||= context.index.parts || context.index.pages?.flatMap(page => page.parts) || [];
+    const a = hit.edge, parts = ranges.parts ||= context.index.parts || context.index.pages?.flatMap(page => page.parts) || [];
     let position = a ? lowerBound(parts, a, part => part.start) - 1 : 0, from;
     for (; position >= 0 && position < parts.length; position += a ? -1 : 1) {
       const part = parts[position], text = context.index.raw.slice(part.start, Math.min(a || part.end, part.end));
@@ -693,35 +656,6 @@ class PdfConnections {
     if (context.page && (from < context.page.start || from > context.page.end || endBias && from === context.page.start)) return null;
     return { start: from - context.offset, end: from - context.offset, endBias };
   }
-  #addCandidate(start, html, pdf, items, ranges, compared, missingOnly, connection, outside) {
-    const number = /^[^\p{L}\d]*(\d+)[^\p{L}\d]*$/u;
-    const left = number.exec(html), right = number.exec(pdf), digits = left && right;
-    const from = start + (digits ? html.indexOf(left[1]) : 0), end = from + (digits ? left[1] : html).length;
-    let missing = !connection;
-    if (connection) {
-      const value = significantText(this.raw.slice(from, end));
-      let first;
-      for (const other of value || !missingOnly ? compared : noConnections) {
-        if (other !== connection && !(covers(other, from, end)
-          && (from < end || other.end > from || other.start === from))) continue;
-        first ??= other;
-        if (!value) break;
-        if (other !== connection && this.range(other.target, from, end, false, other)?.approximate === false) return;
-      }
-      const insideWord = connection.target.sourcePages?.length > 1 && /^\p{L}+$/u.test(value)
-        && (from > connection.start && /\p{L}/u.test(this.raw[from - 1]) || end < connection.end && /\p{L}/u.test(this.raw[end]));
-      missing = outside && !insideWord && /[\p{L}\p{N}]/u.test(html)
-        && (!pdf.trim() || /\p{L}/u.test(html) && !/\p{L}/u.test(pdf));
-      if (missing) ranges.push({ sourceStart: from, sourceEnd: end, connection });
-      if (!missingOnly && first !== connection) return;
-    }
-    if (missingOnly) return;
-    const at = lowerBound(items, from, item => item.sourceStart), next = items[at];
-    if (at && items[at - 1].sourceEnd > from
-      || next && (end === from ? next.sourceStart === from : next.sourceStart < end && next.sourceEnd > from)) return;
-    items.splice(at, 0, { sourceStart: from, sourceEnd: end, ...(missing && { missing: true }),
-      comparison: digits ? { html: left[1], pdf: right[1] } : { html, pdf } });
-  }
   // One traversal collects review items, uncovered intervals and their PDF edges.
   candidates(targets = this.prepared?.pages || [], connections, missingOnly = false) {
     connections ??= targets === this.prepared?.pages ? this.pairs : this.targetConnections(targets);
@@ -729,36 +663,62 @@ class PdfConnections {
       || connections.find(connection => connection.target?.sourcePages?.length)?.target);
     const live = connections.length ? connections : this.livePairs;
     const compared = live.length || !missingOnly ? live : this.targetConnections(target?.layer ? this.prepared?.full : target);
-    const index = target?.layer
-      ? this.prepared?.full || documentIndex(this.documents, this.pdf, this.environment.getSourcePages?.()) : target;
+    const index = target?.layer ? this.prepared?.full || this.#fullIndex : target;
     const page = target?.layer && matchingPage(index, target);
     const context = target && index && (!target.layer || page) ? { index, page, offset: page?.start || 0 } : null;
     const items = [], ranges = [], edges = [], ordered = [];
+    const addCandidate = (start, html, pdf, connection, outside) => {
+      const number = /^[^\p{L}\d]*(\d+)[^\p{L}\d]*$/u;
+      const left = number.exec(html), right = number.exec(pdf), digits = left && right;
+      const from = start + (digits ? html.indexOf(left[1]) : 0), end = from + (digits ? left[1] : html).length;
+      let missing = !connection;
+      if (connection) {
+        const value = significantText(this.raw.slice(from, end));
+        let first;
+        for (const other of value || !missingOnly ? compared : noConnections) {
+          if (other !== connection && !(covers(other, from, end)
+            && (from < end || other.end > from || other.start === from))) continue;
+          first ??= other;
+          if (!value) break;
+          if (other !== connection && this.range(other.target, from, end, false, other)?.approximate === false) return;
+        }
+        const insideWord = connection.target.sourcePages?.length > 1 && /^\p{L}+$/u.test(value)
+          && (from > connection.start && /\p{L}/u.test(this.raw[from - 1]) || end < connection.end && /\p{L}/u.test(this.raw[end]));
+        missing = outside && !insideWord && /[\p{L}\p{N}]/u.test(html)
+          && (!pdf.trim() || /\p{L}/u.test(html) && !/\p{L}/u.test(pdf));
+        if (missing) ranges.push({ sourceStart: from, sourceEnd: end, connection });
+        if (!missingOnly && first !== connection) return;
+      }
+      if (missingOnly) return;
+      const at = lowerBound(items, from, item => item.sourceStart), next = items[at];
+      if (at && items[at - 1].sourceEnd > from
+        || next && (end === from ? next.sourceStart === from : next.sourceStart < end && next.sourceEnd > from)) return;
+      items.splice(at, 0, { sourceStart: from, sourceEnd: end, ...(missing && { missing: true }),
+        comparison: digits ? { html: left[1], pdf: right[1] } : { html, pdf } });
+    };
     const prepared = this.connections.get(target)?.prepared;
     let gaps = missingOnly || prepared;
     for (const connection of (!target || context) ? compared : []) {
       gaps ||= connections.length > 0 && connection.target === target && connection.recovered;
-      const mapped = connection.target;
-      const base = !context || mapped === index || mapped?.layer && !index.pages?.length
-        ? 0 : matchingPage(index, mapped)?.start ?? null;
+      const base = !context || connection.target === index || connection.target?.layer && !index.pages?.length
+        ? 0 : matchingPage(index, connection.target)?.start ?? null;
       const diff = this.compare(connection);
       if (!diff) continue;
       let first, last;
       if (base !== null) {
         ordered.push(connection);
         for (const part of diff.parts) {
-          const { sourceEdge, targetEdge } = part;
-          if (sourceEdge > part.start && targetEdge > part.targetStart)
-            edges.push({ sourceEnd: connection.start + sourceEdge, targetEnd: base + connection.targetStart + targetEdge });
+          if (part.sourceEdge > part.start && part.targetEdge > part.targetStart)
+            edges.push({ sourceEnd: connection.start + part.sourceEdge, targetEnd: base + connection.targetStart + part.targetEdge });
           if (diff.reviewRanges.length && !part.changed && /\p{L}/u.test(part.pdf)) {
             first ??= part;
             last = part;
           }
         }
       }
-      for (const { start, end, html, pdf } of diff.reviewRanges) {
-        const outside = base !== null && (!first || end <= first.start || start >= last.end);
-        this.#addCandidate(connection.start + start, html, pdf, items, ranges, compared, missingOnly, connection, outside);
+      for (const part of diff.reviewRanges) {
+        const outside = base !== null && (!first || part.end <= first.start || part.start >= last.end);
+        addCandidate(connection.start + part.start, part.html, part.pdf, connection, outside);
       }
     }
     if (gaps && context) for (const [sourceStart, sourceEnd] of connectionGaps(ordered.sort((a, b) => a.start - b.start),
@@ -769,63 +729,87 @@ class PdfConnections {
       while (at < edges.length && edges[at].sourceEnd <= range.sourceStart) edge = edges[at++].targetEnd;
       const hit = !range.connection && target && prepared
         && this.range(target, range.sourceStart, range.sourceEnd, false, undefined, true);
-      const resolved = !!(hit && !hit.approximate && /[\p{L}\p{N}]/u.test(target.raw.slice(hit.start, hit.end)));
-      range.edge = edge; range.matched = !!edges.length; range.resolved = resolved;
+      range.edge = edge; range.matched = !!edges.length;
+      range.resolved = !!(hit && !hit.approximate && /[\p{L}\p{N}]/u.test(target.raw.slice(hit.start, hit.end)));
       const html = this.raw.slice(range.sourceStart, range.sourceEnd);
-      if (!resolved && significantText(html))
-        this.#addCandidate(range.sourceStart, html, '', items, ranges, compared, missingOnly);
+      if (!range.resolved && significantText(html)) addCandidate(range.sourceStart, html, '');
     }
     Object.defineProperty(items, 'missingRanges', { value: Object.assign(ranges, { context }) });
     return items;
   }
-  matches(queries, haystack = this.normalized, options = {}, blocks, contextual = false) {
-    let sample, page, step = 8, wholeWords = this.options?.wholeWords, anchors = !wholeWords;
-    if (typeof options === 'number') {
-      sample = options;
-      page = queries;
-      queries = null;
-    } else {
-      if (!options.sample) return findMatches(this, queries, haystack, options);
-      ({ sample, step = 0, anchors = false, wholeWords = this.options?.wholeWords, page, blocks, contextual = false } = options);
-    }
-    const target = page?.normalized, connections = target && this.targetConnections(page, false), matches = [];
+  matches(queries, haystack = this.normalized, options = {}) {
+    if (!options.sample && !options.align) return findMatches(this, queries, haystack, options);
+    const { page, blocks, contextual = false, align = false, wholeWords = this.options?.wholeWords,
+      sample = blocks ? contextual ? 12 : 16 : 24, step = align ? 8 : 0, anchors = align && !wholeWords } = options;
+    const pdf = page?.normalized, connections = pdf && this.targetConnections(page, false);
+    const matches = [], query = [''], exact = { anchors, wholeWords, limit: 2 };
+    const useContext = blocks && contextual;
     const passages = blocks ? blocks.length - 1 : queries?.length ?? 1;
-    let stop = blocks?.length ? lowerBound(target.starts, blocks[0]) : 0;
+    let stop = blocks?.length ? lowerBound(pdf.starts, blocks[0]) : 0;
     for (let block = 0; block < passages; block++) {
-      const passage = blocks || !queries ? target.text : queries[block];
+      const passage = blocks || !queries ? pdf.text : queries[block];
       const begin = blocks ? stop : 0;
-      stop = blocks ? lowerBound(target.starts, blocks[block + 1]) : passage.length;
-      const last = stop - begin - sample;
+      stop = blocks ? lowerBound(pdf.starts, blocks[block + 1]) : passage.length;
+      const span = stop - begin, last = span - sample;
       if (last < 0) continue;
-      const shortContext = blocks && contextual && last >= 8 && stop - begin <= 32;
-      const first = matches.length, count = step ? Math.ceil(last / step) + 1 : 5;
-      for (let i = 0, previous = -1; i < count; i++) {
-        const at = begin + (step ? Math.min(i * step, last) : Math.floor(last * i / 4));
-        if (at === previous) continue;
-        previous = at;
-        const fragment = passage.slice(at, at + sample);
-        if (blocks && !/\p{L}{2}/u.test(fragment)) continue;
-        const start = target?.starts[at], end = target?.ends[at + sample - 1];
+      const shortContext = useContext && last >= 8 && span <= 32;
+      const found = align ? [] : matches, first = found.length, scope = { block, begin, stop };
+      for (let i = 0, count = step ? Math.ceil(last / step) : Math.min(last, 4); i <= count; i++) {
+        const at = begin + (step ? Math.min(i * step, last) : Math.floor(last * i / (count || 1)));
+        query[0] = passage.slice(at, at + sample);
+        if (blocks && !/\p{L}{2}/u.test(query[0])) continue;
+        const start = pdf?.starts[at], end = pdf?.ends[at + sample - 1];
         const pair = connections?.find(item => covers(item, start, end, reverseRangeKeys));
-        const mapped = pair && this.range(page, start, end, true, pair);
-        const hits = mapped && !mapped.approximate ? null : findMatches(this, [fragment], haystack, { anchors, wholeWords, limit: 2 });
-        let hit = !hits ? mapped : hits.length === 1 ? hits[0] : null;
-        if (hits?.length > 1 && blocks && contextual) {
+        let hit = pair && this.range(page, start, end, true, pair), duplicate;
+        if (!hit || hit.approximate) [hit, duplicate] = findMatches(this, query, haystack, exact);
+        if (duplicate) {
+          if (!useContext) continue;
           const left = passage.slice(Math.max(begin, at - 32), at);
           const right = passage.slice(at + sample, Math.min(stop, at + sample + 32));
           const before = shortContext ? left : left.trim(), after = shortContext ? right : right.trim();
-          if (shortContext || before.length + after.length >= sample) {
-            const match = findMatches(this, [fragment], haystack, { anchors, wholeWords, before, after, best: true, contextual: shortContext });
-            if (match && !match.approximate && (shortContext || match.score >= sample)) hit = match;
-          }
+          if (!shortContext && before.length + after.length < sample) continue;
+          hit = findMatches(this, query, haystack, { anchors, wholeWords, before, after, best: true, contextual: shortContext });
+          if (hit?.approximate || !shortContext && !(hit?.score >= sample)) continue;
         }
-        if (hit) matches.push({ at, start: lowerBound(haystack.starts, hit.start),
-          end: lowerBound(haystack.starts, hit.end), ...(blocks && { block, begin, stop, context: hit.score }) });
+        if (hit) found.push({ at, start: lowerBound(haystack.starts, hit.start),
+          end: lowerBound(haystack.starts, hit.end), ...(blocks && { context: hit.score }), ...(blocks && !align && scope) });
       }
-      if (blocks && matches.length === first + 1) {
-        const { at, context } = matches[first];
-        const anchor = shortContext && context !== undefined ? passage.slice(begin, stop).trim() : passage.slice(at, at + sample);
-        if (findMatches(page, [anchor], target, { anchors: true }).length > 1) matches.pop();
+      const only = blocks && found.length === first + 1 && found[first];
+      if (only) {
+        query[0] = shortContext && only.context !== undefined
+          ? passage.slice(begin, stop).trim() : passage.slice(only.at, only.at + sample);
+        if (findMatches(page, query, pdf, { anchors: true }).length > 1) found.pop();
+      }
+      if (!align || !found.length) continue;
+
+      let range;
+      for (let i = 0, count = found.length - Number(!blocks); i < count;) {
+        const anchor = found[i++], following = found[i] ?? anchor;
+        const extraGap = following.start - anchor.start - (following.at - anchor.at);
+        let nextIndex = i;
+        if (blocks && extraGap > 32) for (let k = i + 1; found[k]?.at <= anchor.at + sample * 4; k++) {
+          const start = found[k].start;
+          if (start <= anchor.start || start >= following.start) continue;
+          nextIndex = k;
+          break;
+        }
+        const next = found[nextIndex] ?? anchor, end = next.end, targetEnd = next.at + sample;
+        const length = targetEnd - anchor.at;
+        if (length > 2048 || next !== anchor && next.start <= anchor.start) continue;
+        const distanceFrom = (pdfStart, htmlStart, budget) =>
+          textDiff(passage.slice(pdfStart, targetEnd), haystack.text.slice(htmlStart, end), false, budget).distance;
+        const limit = Math.min(32, Math.max(12, Math.floor(length * .2)));
+        const distance = distanceFrom(anchor.at, anchor.start, limit);
+        if (distance > limit) continue;
+        i = nextIndex;
+        let merged = Infinity;
+        if (range && range.targetEnd >= anchor.at && range.end >= anchor.start) {
+          const budget = 128 - range.distance;
+          const suffix = end >= range.end ? distanceFrom(range.targetEnd, range.end, budget) : Infinity;
+          merged = suffix <= budget ? range.distance + suffix : distanceFrom(range.at, range.start, 128);
+        }
+        if (merged <= 128) Object.assign(range, { targetEnd, end, distance: merged });
+        else matches.push(range = { ...anchor, ...scope, targetEnd, end, distance });
       }
     }
     return matches;
@@ -845,9 +829,13 @@ class PdfConnections {
     entry.after = last.index.raw.slice(last.end, last.end + 160);
     const left = this.connections.get(first.index)?.scope, right = this.connections.get(last.index)?.scope;
     const scope = left && right && left.start <= right.start ? { start: left.start, end: right.end } : null;
-    const hit = chunks.length === 1
-      ? this.locate(first.index, entry, true, scope)
-      : this.search(entry, scope);
+    const full = this.prepared?.full, from = matchingPage(full, first.index), to = matchingPage(full, last.index);
+    const start = from && from.start + first.start, end = to && to.start + last.end;
+    const mapped = from && to && start < end
+      && (first === last || significantText(full.raw.slice(start, end)) === significantText(entry.text))
+      && this.range(full, start, end, true, this.targetConnections(full).find(pair => covers(pair, start, end, reverseRangeKeys)));
+    const hit = mapped && (mapped.connection || !mapped.approximate) ? mapped
+      : first === last ? this.locate(first.index, entry, true, scope) : this.search(entry, scope);
     const html = hit && this.raw.slice(hit.start, hit.end);
     const difference = !hit ? { message: "No reliable HTML match" } : html !== entry.text ? { html, pdf: entry.text } : null;
     return { hit, difference };

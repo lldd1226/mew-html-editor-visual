@@ -13,9 +13,9 @@ PDF 审阅使用原有紧凑弹窗，每次显示一个候选，通过前后条�
 `index.html` 和 `reader.html` 共用“审阅”按钮及“审阅选项”菜单。按钮直接打开 PDF 差异审阅；双窗口时使用当前配对编辑器，同时显示源码与 PDF 弹窗。
 
 - `public/pdfdiff/pdf-review-provider.js`：统一加载入口；普通函数负责 PDF 文字、字体元数据和渲染层样式读取及共享读取缓存，`PdfLocator` 负责索引准备；管理 PDF 文字/格式候选、差异标记和替换操作，向共用弹窗提供数据与动作。
-- `public/editor-core.js`：`DocumentModel` 实例持有自己的编辑器 model、版本快照和 HTML 文本/坐标索引，并负责编辑校验和提交。编辑器通过 `editor.document` 直接持有当前实例，不再提供静态文档工具入口。Monaco 和 VS Code 原生文档仍持有正文、版本和撤销历史。
-- `public/pdfdiff/pdf-selection-diff.js`：文本归一化、差异计算和匹配算法。
-- `public/pdfdiff/pdf-connection.js`：`PdfConnections` 构造函数直接接收 HTML 字符串、`DocumentModel` 或已解析索引；HTML 解析仍由 `DocumentModel.parse()` 完成。PDF 索引实例保存自己的 `pdf/sourcePages/raw/pages/task`；读取、字体准备与 DOM 测量继续使用 provider 的现有入口，连接类不再重复转接这些职责。`normalized: null` 表示读取尚未完成，归一化结果发布后才可供同步定位。`update()` 维护确认映射和 `pairs`，界面装饰继续由 provider 生成。
+- `public/editor-core.js`：`DocumentModel` 持有编辑器 model、版本快照和 HTML 解析结果，负责编辑校验和提交。PDF 流程使用的源码分段、文字替换和格式替换直接由 `PdfConnections` 读取自身的源码、坐标和标签属性生成，不增加中间基类。
+- `public/pdfdiff/pdf-selection-diff.js`：文本归一化、差异计算、单段正反向字符映射与选区差异模式匹配，不读取页布局或审阅状态。
+- `public/pdfdiff/pdf-connection.js`：`PdfConnections` 构造函数直接接收 HTML 字符串、`DocumentModel` 或已解析索引；HTML 解析仍由 `DocumentModel.parse()` 完成。PDF 索引实例保存自己的 `pdf/sourcePages/raw/pages/task`；读取、字体准备与 DOM 测量继续使用 provider 的现有入口，连接类不再重复转接这些职责。`normalized: null` 表示读取尚未完成，归一化结果发布后才可供同步定位。`connect()` 维护确认映射和 `pairs`；页级锚点、跨页切分和定位结果由 connection 生成，界面装饰由 provider 生成。
 - `public/pdfdiff/replacement-review.js`：共用弹窗、会话、前后条导航、保存和分窗切换，以及通用文字范围测量、叠层绘制、Monaco 标记缓存、选区命中与清理；提供 `ReplacementReview` 注册接口和 `ReviewHighlights.create()`，每个高亮调用方创建独立实例。
 - `public/pdfdiff/pdf-selection.js`：PDF 与源码选区的双向定位、选区跟踪和滚动；发布已准备好的映射数据，不创建弹窗或判断字体差异。
 
@@ -57,9 +57,9 @@ ReplacementReview.register({
 });
 ```
 
-`context.documentModel` 是当前编辑器 model 所属的 `DocumentModel` 实例，提供范围转换、快照、索引、编辑校验和提交；文字、字体比较工具由 `PdfSelectionDiff` 提供；源码定位与候选接口使用 `new PdfReviewProvider.PdfLocator()`、`index.candidates()`。调用前通过 `await window.PdfReviewReady` 完成初始化。启动与模型同步、宿主消息由 `pdf-review-provider.js` 管理；`replacement-review.js` 只负责共享弹窗、高亮和交互。`PdfLocator` 管理源码和文档索引缓存，每个索引就是一个 `PdfConnections` 实例，直接持有公开的 `source/raw`、坐标和连接；`PdfLocator.model/pdf/options` 使用直接字段，编辑器切换时由 `editorSourceIndex()` 更新模型与 PDF；`options` 保留同一对象供索引共用，选项更新通过 `Object.assign` 完成。`new PdfSelectionDiff.PdfConnections(locator, textOrDocument)` 完成源码索引初始化，不再提供 `locator.sourceIndex()` 包装。PDF／页范围缓存直接保存索引实例，共享其 `task`；`normalized` 完成后才通过 `getDocumentIndex()` 公开它，取消与失败的加载从缓存删除；完整类由 `PdfSelectionDiff.PdfConnections` 导出，provider 复用同一类。定位、字体、源码装饰和编辑调用 `index.search()`、`index.locate()`、`index.matches()`、`index.pairs()`、`index.compare()`、`index.range()`、`index.entry()`、`index.candidates()`、`index.formatDifferences()`、`index.fontRuns()`、`index.sourceDecorations()`、`index.textEdits()`、`index.fontEdits()` 等实例方法；无实例状态的归一化和字体定义工具仍是`PdfSelectionDiff` 普通函数，不再经过 locator 包装。
+`context.documentModel` 是当前编辑器 model 所属的 `DocumentModel`。调用前通过 `await window.PdfReviewReady` 完成初始化。`PdfLocator.editorSourceIndex(documentModel)` 按模型、PDF 和页范围复用 `PdfConnections`；`index.getDifferences()` 只准备该快照的映射与原始差异区间，不构造 UI 选项或 edits。`locator.reviewItems(context)` 返回可供审阅的完整队列，`cacheReview(data, options)` 统一处理字体筛选、候选组装、选区分组和替换计划。`index.formatDifferences()` 已移除。源码装饰由 `PdfReviewProvider.sourceDecorations()` 提供，PDF 审阅的 HTML 编辑操作由 `PdfConnections` 直接生成，`DocumentModel` 校验并提交。
 
-`ReviewHighlights.measureHighlights()` 通过索引的 `fontRuns(start, end, true)` 获取文字节点范围，复用弹窗锚点的坐标查找；`ReviewHighlights.create()` 不再接收 `lowerBound`。公共高亮模块只依赖这个索引接口，不导入 PDF 类。
+`locator.findLocations(pdf, entries, visibleOnly)` 控制可见页与全文索引加载，调用 `PdfConnections.locations()` 完成页级映射；selection 只消费定位结果。单段字符映射由 `mapDiffRange()` 提供，选区中的同类差异由 `matchingChanges()` 匹配。`ReviewHighlights` 通过 `fontRuns(start, end, true)` 取得节点范围，继续独立负责测量与绘制。
 
 注册 PDF 审阅时，`locator` 直接提供共享 `PdfLocator` 实例，宿主调用其 `reviewItems(context)`，不经 `provide` 转接。当前 `model/index` 由 locator 持有，弹窗 context 不保存 `index/targets` 副本。队列准备时统一确定 `data.partial` 和候选列表，`cacheReview()` 共用组装流程；完整队列按 pattern 分组，快速结果按候选自身分组。预览、高亮和替换直接从 `reviewLists` 读取准备好的分组，不经过转发包装或重新扫描候选。`prepareReview()` 只校验普通上下文并更新共享索引；provider 的 `onDifference()`、`onReviewClosed()` 分别处理弹窗事件和关闭状态，选中事件直接将整理好的 `request` 传给 `reviewItems(context)`，不再通过 locator 临时存取 `reviewRequest`，也不绑定或改写实例方法；携带 `source` 的 `reviewItems(context)` 继续复用 `indexDocument/indexFonts` 的读取缓存。无参 `reviewItems()` 也会显式取得当前模型版本的索引，独立模型入口传入 `model` 更新索引；`index.getDifferences()` 只计算所属索引快照，不再通过属性读取切换 locator 的当前索引。源码发布事件只传编辑器、PDF、目标和开关，由 provider 准备源码索引。其他 provider 保持 `provide(context)` 接口。
 

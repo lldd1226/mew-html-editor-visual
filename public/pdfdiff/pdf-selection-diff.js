@@ -279,50 +279,6 @@ function extendPageRange(from, to, a, x, step, exact = false, word = /^[\p{L}\p{
     && !/[\p{L}\p{N}\p{Pd}]/u.test(to[xx + offset] || '')) { a = aa; x = xx; }
   return extendPageRange(from, to, a, x, step, true);
 }
-function closestEdge(fragment, points, textAt, limit) {
-  let closest;
-  for (const at of points) {
-    const distance = textDiff(textAt(at), fragment, false, limit).distance;
-    if (distance > limit) continue;
-    closest = at; limit = distance - 1;
-    if (distance === 0) break;
-  }
-  return closest;
-}
-
-const overlapsDifference = (item, start, end) => item.sourceStart <= end && item.sourceEnd >= start
-  && (item.sourceEnd > start || item.sourceStart === start) && (item.sourceStart < end || item.sourceEnd === end);
-function* matchingChanges(raw, text, notice, selectedStart, accept) {
-  const changes = comparisonIndex(notice).parts.filter(part => part.changed), [change] = changes;
-  if (!change) return;
-  for (const anchor of text) {
-    if (anchor.missing) continue;
-    offsets: for (let offset = anchor.comparison.html.indexOf(change.html); offset >= 0;
-      offset = change.html ? anchor.comparison.html.indexOf(change.html, offset + 1) : -1) {
-      const start = anchor.sourceStart + offset - change.start, end = start + notice.html.length;
-      if (start === selectedStart || start < 0 || raw.slice(start, end) !== notice.html
-        || accept && !accept(anchor)) continue;
-      let matched = 0;
-      const stop = lowerBound(text, end + 1, item => item.sourceStart);
-      for (let at = lowerBound(text, start, item => item.sourceEnd); at < stop; at++) {
-        const { comparison, sourceStart, missing } = text[at];
-        if (!overlapsDifference(text[at], start, end)) continue;
-        if (missing) continue offsets;
-        for (const part of comparisonIndex(comparison).parts) {
-          if (!(comparison.selection === true ? part.changed : part.inconsistent)) continue;
-          const from = sourceStart + part.start, a = Math.max(start, from), b = Math.min(end, sourceStart + part.end);
-          if (a > b) continue;
-          const expected = changes[matched++], left = a - from, right = b - from;
-          if (!expected || expected.start !== a - start || expected.end !== b - start || expected.html !== part.html.slice(left, right)) continue offsets;
-          if (expected.pdf !== (left === 0 && right === part.html.length ? part.pdf
-            : part.html.length === part.pdf.length ? part.pdf.slice(left, right) : null)) continue offsets;
-        }
-      }
-      if (matched !== changes.length) continue;
-      yield start;
-    }
-  }
-}
 function comparisonIndex(value) {
   if (!value.comparisonDiff || value.comparisonDiff.html !== value.html || value.comparisonDiff.pdf !== value.pdf)
     value.comparisonDiff = textDiff(value.html, value.pdf, true);
@@ -434,5 +390,5 @@ function findMatches(index, queries, haystack = index.normalized, {
   if (best) return null;
   return [...found.values()];
 }
-window.PdfSelectionDiff = { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, closestEdge, overlapsDifference, matchingChanges, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
-export { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, closestEdge, overlapsDifference, matchingChanges, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
+window.PdfSelectionDiff = { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
+export { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
