@@ -24,7 +24,6 @@ function sourceDecorations(index, items = [], fonts = true, text = true, hover, 
   }
 }
 function sourceHover(item, model, command) {
-  if (nativeEditor) return;
   const request = { model: model.uri?.toString(), version: model.getVersionId?.(), id: item.id };
   const link = (label, data) => `[${label}](command:${command}?${encodeURIComponent(JSON.stringify([data]))})`;
   const text = side => {
@@ -895,7 +894,8 @@ window.PdfReviewReady = (async () => {
   window.addEventListener('replacement-review-closed', onReviewClosed);
   window.PdfReviewProvider = {
     PdfLocator, get locator() { bind(); return locator; }, highlights,
-    textItemBaseline: pdfTextBaseline, fontStyle: pdfFontStyle, sourceDecorations, sourceHover, fontSummary, comparisonRows, readPageText, readPageFonts, layerFonts,
+    textItemBaseline: pdfTextBaseline, fontStyle: pdfFontStyle, sourceDecorations, fontSummary, comparisonRows, readPageText, readPageFonts, layerFonts,
+    ...(!nativeEditor && { sourceHover }),
     setFontEnabled(value, key, persist = true) {
       locator.fontStyles = fontKeys.filter(name => !key || name === key ? value : locator.fontStyles.includes(name));
       if (persist) for (const style of key ? [key] : fontKeys)

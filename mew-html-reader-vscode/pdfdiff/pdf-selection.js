@@ -1,24 +1,123 @@
-// ==UserScript==
-// @name         MEW PDF selection highlight
-// @namespace    mew-local
-// @version      1.9.0
-// @match        http://localhost/*
-// @match        http://127.0.0.1/*
-// @grant        none
-// @run-at       document-idle
-// ==/UserScript==
-// Reader selection attachment; review owns loading and rendering. See pdf-selection.md.
+// The same VS Code module owns native source access and PDF-side selection.
+if (typeof module === 'object' && module.exports) {
+  const vscode = require('vscode');
+  const { sameUri, reviewSourceSnapshot, reviewDecorationGroups } = require('../reader-core.cjs');
+  module.exports.attach = (reader, panel) => {
+    const subscriptions = [], decorations = new Map();
+    let disposed = false, previous = null, signature = '', lastChange = null;
+    const range = value => new vscode.Range(value.startLineNumber - 1, value.startColumn - 1,
+      value.endLineNumber - 1, value.endColumn - 1);
+    const editors = () => (vscode.window.visibleTextEditors || []).filter(editor => sameUri(editor.document.uri, reader.current?.uri));
+    function clear() {
+      for (const type of decorations.values()) type.dispose();
+      decorations.clear();
+    }
+    async function snapshot() {
+      const current = reader.current;
+      if (!current || !sameUri(current.volume.pdfUri, reader.panelPdfUri)) return { uri: null, text: '', readOnly: true };
+      const document = await vscode.workspace.openTextDocument(current.uri);
+      if (reader.current !== current || reader.panel !== panel || disposed) return null;
+      const editor = editors()[0], groups = vscode.window.tabGroups?.all || [];
+      const html = groups.find(group => group.viewColumn === editor?.viewColumn
+        && group.tabs.some(tab => sameUri(tab.input?.uri, current.uri)))
+        || groups.find(group => group.tabs.some(tab => sameUri(tab.input?.uri, current.uri)));
+      const pdf = groups.find(group => group.tabs.some(tab => tab.input?.viewType === 'mewReader.pdf'
+        && sameUri(tab.input.uri, reader.panelPdfUri)));
+      const sourceColumn = editor?.viewColumn ?? html?.viewColumn ?? null;
+      const pdfColumn = pdf?.viewColumn ?? panel.viewColumn ?? null;
+      return { ...reviewSourceSnapshot(document, current, editor?.selections),
+        changes: lastChange?.uri === document.uri.toString(true) && lastChange.version === document.version ? lastChange.changes : undefined,
+        layout: { sourceViewColumn: sourceColumn, pdfViewColumn: pdfColumn,
+          // Columns alone cannot distinguish groups in different windows.
+          // Simultaneously visible native editors must be in separate views.
+          splitView: editor && panel.visible ? true : html && pdf ? html !== pdf
+            : sourceColumn != null && pdfColumn != null ? sourceColumn !== pdfColumn : null } };
+    }
+    async function publish() {
+      if (disposed || reader.panel !== panel || !reader.ready) return;
+      const value = await snapshot();
+      if (!value || disposed || reader.panel !== panel) return;
+      if (previous?.uri !== value.uri || previous?.version !== value.version) clear();
+      previous = value;
+      const key = JSON.stringify(value);
+      if (key === signature) return;
+      signature = key;
+      await panel.webview.postMessage({ type: 'reviewSource', snapshot: value });
+    }
+    async function document(message) {
+      const current = reader.current;
+      if (disposed || reader.panel !== panel || !current || message.uri !== current.uri.toString(true)
+        || !sameUri(current.volume.pdfUri, reader.panelPdfUri)) throw new Error('文件已切换，请重新审阅。');
+      const document = await vscode.workspace.openTextDocument(current.uri);
+      if (disposed || reader.current !== current || reader.panel !== panel || document.version !== message.version)
+        throw new Error('原文已变化，请重新审阅。');
+      return document;
+    }
+    const source = { range, editors, snapshot, publish, document,
+      async reply(message, result) {
+        if (!disposed && reader.panel === panel) await panel.webview.postMessage({ type: 'reviewResult', id: message.id,
+          ...result, snapshot: await snapshot() });
+      } };
+    const changed = () => void publish().catch(reader.report);
+    if (panel.onDidChangeViewState) subscriptions.push(panel.onDidChangeViewState(changed));
+    subscriptions.push(vscode.workspace.onDidChangeTextDocument(event => {
+      if (!sameUri(event.document.uri, reader.current?.uri)) return;
+      if (event.contentChanges.length) lastChange = { uri: event.document.uri.toString(true), version: event.document.version,
+        changes: event.contentChanges.map(({ rangeOffset, rangeLength, text }) => ({ rangeOffset, rangeLength, text })) };
+      changed();
+    }));
+    for (const [owner, event] of [[vscode.workspace, 'onDidSaveTextDocument'],
+      [vscode.window, 'onDidChangeTextEditorSelection'], [vscode.window, 'onDidChangeVisibleTextEditors'],
+      [vscode.window.tabGroups, 'onDidChangeTabGroups'], [vscode.window.tabGroups, 'onDidChangeTabs']])
+      if (owner?.[event]) subscriptions.push(owner[event](changed));
+    subscriptions.push(panel.webview.onDidReceiveMessage(message => {
+      if (!['reviewSelection', 'reviewFocus', 'reviewDecorations'].includes(message?.type)) return;
+      const focusRevision = message.type === 'reviewFocus' ? ++reader.focusRevision : reader.focusRevision;
+      void (async () => {
+        const doc = await document(message);
+        if (message.type === 'reviewFocus') {
+          const column = editors()[0]?.viewColumn ?? (await snapshot())?.layout?.sourceViewColumn ?? vscode.ViewColumn.Active;
+          if (disposed || reader.panel !== panel || focusRevision !== reader.focusRevision) return;
+          return vscode.window.showTextDocument(doc, { viewColumn: column, preserveFocus: false, preview: false });
+        }
+        if (message.type === 'reviewSelection') {
+          for (const editor of editors()) {
+            const selections = message.selections.map(value => new vscode.Selection(
+              new vscode.Position((value.selectionStartLineNumber ?? value.startLineNumber) - 1, (value.selectionStartColumn ?? value.startColumn) - 1),
+              new vscode.Position((value.positionLineNumber ?? value.endLineNumber) - 1, (value.positionColumn ?? value.endColumn) - 1)));
+            if (JSON.stringify(editor.selections) !== JSON.stringify(selections)) editor.selections = selections;
+            if (editor.selection) editor.revealRange(editor.selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+          }
+          return;
+        }
+        const groups = reviewDecorationGroups(message.decorations);
+        for (const name of groups.keys()) if (name && !decorations.has(name)) {
+          const accent = new vscode.ThemeColor(name === 'mew-font-diff-text' ? 'editorWarning.foreground' : 'editorInfo.foreground');
+          decorations.set(name, vscode.window.createTextEditorDecorationType(name === 'mew-ocr-diff-insert'
+            ? { before: { contentText: '\u200b', border: '1px solid', borderColor: accent } }
+            : { backgroundColor: name === 'mew-review-current' ? new vscode.ThemeColor('diffEditor.removedTextBackground')
+              : name === 'mew-review-proposed' ? new vscode.ThemeColor('diffEditor.insertedTextBackground')
+              : name === 'mew-ocr-diff-text' ? new vscode.ThemeColor('editor.findMatchHighlightBackground') : undefined,
+              textDecoration: name === 'mew-review-current' ? 'line-through' : name === 'mew-font-diff-text' ? 'underline wavy' : undefined,
+              borderWidth: '0 0 1px 0', borderStyle: 'solid', borderColor: accent }));
+        }
+        for (const [name, type] of decorations) for (const editor of editors()) editor.setDecorations(type,
+          (groups.get(name) || []).map(mark => ({ range: range(mark.range), renderOptions: mark.after?.content ? {
+            after: { contentText: mark.after.content, backgroundColor: new vscode.ThemeColor('diffEditor.insertedTextBackground') }
+          } : undefined })));
+      })().catch(() => publish().catch(reader.report));
+    }));
+    panel.onDidDispose(() => { disposed = true; subscriptions.forEach(value => value.dispose()); clear(); });
+    return source;
+  };
+} else {
 (async () => {
   "use strict";
   if (typeof window === "undefined" || window.PdfSelection) return;
   if (!window.PdfReviewReady) await import('./pdf-review-provider.js');
   const review = await window.PdfReviewReady;
   if (window.PdfSelection) return;
-  const options = {
-    viewerModuleUrl: "/vendor/pdfjs/web/pdf_viewer.mjs",
-    color: "rgba(255, 196, 0, 0.42)", wholeWords: false,
-    ...window.PdfSelectionOptions
-  };
+  const options = window.PdfSelectionOptions;
   const cleanup = [], editors = new WeakSet(), selectionDocuments = new WeakSet();
   let selecting = false, pendingDifference = null;
   const layers = new Map();
@@ -27,12 +126,11 @@
   let preparationTask = null, lastInteraction = 0, lastIndexYield = 0, lastEdit = -Infinity;
   let activeEditor = null, syncingPdf = false, contexts = [], locationSearch = null, scrolled = false, positioned = false;
   let reviewPointer = null, defaultPointer = null;
-  let viewer = null, revision = 0, timer, stopped = false, hooking = false, diffHighlight = true, sourceDiffHighlight = true, selectionHighlight = true;
+  let viewer = null, revision = 0, timer, stopped = false, diffHighlight = true, sourceDiffHighlight = true, selectionHighlight = true;
   let preferenceWrites = Promise.resolve(), selectionRevision = 0, notifiedSelection = -1, interactionId = 0;
   try {
-    const response = await fetch('/api/reader/settings');
-    if (response.ok) {
-      const settings = await response.json();
+    const settings = options.settings;
+    if (settings) {
       diffHighlight = settings.diffHighlight !== false;
       sourceDiffHighlight = (settings.sourceDiffHighlight ?? settings.diffHighlight) !== false;
       selectionHighlight = settings.selectionHighlight !== false;
@@ -40,13 +138,7 @@
       window.ReplacementReview.refreshMenu();
     }
   } catch {}
-  let visualDocument = null, detachVisual = () => {};
-  let pairedWindow = null, pairedSession = "";
-  function currentEditor() {
-    try { return window.ReaderUI?.getSourceEditor
-      ? window.ReaderUI.getSourceEditor(pairedWindow && !pairedWindow.closed ? pairedWindow.mewWorkbench : null)
-      : activeEditor; } catch { return null; }
-  }
+  const currentEditor = () => activeEditor?.getModel() ? activeEditor : null;
   const sourcePages = () => window.ReaderUI?.getPdfSourcePages?.();
   Object.assign(review.locator.options, options);
   Object.assign(review.locator.environment, {
@@ -57,7 +149,7 @@
     },
     getTargets() {
       const pdf = viewer?.pdfDocument, numbers = sourcePages();
-      if (window.ReaderUI?.getSourceEditor && !currentEditor()) return [];
+      if (!currentEditor()) return [];
       return [...layers.values()].filter(page => page.pdf === pdf && (!numbers || numbers.includes(page.number))
         && page.columnText === review.locator.columnText(pdf, page.number));
     },
@@ -74,7 +166,6 @@
     },
     onIndexed: () => queueWarm()
   });
-  cleanup.push(() => detachVisual());
   const status = { state: "waiting-for-pdf", pages: [], matches: 0, differences: [], error: null };
   const api = window.PdfSelection = {
     status, locator: review.locator, attachEditor, attachViewer, savePreference, refresh: publishSources,
@@ -151,9 +242,7 @@
   };
   function savePreference(key, value, message) {
     preferenceWrites = preferenceWrites.then(async () => {
-      const response = await fetch('/api/reader/settings', { method: 'PUT',
-        headers: { 'content-type': 'application/json' }, body: JSON.stringify({ [key]: value }) });
-      if (!response.ok) throw new Error(message);
+      await options.savePreference(key, value);
     }).catch(() => window.ReaderUI?.notify(message, true));
   }
   function report(state, detail = {}) {
@@ -232,7 +321,6 @@
   }
   function attachEditor(editor) {
     editor = editor?.editor || editor;
-    if (window.ReaderUI?.getSourceEditor && editor !== currentEditor()) return;
     const editorApi = editor?.getDomNode?.()?.ownerDocument.defaultView.monaco || window.monaco;
     if (editorApi && editor?.getOption?.(editorApi.editor.EditorOption.inDiffEditor)) return;
     if (!editor?.onDidChangeCursorSelection || editors.has(editor)) return;
@@ -247,7 +335,7 @@
     let readTimer = null;
     cleanup.push(() => clearTimeout(readTimer));
     const read = event => {
-      if (syncingPdf || window.ReaderUI?.getSourceEditor && editor !== currentEditor()) return;
+      if (syncingPdf) return;
       if (event?.changes || readTimer !== null) {
         if (event?.changes) lastEdit = event.isFlush ? -Infinity : performance.now();
         if (readTimer === null) select([]);
@@ -295,21 +383,6 @@
     if (click) cleanup.push(() => click.dispose());
     if (viewer) warm();
     if (editor.hasTextFocus() || editor.getDomNode()?.ownerDocument !== document) read();
-  }
-  function attachVisual(doc) {
-    if (!doc || doc === visualDocument) return;
-    detachVisual(); visualDocument = doc;
-    const read = () => {
-      const range = doc.getSelection();
-      if (range?.anchorNode && doc.body?.contains(range.anchorNode) && range.rangeCount) {
-        const selected = range.getRangeAt(0), before = doc.createRange(), after = doc.createRange();
-        before.selectNodeContents(doc.body); before.setEnd(selected.startContainer, selected.startOffset);
-        after.selectNodeContents(doc.body); after.setStart(selected.endContainer, selected.endOffset);
-        select([{ text: range.toString(), before: before.toString(), after: after.toString() }], true);
-      }
-    };
-    doc.addEventListener("selectionchange", read);
-    detachVisual = () => doc.removeEventListener("selectionchange", read);
   }
   function attachViewer(instance) {
     if (!instance?.getPageView || !instance.eventBus || viewer === instance) return;
@@ -380,43 +453,6 @@
       enabled: sourceDiffHighlight, diffEnabled: diffHighlight
     } }));
   }
-  async function discoverPdf() {
-    if (hooking || stopped || !window.pdfjsLib) return;
-    hooking = true;
-    try {
-      const { PDFViewer, EventBus } = await import(new URL(options.viewerModuleUrl, document.baseURI).href);
-      if (stopped) return;
-      const originalDispatch = EventBus.prototype.dispatch;
-      function dispatch(name, data) {
-        if (data?.source instanceof PDFViewer) attachViewer(data.source);
-        return originalDispatch.call(this, name, data);
-      }
-      EventBus.prototype.dispatch = dispatch;
-      cleanup.push(() => { if (EventBus.prototype.dispatch === dispatch) EventBus.prototype.dispatch = originalDispatch; });
-      attachViewer(window.ReaderUI?.getPdfViewer?.() || window.PDFViewerApplication?.pdfViewer);
-      document.querySelectorAll("#stage,.pdfViewer").forEach(node => node.dispatchEvent(new Event("scroll")));
-    } catch (error) {
-      hooking = false;
-      report("error", { error: `Cannot attach PDF.js: ${error.message}` });
-    }
-  }
-  function discover() {
-    attachEditor(window.readerMonaco?.editor);
-    attachEditor(window.mewWorkbench?.editor);
-    window.monaco?.editor?.getEditors?.().forEach(attachEditor);
-    const frame = document.getElementById("visualEditor");
-    try { attachVisual(frame?.contentDocument); } catch { /* cross-origin frame */ }
-    const params = new URLSearchParams(location.search), session = params.get("sync") || "";
-    if (params.get("view") === "reader" && /^[\w-]{1,128}$/.test(session) && session !== pairedSession) {
-      pairedSession = session;
-      pairedWindow = window.open("", `mew-editor-${session}`);
-      try { if (pairedWindow?.location.href === "about:blank") { pairedWindow.close(); pairedWindow = null; } } catch { pairedWindow = null; }
-    }
-    try { if (pairedWindow && !pairedWindow.closed) attachEditor(pairedWindow.mewWorkbench?.editor); } catch { /* editor is navigating */ }
-    attachViewer(window.ReaderUI?.getPdfViewer?.() || window.PDFViewerApplication?.pdfViewer);
-    void discoverPdf();
-  }
-  listen(window, "reader-visual-ready", event => attachVisual(event.detail?.document));
   trackSelection(document);
   listen(document, "selectionchange", selectFromPdf);
   listen(window, "resize", schedule);
@@ -424,19 +460,8 @@
     clearLayers(); queueWarm(); schedule();
   });
   listen(window, "pagehide", () => api.stop());
-  const originalOpen = window.open;
-  function open(...args) {
-    const popup = originalOpen.apply(this, args);
-    if (String(args[1] || "").startsWith("mew-editor-")) {
-      pairedWindow = popup; pairedSession = String(args[1]).slice("mew-editor-".length);
-    }
-    return popup;
-  }
-  window.open = open;
-  cleanup.push(() => { if (window.open === open) window.open = originalOpen; });
-  const poll = setInterval(discover, 500);
-  cleanup.push(() => clearInterval(poll));
-  discover();
+  attachEditor(window.readerMonaco);
+  attachViewer(window.ReaderUI.getPdfViewer());
   function trackSelection(doc) {
     if (selectionDocuments.has(doc)) return;
     selectionDocuments.add(doc);
@@ -503,10 +528,7 @@
       if (start !== end) chunks.push({ div, index, start: Math.min(start, end), end: Math.max(start, end) });
     }
     if (!chunks.length) return;
-    let editor = currentEditor();
-    if (!window.ReaderUI?.getSourceEditor) {
-      try { editor = (!pairedWindow?.closed && pairedWindow?.mewWorkbench?.editor) || editor; } catch { /* editor is navigating */ }
-    }
+    const editor = currentEditor();
     const model = editor?.getModel();
     if (!model || !editor.setSelection) return;
     activeEditor = editor;
@@ -629,7 +651,7 @@
     }
     review.highlights.clearHighlights(true, visible);
   }
-  function publishDifferences(div, painted, notices, pointer = false, side) {
+  function publishDifferences(div, painted, notices, pointer = false, side = 'html') {
     // Publish mapping data only. The review adapter chooses where and how to show it.
     const editor = currentEditor(), model = editor?.getModel(), selected = selectionRevision;
     if (notices.length) setTimeout(function publish() {
@@ -720,3 +742,5 @@
       matches: results.reduce((sum, page) => sum + page.matches, 0) });
   }
 })().catch(error => console.error(error));
+
+}

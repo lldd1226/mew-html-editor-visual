@@ -89,6 +89,7 @@ const browser = await launchBrowser();
 try {
   const page = await browser.newPage({ viewport: { width: 1200, height: 850 } });
   const errors = [];
+  let nativeHover = false;
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') console.error(message.text()); });
   const panel = controller.panel = { onDidDispose() {}, webview: { onDidReceiveMessage(callback) { handlers.push(callback); return disposable; }, postMessage: async message => {
@@ -98,6 +99,8 @@ try {
   reviewHost.attach(controller, panel, sourceBridge, async () => {});
   controller.ready = true;
   await page.exposeFunction('nativePostMessage', async message => {
+    if (message.type === 'reviewDecorations') nativeHover ||= message.decorations.some(mark =>
+      mark.hoverMessage?.value.includes('mewReader:mew.pdf-difference'));
     if (message.type.startsWith('review')) handlers.forEach(callback => callback(message));
     if (message.type === 'ready') {
       await panel.webview.postMessage({ type: 'showPdf', url: `http://127.0.0.1:${server.address().port}/book.pdf`, htmlUri: htmlUri.toString(), fileName: 'Fixture PDF', pageLabel: '1' });
@@ -111,6 +114,7 @@ try {
   await page.waitForFunction(() => window.PdfSelection?.locator?.index?.getDifferences().items.length, null, { timeout: 15000 }).catch(async error => {
     console.log(await page.evaluate(() => ({ status: PdfSelection.status, model: readerMonaco.getValue(), index: PdfSelection.locator.index?.raw, prepared: !!PdfSelection.locator.index?.prepared, pages: ReaderUI.getPdfSourcePages(), options: PdfSelectionOptions, text: document.querySelector('.textLayer')?.textContent }))); console.log(errors); throw error;
   });
+  assert.equal(await page.evaluate(() => typeof PdfReviewProvider.sourceHover), 'undefined');
 
   await page.evaluate(() => window.PdfReviewProvider.locator.prepareReview({ editor: window.ReaderUI.getSourceEditor() }));
   assert.equal(await page.locator('.replacement-review:not([hidden])').count(), 0,
@@ -145,6 +149,7 @@ try {
   assert.equal(await page.evaluate(() => window.readerMonaco === window.ReaderUI.getSourceEditor()), true);
   assert.deepEqual(errors, []);
   assert.equal(await page.evaluate(() => typeof window.monaco), 'undefined');
+  assert.ok(nativeHover, 'the native host receives the PDF difference Hover command');
   await page.screenshot({ path: path.join(root, 'test/artifacts/pdf-review.png') });
   console.log('PASS: real PDF + shared review with native preview/edit/save, stale-version rejection.');
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
