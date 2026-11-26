@@ -44,7 +44,7 @@ try {
     });
     const items = await page.evaluate(() => {
       const editor = readerMonaco.editor, index = PdfSelection.locator.editorSourceIndex(editor.document);
-      return index.candidates(null, false, true, true, PdfSelection.locator.environment.getTargets()).slice(0, 5)
+      return window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: PdfSelection.locator.environment.getTargets() }).items.slice(0, 5)
         .map(item => ({ start: item.sourceStart, end: item.sourceEnd, html: item.comparison.html }));
     });
     for (const item of items) {

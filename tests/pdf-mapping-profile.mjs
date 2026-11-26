@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 // Extracted from tmp/highlight-latency.mjs; method costs include nested calls.
@@ -15,9 +16,9 @@ assert.ok(fixture.pages?.length, 'The profile needs recorded PDF pages');
 const api = engine(), methods = {}, samples = [];
 let measuring = false;
 for (const [proto, names] of [
-  [api.PdfConnections.prototype, ['update', 'scope', 'remember', 'compare', 'search', 'matches', 'candidates', 'formatDifferences']],
+  [api.PdfConnections.prototype, ['connect', 'remember', 'compare', 'range', 'search', 'matches', 'candidates']],
   [api, ['sourceDecorations']],
-  [api.PdfLocator.prototype, ['sourceIndex']]
+  [api.PdfLocator.prototype, ['editorSourceIndex', 'cacheReview', 'findLocations']]
 ]) for (const name of names) {
   const original = proto[name];
   assert.equal(typeof original, 'function', `Profile method moved: ${name}`);
@@ -47,10 +48,10 @@ for (let iteration = -3; iteration < iterations; iteration++) {
   }));
   measuring = iteration >= 0;
   const start = performance.now(), index = new api.PdfConnections(locator, fixture.html);
-  index?.update(targets, {});
+  index?.connect(targets, {});
   const pairs = targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []);
-  const marks = api.sourceDecorations(index, index.candidates(null, true, false, true, [], pairs), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
-  const candidates = index.candidates(null, false, true, true, targets);
+  const marks = api.sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: pairs }), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
+  const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: targets });
   const elapsed = performance.now() - start;
   measuring = false;
   assert.ok(pairs.length && marks.length && candidates.length, 'Profile must exercise mapped differences');

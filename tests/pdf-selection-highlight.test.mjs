@@ -1,4 +1,4 @@
-import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
+import { DocumentModel as FixtureDocument, reviewCandidates } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 
 import vm from 'node:vm';
@@ -83,7 +83,7 @@ test('source edits rebuild mappings before either selection direction consumes t
   index = diff.editorSourceIndex(documentModel);
   assert.equal(index.byTarget.get(target), undefined);
   assert.equal(index.scopes.get(target), undefined);
-  index?.update([target], pdf);
+  index?.connect([target], pdf);
   assert.equal(index.range(target, 6, 10).start, 6);
   assert.equal(index.range(target, 6, 10, true).start, 6);
   assert.equal(index.starts[6], value.indexOf('Beta'));
@@ -100,10 +100,10 @@ test('prepared page extraction remains usable after a longer rendered mapping di
   const saved = index.remember(10, 60, bounded, { start: 10, end: 60 });
   index.remember(0, raw.length, rendered, { start: 0, end: raw.length });
   // Preparation already succeeded; a cached scope does not rebuild discarded connections.
-  index.scope = () => null;
-  index?.update([bounded, rendered], pdf);
+  index.connect = () => null;
+  index?.connect([bounded, rendered], pdf);
   assert.equal(index.range(bounded, 20, 30).start, 20);
-  index?.update([bounded], pdf);
+  index?.connect([bounded], pdf);
   assert.equal(index.byTarget.get(bounded)[0], saved,
     'closing or rebuilding the rendered layer must not discard extracted-page candidates');
   assert.equal(index.range(bounded, 20, 30).end, 30);
@@ -333,7 +333,8 @@ test('selections include missing text at both boundaries in either direction', (
         assert.equal(pdf.slice(hit.start, hit.end), expected, `${selected}, reverse=${reverse}, marked=${marked}`);
         if (!reverse) {
           const notice = { html: selected, pdf: expected, source: { index: source, start: at, end: at + selected.length } };
-          const edits = source.candidates(notice, false, true, true, []).flatMap(item => item.options[0].edits);
+          const edits = reviewCandidates(source, { selected: true, items: [{ sourceStart: at,
+            sourceEnd: at + selected.length, comparison: notice, selection: true }] }).flatMap(item => item.options[0].edits);
           assert.equal(engineWindow.PdfSelectionDiff.applyTextEdits(html, edits), html.replace(selected, expected));
         }
       }
@@ -347,13 +348,13 @@ test('startup alignment maps a single damaged Chinese character without spaces o
   const pdfText = raw.replace('動', '劫'), pdf = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: pdfText, normalized: normalized(pdfText) });
   const at = raw.indexOf('動');
   assert.equal(new pdfApi.PdfConnections(testLocator, { raw: pdfText }).search({ text: '動', before: raw.slice(at - 160, at), after: raw.slice(at + 1, at + 161) }), null);
-  html.scope(pdf, true);
+  html.connect(pdf);
   const hit = html.range(pdf, at, at + 1);
   assert.equal(pdfText.slice(hit.start, hit.end), '劫');
   const reverse = html.range(pdf, hit.start, hit.end, true);
   assert.equal(raw.slice(reverse.start, reverse.end), '動');
   const cached = html.byTarget.get(pdf);
-  html.scope(pdf, true);
+  html.connect(pdf);
   assert.equal(html.byTarget.get(pdf), cached, 'prepared scope reuses its existing mappings');
 });
 
@@ -390,7 +391,7 @@ test('page preparation reuses retained anchor mappings without repeating compari
     return String.fromCharCode(97 + seed % 26);
   }).join('');
   const html = index(text), pdf = index(text.slice(0, 2000) + '7' + text.slice(2001));
-  html.scope(pdf, true);
+  html.connect(pdf);
   const connections = html.byTarget.get(pdf);
   assert.ok(connections?.length, 'OCR differences prepare anchor mappings');
   assert.ok(comparisons.some(item => !item.details), 'initial preparation validates uncached gaps');
@@ -398,31 +399,31 @@ test('page preparation reuses retained anchor mappings without repeating compari
   const revised = index(text + ' added text outside the mapped passage');
   revised.byTarget.set(pdf, connections);
   comparisons.length = 0;
-  revised.scope(pdf, true);
+  revised.connect(pdf);
   assert.equal(comparisons.length, 0, 'retained mappings skip both validation and detailed diffs');
   assert.equal(revised.byTarget.get(pdf), connections, 'preparation retains the original mapping objects');
 
   const changed = index(text.slice(0, 1200) + '8' + text.slice(1201));
   comparisons.length = 0;
-  changed.scope(pdf, true);
+  changed.connect(pdf);
   assert.ok(comparisons.some(item => !item.details), 'edited passages still require fresh validation');
 });
 
 test('failed page preparation is cached until the source or PDF layer changes', () => {
   let searches = 0;
-  // Count matching stages, including the longer-anchor fallback.
+  // Count preparation searches, including failed target lookups.
   const api = engine(), countedLocator = new api.PdfLocator({}, { document: { createElement: () => ({}) } }), matches = api.PdfConnections.prototype.matches;
   api.PdfConnections.prototype.matches = function (...args) { searches++; return matches.apply(this, args); };
   const index = raw => new api.PdfConnections(countedLocator, raw);
   const html = index('Completely revised unsaved HTML with no shared text.'), pdf = index('Original PDF passage whose wording is unrelated.');
-  assert.equal(html.scope(pdf, true), null);
+  assert.equal(html.connect(pdf), null);
   const initial = searches;
-  for (let i = 0; i < 20; i++) assert.equal(html.scope(pdf, true), null);
+  for (let i = 0; i < 20; i++) assert.equal(html.connect(pdf), null);
   assert.equal(searches, initial, 'failed preparation must not repeat on every selection');
-  index(html.raw + ' More edits.').scope(pdf, true);
+  index(html.raw + ' More edits.').connect(pdf);
   assert.ok(searches > initial, 'new source index retries preparation');
   const changed = searches;
-  html.scope(index(pdf.raw), true);
+  html.connect(index(pdf.raw));
   assert.ok(searches > changed, 'rebuilt PDF layer retries preparation');
 });
 

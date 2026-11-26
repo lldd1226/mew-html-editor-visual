@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
@@ -91,7 +92,7 @@ test('ME32-150 clicking a highlighted footnote digit opens its exact empty OCR c
   assert.equal(api.applyTextEdits(source, selected.options[0].edits), source.replace('>9</a>', '></a>'));
   const onlyDigit = new api.PdfConnections(locator, source.replace(' starkem', 'kem'));
   onlyDigit.remember(0, onlyDigit.raw.length, target, { start: 0, end: target.raw.length });
-  assert.equal(onlyDigit.candidates(null, false, true, true, [target]).length, 0, 'default footnote filtering stays unchanged');
+  assert.equal(reviewCandidates(onlyDigit, { fonts: false, edits: true, text: true, targets: [target] }).length, 0, 'default footnote filtering stays unchanged');
 });
 
 for (const splitMarkup of [false, true]) for (const query of ['WR', 'W', 'eWRr', 'WRrm\nhere.', 'WR+', 'W xx W']) {
@@ -287,7 +288,8 @@ for (const kind of ['text', 'insertion', 'deletion', 'newline', 'format', 'word'
     const provider = providers.get('pdf-ocr'), context = { editor, model, documentModel, index, targets: [target] };
     index.candidates = () => items;
     index.getDifferences();
-    locator.cacheReview({ items, index });
+    const { plans } = locator.cacheReview({ items, index });
+    for (const [i, item] of items.entries()) assert.equal(plans[i], item.options[0], 'suggestions reuse the candidate option');
     provider.onSelect(items[1], context, items);
     assert.deepEqual(Array.from(highlighted, item => item.id), matching.map(String), 'matching faults are highlighted with preview off');
     assert.equal(classes.has('mew-review-preview'), false);
@@ -427,13 +429,13 @@ test('prepared review lists share groups, entries and edits across consumers and
     window.PdfReviewProvider.setFontEnabled(false, undefined, false);
     for (const style of styles) window.PdfReviewProvider.setFontEnabled(true, style, false);
     const prepared = (await provider.locator.reviewItems(context)).items, data = locator.reviewLists.get(prepared);
-    const expected = comparable(sourceDecorations(index, index.candidates(null, styles, false, textEnabled, [target], data.shared.connections), styles, textEnabled, item => window.PdfReviewProvider.sourceHover(item, model), editor.document));
-    const reviewCandidates = index.candidates, formatDifferences = index.formatDifferences;
-    index.candidates = index.formatDifferences = () => { throw new Error('source highlighting rebuilt prepared candidates'); };
+    const expected = comparable(sourceDecorations(index, reviewCandidates(index, { fonts: styles, edits: false, text: textEnabled, targets: [target], connections: data.shared.connections }), styles, textEnabled, item => window.PdfReviewProvider.sourceHover(item, model), editor.document));
+    const candidates = index.candidates;
+    index.candidates = () => { throw new Error('source highlighting rebuilt prepared candidates'); };
     try {
       listeners.get('pdf-selection-sources')({ detail: { editor, pdf, enabled: true, diffEnabled: true } });
       assert.equal(comparable(marks), expected, 'prepared source marks preserve text, font, caret and hover output');
-    } finally { index.candidates = reviewCandidates; index.formatDifferences = formatDifferences; }
+    } finally { index.candidates = candidates; }
   }
   provider.setEnabled(false);
   const textDisabled = (await provider.locator.reviewItems(context)).items;

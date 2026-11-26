@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { launchBrowser, startServer, stopServer } from './support/browser.mjs';
 
-test('Monaco popup batches selected word edges, paints PDF ranges and navigates from selection boundaries', async () => {
+test('Monaco popup groups selected word edges, keeps single characters within their word and visits every queue candidate', async () => {
   const fixture = await mkdtemp(path.join(tmpdir(), 'mew-selection-groups-'));
   let server, browser;
   try {
@@ -17,13 +17,13 @@ test('Monaco popup batches selected word edges, paints PDF ranges and navigates 
     await page.goto('http://127.0.0.1:41883/?file=a.html');
     await page.waitForFunction(() => window.mewWorkbench?.editor?.getValue().includes('selection fixture'));
     await page.evaluate(() => window.PdfReviewReady);
-    for (const [query, replacement, words] of [
-      ['WRoot', 'VRoot', ['WRooting', 'WRooter']],
-      ['RootW', 'RootV', ['aaRootW', 'bbRootW']],
-      ['W', 'V', ['aaW', 'Wbb']],
-      ['W xx Z', 'V xx Y', ['prefixW xx Z', 'W xx Zsuffix']]
+    for (const [query, replacement, words, selectedCount] of [
+      ['WRoot', 'VRoot', ['WRooting', 'WRooter'], 2],
+      ['RootW', 'RootV', ['aaRootW', 'bbRootW'], 2],
+      ['W', 'V', ['aaW', 'Wbb'], 1],
+      ['W xx Z', 'V xx Y', ['prefixW xx Z', 'W xx Zsuffix'], 2]
     ]) {
-      const initial = await page.evaluate(({ query, replacement, words }) => {
+      const initial = await page.evaluate(({ query, replacement, words, selectedCount }) => {
         ReplacementReview.close(false, false);
         document.getElementById('fixture-scan')?.remove();
         const editor = mewWorkbench.editor;
@@ -32,7 +32,7 @@ test('Monaco popup batches selected word edges, paints PDF ranges and navigates 
           { text: `different${query}`, pdf: `different${query.replace('W', 'Q')}` }, { text: 'tail S', pdf: 'tail T' }];
         const markup = text => text.replaceAll('W', '<i>W</i>');
         const original = cases.map(({ text }) => `<p>${markup(text)}</p>`).join('\n');
-        const expected = cases.map(({ text }, at) => `<p>${at === 1 || at === 2
+        const expected = cases.map(({ text }, at) => `<p>${at > 0 && at <= selectedCount
           ? markup(text).replace(markup(query), replacement.replaceAll('V', '<i>V</i>')) : markup(text)}</p>`).join('\n');
         editor.setValue(original);
         editor.document.update(editor.document.content);
@@ -74,12 +74,12 @@ test('Monaco popup batches selected word edges, paints PDF ranges and navigates 
         window.fixtureReview = { editor, locator, index, original, expected, data, item, request,
           open: () => { editor.setSelection(editor.document.rangeAt(start, start + query.length, true));
             return ReplacementReview.openForSelection('pdf-ocr', editor, item.id, request); } };
-        const previous = { candidates: index.candidates, formatDifferences: index.formatDifferences };
+        const previous = { candidates: index.candidates };
         for (const method of Object.keys(previous)) index[method] = () => { throw new Error(`selection recomputed ${method}`); };
         fixtureReview.restore = () => Object.assign(index, previous);
         editor.setSelection(editor.document.rangeAt(start, start + query.length, true));
-        return { count: base.items.length, range: Array.from(item.queueRange), expected };
-      }, { query, replacement, words });
+        return { count: base.items.length, range: Array.from(item.queueRange), expected, selectedCount };
+      }, { query, replacement, words, selectedCount });
       // Let the provider's PDF/font identity poll observe this new fixture before opening review.
       await page.waitForTimeout(550);
       if (query === 'W') {
@@ -91,16 +91,20 @@ test('Monaco popup batches selected word edges, paints PDF ranges and navigates 
       await page.evaluate(() => fixtureReview.open());
       const popup = page.locator('.replacement-review'), [first, last] = initial.range;
       assert.equal(await popup.locator('[data-position]').textContent(), `${first === last ? first + 1 : `${first + 1}–${last + 1}`} / ${initial.count}`);
-      assert.equal(await page.evaluate(() => fixtureHighlighted.length), 2, query);
-      assert.ok(await page.locator('.fixture-selected-context > div').count() >= 2, 'both selected PDF text ranges are painted');
+      assert.equal(await page.evaluate(() => fixtureHighlighted.length), initial.selectedCount, query);
+      assert.ok(await page.locator('.fixture-selected-context > div').count() >= initial.selectedCount,
+        'every selected PDF text range is painted');
       await popup.locator('[data-next]').click();
-      assert.equal(await popup.locator('[data-position]').textContent(), `${last + 2} / ${initial.count}`, 'next starts after the final diff in the selection');
+      const afterNext = first === last ? `${first + 2}` : `${first + 1}–${last + 1}`;
+      assert.equal(await popup.locator('[data-position]').textContent(), `${afterNext} / ${initial.count}`,
+        'next advances within the character batch');
       await page.evaluate(() => { ReplacementReview.close(false, false); return fixtureReview.open(); });
       await popup.locator('[data-prev]').click();
       assert.equal(await popup.locator('[data-position]').textContent(), `${first} / ${initial.count}`, 'previous starts before the first diff in the selection');
       await page.evaluate(() => { ReplacementReview.close(false, false); return fixtureReview.open(); });
       if (await popup.locator('[data-apply]').getAttribute('aria-pressed') !== 'true') await popup.locator('[data-apply]').click();
-      await page.waitForFunction(() => document.querySelectorAll('.monaco-editor .mew-review-current').length >= 2, null, { timeout: 5000 }).catch(async error => {
+      await page.waitForFunction(count => document.querySelectorAll('.monaco-editor .mew-review-current').length >= count,
+        initial.selectedCount, { timeout: 5000 }).catch(async error => {
         console.log(JSON.stringify(await page.evaluate(() => ({ status: document.querySelector('[data-status]').textContent,
           preview: localStorage.getItem('mew-review-preview'), editor: fixtureReview.editor.getDomNode().getBoundingClientRect().toJSON(),
           marks: fixtureReview.editor.getModel().getAllDecorations().filter(mark => mark.options.inlineClassName?.includes('mew-review')).map(mark => ({ range: mark.range, name: mark.options.inlineClassName })),

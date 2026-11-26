@@ -28,7 +28,7 @@ try {
     const snapshot = await page.evaluate(() => {
       const editor = readerMonaco.editor, locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.document);
       const targets = locator.environment.getTargets();
-      const items = index.candidates(null, false, true, true, targets);
+      const items = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: targets }).items;
       return { page: PdfSelection.viewer.currentPageNumber,
         marks: editor.getModel().getAllDecorations().filter(mark => /PDF.*difference/.test(mark.options.description))
           .map(mark => [mark.options.description, mark.range, mark.options.inlineClassName]),

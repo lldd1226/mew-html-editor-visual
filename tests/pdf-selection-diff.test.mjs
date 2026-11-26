@@ -1,10 +1,11 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
-import { engineSource, source, engine, reviewProvider } from './support/pdf-harness.mjs';
+import { engineSource, source, engine, reviewProvider, connectionParts } from './support/pdf-harness.mjs';
 const pdfApi = engine();
 
 test('offset edit transactions are atomic data operations independent of an editor', () => {
@@ -21,13 +22,13 @@ test('the update controller owns confirmed pairs while temporary selections use 
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, 'Alpha unique selected word beta.'), target = new api.PdfConnections(locator, index.raw);
   assert.equal(Object.getPrototypeOf(index).constructor, api.PdfConnections);
-  index.update([target]);
+  index.connect([target]);
   const pairs = index.pairs, start = index.raw.indexOf('selected');
   assert.ok(Array.isArray(pairs));
   const selection = index.remember(start, start + 8, target, { start, end: start + 8 });
   assert.equal(index.pairs, pairs);
   assert.ok(index.livePairs.includes(selection));
-  index.update([target]);
+  index.connect([target]);
   assert.ok(!index.pairs.includes(selection));
   assert.equal(index.range(target, start, start + 8).connection, selection);
 });
@@ -45,7 +46,7 @@ test('connection models own source parsing and read shared document data without
   locator.documents.set(pdf, new Map([['pages:2', target]]));
   locator.getDocumentIndex = () => { throw new Error('models must not call the provider'); };
   assert.equal(source.locator, undefined);
-  assert.equal(source.update([target]).full, target);
+  assert.equal(source.connect([target]).full, target);
   assert.equal(source.formats[source.raw.indexOf('beta')].italic, true);
   Object.assign(locator.options, { wholeWords: true });
   assert.equal(source.options.wholeWords, true);
@@ -55,9 +56,11 @@ test('connection models own source parsing and read shared document data without
 test('indexed missing ranges preserve pairwise font overlap decisions at every boundary', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const source = new api.PdfConnections(locator, 'a'.repeat(400));
-  const fontItems = Array.from({ length: 120 }, (_, i) => ({ sourceStart: i * 3 + 1, sourceEnd: i * 3 + 2,
-    font: { italic: true, bold: false }, htmlFont: { italic: false, bold: false, tags: [] } }));
-  source.compare = () => ({ fontItems });
+  source.formats = source.formats.map(style => ({ ...style, tags: [] }));
+  const fontItems = Array.from({ length: 120 }, (_, i) => ({ start: i * 3 + 1, end: i * 3 + 2, font: { italic: true, bold: false } }));
+  const connection = new api.diffIndex(source.raw, source.raw);
+  connection.fontItems = fontItems;
+  source.compare = () => ({});
   let seed = 731;
   const next = () => seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
   for (let round = 0; round < 100; round++) {
@@ -65,9 +68,9 @@ test('indexed missing ranges preserve pairwise font overlap decisions at every b
       const start = next() % 380;
       return { missing: true, sourceStart: start, sourceEnd: start + next() % 12 };
     });
-    const expected = fontItems.filter(item => !missing.some(value => value.sourceStart < item.sourceEnd && value.sourceEnd > item.sourceStart));
-    const actual = source.formatDifferences(missing, ['italic'], false, [{}]).filter(item => item.font);
-    assert.deepEqual(actual.map(item => item.sourceStart), expected.map(item => item.sourceStart));
+    const expected = fontItems.filter(item => !missing.some(value => value.sourceStart < item.end && value.sourceEnd > item.start));
+    const actual = reviewCandidates(source, { items: missing, fonts: ['italic'], edits: false, connections: [connection] }).filter(item => item.font);
+    assert.deepEqual(actual.map(item => item.sourceStart), expected.map(item => item.start));
   }
 });
 
@@ -111,14 +114,14 @@ test('source updates retain edited connections and reuse their prepared scope', 
   const target = new api.PdfConnections(locator, value.replace(/wrong/g, 'right'));
   locator.getDocumentIndex = () => target;
   const previous = locator.editorSourceIndex(documentModel, [target]);
-  previous.update([target], pdf);
+  previous.connect([target], pdf);
   const original = previous.byTarget.get(target), snapshots = original.map(item => JSON.stringify(item.editorDiff.parts));
   value = value.replace('wrong2', 'right2').replace('wrong3', 'right3'); version++; documentModel.update(documentModel.content);
   const current = locator.editorSourceIndex(documentModel, [target]);
   assert.equal(current.byTarget.get(target).length, original.length);
   current.matches = () => assert.fail('retained edited connections must keep their prepared scope');
-  current.update([target], pdf);
-  const items = current.candidates(null, false, true, true, [target]);
+  current.connect([target], pdf);
+  const items = reviewCandidates(current, { fonts: false, edits: true, text: true, targets: [target] });
   assert.equal(api.applyTextEdits(value, items.flatMap(item => item.options[0].edits)), target.raw);
   original.forEach((item, i) => assert.equal(JSON.stringify(item.editorDiff.parts), snapshots[i]));
 });
@@ -144,7 +147,7 @@ test('replacement returns shifted next entries before any full diff preparation'
     reviewProvider(api, providers, { locator, editor, viewer: { pdfDocument: pdf } }, document,
       { setTimeout: callback => { timers.push(callback); } });
     const initial = locator.editorSourceIndex(documentModel, [target]);
-    initial.update([target], pdf);
+    initial.connect([target], pdf);
     const summarize = items => JSON.stringify(items.map(item => ({ id: item.id, start: item.sourceStart, end: item.sourceEnd, options: item.options })));
     const cached = locator.reviewItems(), snapshot = summarize(cached.items);
     const wordStart = initial.raw.indexOf('wrong2.');
@@ -247,9 +250,9 @@ test('page scope closes independently and reuses exact matches when preparing co
     let calls = 0;
     index.matches = function (...args) { calls++; return matches.apply(this, args); };
     index.search = () => assert.fail('page preparation must not enter selection lookup');
-    assert.equal(!!index.scope(page), expected);
+    assert.equal(!!index.connect(page), expected);
     assert.equal(calls, 1);
-    assert.equal(!!index.scope(page, true), expected);
+    assert.equal(!!index.connect(page), expected);
     assert.equal(calls, 1, 'preparation reuses both unique and ambiguous exact matches');
     assert.equal(!!index.byTarget.get(page)?.length, expected);
   }
@@ -259,53 +262,52 @@ test('page preparation shares its connection and normalized scope', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, '<p>Alpha wrong omega</p>');
   const target = new api.PdfConnections(locator, { raw: index.raw.replace('wrong', 'right'), layer: {} });
-  const scope = index.scope(target, true);
+  const scope = index.connect(target);
   assert.equal(scope, index.byTarget.get(target)[0]);
   assert.equal(scope.normalized.text, api.normalized(index.raw).text);
   assert.equal(scope.normalized, index.normalized, 'full-source scope reuses the normalized index');
-  assert.equal(index.scope(target, true), scope);
+  assert.equal(index.connect(target), scope);
 });
 
 test('matching stages stop after a usable result and keep anchor uniqueness separate', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const text = 'Alpha starts here. Beta continues with a different sentence. Gamma supplies another unique passage. Delta closes the final paragraph.';
   const index = new api.PdfConnections(locator, { raw: text }), matches = index.matches, stages = [];
-  index.matches = function (queries, haystack, options = {}) {
-    stages.push(options.sample || (options.fuzzy ? 'fuzzy' : 'exact'));
-    return matches.call(this, queries, haystack, options);
+  index.matches = function (queries, haystack, options = {}, ...layout) {
+    stages.push(typeof options === 'number' ? options : options.sample || (options.fuzzy ? 'fuzzy' : 'exact'));
+    return matches.call(this, queries, haystack, options, ...layout);
   };
-  assert.ok(index.search({ text: 'Beta', before: '', after: '' }));
-  assert.deepEqual(stages, ['exact'], 'an exact selection skips fuzzy matching');
-  stages.length = 0;
-  assert.ok(index.search({ text: 'Beto', before: 'Alpha starts here. ', after: ' continues with a different sentence.' }));
-  assert.deepEqual(stages, ['exact', 'fuzzy']);
+  assert.ok(!index.search({ text: 'Beta', before: '', after: '' }).approximate);
+  const fuzzy = index.search({ text: 'Beto', before: 'Alpha starts here. ', after: ' continues with a different sentence.' });
+  assert.equal(fuzzy.approximate, true, 'an exact miss advances to fuzzy matching');
   stages.length = 0;
   const page = new api.PdfConnections(locator, { raw: text.replace('Gamma', 'Gomma') });
-  assert.ok(index.scope(page, true));
+  assert.ok(index.connect(page));
   assert.ok(stages.includes(24), 'page preparation samples overlapping anchors');
   assert.ok(!stages.includes(96), 'confirmed preparation skips fallback sampling');
   stages.length = 0;
-  assert.equal(index.scope(new api.PdfConnections(locator, { raw: 'Z'.repeat(140) }), true), null);
-  assert.deepEqual(stages.filter(stage => typeof stage === 'number'), [24, 96], 'failed preparation advances to fallback sampling');
+  assert.equal(index.connect(new api.PdfConnections(locator, { raw: 'Z'.repeat(140) })), null);
+  assert.deepEqual(stages.filter(stage => typeof stage === 'number'), [24], 'failed preparation has no separate coarse-scope pass');
   stages.length = 0;
   const absent = new api.PdfConnections(locator, { raw: 'Y'.repeat(140) });
-  assert.equal(index.scope(absent), null);
-  assert.equal(index.scope(absent, true), null);
-  assert.deepEqual(stages.filter(stage => typeof stage === 'number'), [96, 24], 'upgrading preparation reuses its completed fallback stage');
+  assert.equal(index.connect(absent), null);
+  assert.equal(index.connect(absent), null);
+  assert.deepEqual(stages.filter(stage => typeof stage === 'number'), [24], 'failed preparation is reused by the next lookup');
   const repeated = new api.PdfConnections(locator, { raw: 'Alpha '.repeat(20) });
   assert.equal(repeated.matches(['Alpha '.repeat(5)], repeated.normalized, { sample: 24, step: 8 }).length, 0,
     'repeated anchors cannot become unique by pooling their hits');
 });
 
 test('confirmed page anchors resolve repetitions without treating changed spans as exact anchors', () => {
-  const api = engine(), locator = new api.PdfLocator();
+  const api = engine(engineSource.replace('function* matchPositions(index, needle, { text }, anchors) {',
+    '$& index.searches?.push(needle);'));
+  const locator = new api.PdfLocator();
   const text = 'Alpha starts a unique passage. Beta continues with several different words. Gamma closes the final paragraph.';
   for (const changed of [false, true]) {
     const index = new api.PdfConnections(locator, { raw: text + '\n' + text });
     const page = new api.PdfConnections(locator, { raw: changed ? text.replace('starts', 'storts') : text });
-    const offset = text.length + 1, searches = [], matches = index.matches;
+    const offset = text.length + 1, searches = index.searches = [];
     index.remember(offset, offset + 64, page, { start: 0, end: 64 });
-    index.matches = function (queries, ...args) { searches.push(...queries); return matches.call(this, queries, ...args); };
     const anchors = index.matches([page.normalized.text], index.normalized, { sample: 24, step: 8, page });
     assert.ok(anchors.length, 'confirmed context resolves anchors repeated elsewhere');
     assert.ok(anchors.every(anchor => index.normalized.starts[anchor.start] >= offset));
@@ -325,15 +327,15 @@ test('review, styles and bidirectional selections reuse ranges at nonzero offset
   ] });
   const start = index.raw.indexOf('Alpha'), end = index.raw.indexOf(' suffix');
   const connection = index.remember(start, end, target, { start: 6, end: raw.indexOf('\nrest') });
-  const diff = index.compare(target, connection), ranges = diff.ranges;
+  const diff = index.compare(target, connection), ranges = diff.parts;
   Object.defineProperty(diff, 'parts', { get() { assert.fail('consumers must reuse the mapped ranges'); } });
-  const pairs = [[connection, target]], items = index.candidates(null, false, true, true, [target], pairs);
+  const pairs = [[connection, target]], items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target], connections: pairs });
   assert.equal(api.applyTextEdits(html, items.flatMap(item => item.options[0].edits)), html.replace('wrong', 'right'));
-  const fonts = index.formatDifferences([], ['italic', 'bold'], true, pairs);
+  const fonts = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: pairs });
   assert.equal(fonts.length, 1);
   assert.equal(api.applyTextEdits(html, fonts[0].options[0].edits), html.replace('<i>wrong</i>', 'wrong'));
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  assert.ok(sourceDecorations(index, index.candidates(null, true, false, true, [], pairs), true, true, undefined, documentModel).length);
+  assert.ok(sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: pairs }), true, true, undefined, documentModel).length);
   for (const range of ranges) for (const key of ['html', 'pdf'])
     Object.defineProperty(range[4], key, { get() { assert.fail('selection must reuse prepared boundary checks'); } });
   const at = index.raw.indexOf('wrong'), hit = index.range(target, at, at + 5);
@@ -351,19 +353,19 @@ test('review candidate switches skip disabled text work and keep font styles ind
     { start: 0, end: 17, font: { italic: true, bold: true } }
   ] });
   index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-  index.update([target]);
+  index.connect([target]);
   const connections = index.pairs;
-  assert.ok(index.candidates(null, false, true, true, [target], connections).some(item => item.comparison.pdf === 'right'));
-  const comparisonParts = api.comparisonParts;
-  api.comparisonParts = () => assert.fail('a cold font-only build must not build the full cache');
-  assert.equal(index.candidates(null, ['bold'], false, false, [target], connections).length, 1);
+  assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target], connections: connections }).some(item => item.comparison.pdf === 'right'));
+  const comparisonIndex = api.comparisonIndex;
+  api.comparisonIndex = () => assert.fail('a cold font-only build must not build the full cache');
+  assert.equal(reviewCandidates(index, { fonts: ['bold'], edits: false, text: false, targets: [target], connections: connections }).length, 1);
   assert.equal(index.prepared.differences, undefined, 'filtered builds do not populate the full cache');
-  api.comparisonParts = comparisonParts;
+  api.comparisonIndex = comparisonIndex;
   const snapshot = JSON.stringify(index.getDifferences().items);
-  api.comparisonParts = () => assert.fail('font-only builds must skip text previews');
+  api.comparisonIndex = () => assert.fail('font-only builds must skip text previews');
   index.textEdits = () => assert.fail('font-only builds must skip text edits');
   for (const fonts of [true, ['italic'], ['bold'], [], false]) {
-    const items = index.candidates(null, fonts, false, false, [target], [...connections]);
+    const items = reviewCandidates(index, { fonts: fonts, edits: false, text: false, targets: [target], connections: [...connections] });
     assert.ok(items.every(item => item.font && !item.options.length));
     assert.equal(items.length, fonts === false || Array.isArray(fonts) && !fonts.length ? 0 : 1);
     if (Array.isArray(fonts) && fonts.length === 1) assert.equal(items[0].font[fonts[0] === 'bold' ? 'italic' : 'bold'], null);
@@ -395,8 +397,8 @@ test('ME08-432 joined derZuver retains der and maps the final sentence across an
     const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
     const html = fixture.source.replace(/\r?\n/g, newline), index = new api.PdfConnections(locator, html);
     const target = new api.PdfConnections(locator, { raw, parts: [] });
-    index?.update([target]);
-    const candidates = index.candidates(null, false, true, true, [target]);
+    index?.connect([target]);
+    const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     const der = index.raw.lastIndexOf('der Zuverlässigkeit');
     assert.ok(!candidates.some(c => c.sourceStart >= der && c.sourceStart <= der + 4 && c.comparison.pdf.trim() === 'der'),
       'the same der cannot be counted again in the following passage');
@@ -422,8 +424,8 @@ test('ME08-412 OCR spacing preserves des and prepares the complete footnote dash
     const html = fixture.source.replace(/\r?\n/g, newline).replace('597–601', `597${dash}601`);
     const index = new api.PdfConnections(locator, html);
     const target = new api.PdfConnections(locator, { raw: fixture.pdf.replace('Gestalt des.', `Gestalt${space}des.`), parts: [] });
-    index?.update([target]);
-    const candidates = index.candidates(null, false, true, true, [target]);
+    index?.connect([target]);
+    const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     const des = index.raw.indexOf('des deutschen'), missing = des + 4;
     const word = candidates.filter(c => c.sourceStart < missing + 9 && c.sourceEnd > des);
     assert.equal(word.length, 1);
@@ -437,7 +439,7 @@ test('ME08-412 OCR spacing preserves des and prepares the complete footnote dash
     const hit = index.range(target, at, at + 1, false, undefined, true);
     assert.equal(target.raw.slice(hit.start, hit.end), '-');
     assert.ok(api.applyTextEdits(html, item.options[0].edits).includes('597-601'));
-    const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
+    const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
     assert.ok(marks.some(m => m.range.startColumn === index.starts[at] + 1 && m.range.endColumn === index.ends[at] + 1));
     assert.ok(!marks.some(m => m.range.startColumn <= index.starts[des + 2] + 1 && m.range.endColumn > index.starts[des] + 1));
     for (const [connection] of [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])) {
@@ -453,7 +455,7 @@ test('ME08-411 page text owns overlapping document highlights and hover messages
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, fixture.source);
   const page = new api.PdfConnections(locator, { raw: fixture.pdf, parts: [] });
-  index?.update([page]);
+  index?.connect([page]);
   const document = new api.PdfConnections(locator, { raw: fixture.pdf, pages: [] });
   const pageConnection = index.byTarget.get(page)[0];
   const connection = index.remember(pageConnection.start, pageConnection.end, document,
@@ -466,7 +468,8 @@ test('ME08-411 page text owns overlapping document highlights and hover messages
     parts[re - 1][key] = parts[re - 1][key].slice(0, -2);
     parts[re + 1][key] = 're' + parts[re + 1][key];
   }
-  connection.editorDiff = { distance: 50, parts };
+  connection.editorDiff = { distance: 50, parts: parts.map(({ html, pdf, start, targetStart, changed }) =>
+    new api.diffIndex(html, pdf, start, targetStart, changed)) };
   assert.equal(parts.map(part => part.html).join(''), index.raw.slice(connection.start, connection.end));
   assert.equal(parts.map(part => part.pdf).join(''), document.raw.slice(connection.targetStart, connection.targetEnd));
   // The real rendered page ends before the document mapping does.
@@ -476,18 +479,18 @@ test('ME08-411 page text owns overlapping document highlights and hover messages
   pageConnection.targetEnd = mapped.end;
   delete pageConnection.editorDiff;
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const expected = sourceDecorations(index, index.candidates(null, true, false, true, [], [page].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel);
-  const candidates = index.candidates(null, false, true, true, [page]).map(({ preview, ...item }) => item);
+  const expected = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [page].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel);
+  const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [page] }).map(({ preview, ...item }) => item);
   const rendered = new api.PdfConnections(locator, { raw: fixture.pdf, parts: [], layer: {} });
   index.byTarget.set(rendered, [pageConnection]);
   for (const targets of [[document, page], [page, document], [document, page, rendered], [document, page]]) {
-    assert.deepEqual(sourceDecorations(index, index.candidates(null, true, false, true, [], targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel)
+    assert.deepEqual(sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel)
       .filter(mark => mark.range.startColumn - 1 < index.starts[pageEnd]), expected);
-    assert.deepEqual(index.candidates(null, false, true, true, targets).filter(item => item.sourceStart < pageEnd)
+    assert.deepEqual(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: targets }).filter(item => item.sourceStart < pageEnd)
       .map(({ preview, ...item }) => item), candidates);
-    assert.ok(index.candidates(null, false, true, true, targets).some(item => item.sourceStart >= pageEnd), 'document-only differences remain available');
+    assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: targets }).some(item => item.sourceStart >= pageEnd), 'document-only differences remain available');
     const at = index.raw.indexOf('Prahlerereien');
-    const repeated = index.candidates(null, false, true, true, targets).filter(item => item.sourceStart >= at && item.sourceStart < at + 12);
+    const repeated = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: targets }).filter(item => item.sourceStart >= at && item.sourceStart < at + 12);
     assert.equal(repeated.length, 1);
     const [item] = repeated;
     const hit = index.range(page, item.sourceStart, item.sourceEnd, false, undefined, true);
@@ -506,7 +509,7 @@ test('ME08-423 marked OCR errors reuse confirmed document mappings beyond page c
     pages: [{ number: 445, start: 0, end: fixture.pdf.length, parts: [] }] });
   locator.getDocumentIndex = () => full;
   locator.environment.getVisiblePages = () => [{ number: 445, index: page }];
-  source?.update([page], {});
+  source?.connect([page], {});
   locator.indexDocument = () => { throw new Error('marker lookup must not load offscreen text'); };
   full.search = () => { throw new Error('marker lookup must reuse a confirmed connection'); };
   for (const [word, pdf] of [['weißen', '\nÎ^'], ['ab', '»h']]) {
@@ -537,7 +540,7 @@ test('ME08-364 initial selection stays in the article when contents has a strong
     locator.getDocumentIndex = () => available ? full : undefined;
     locator.indexDocument = async () => { available = true; return full; };
     // The first word can lie outside a retained connection while page preparation finishes.
-    full.scope(index, true);
+    full.connect(index);
     index.prepared = { document: full };
     const body = index.raw.indexOf('Die folgenden');
     index.remember(body, index.raw.length, full, { start: raw.indexOf('Die folgenden'), end: fixture.pdf.length });
@@ -548,7 +551,7 @@ test('ME08-364 initial selection stays in the article when contents has a strong
     assert.equal(full.raw.slice(mapped.start, mapped.end), 'Kossuths');
     assert.ok(mapped.end <= fixture.pdf.length, 'on-demand preparation stays in the article');
     assert.ok(full.search(entry).start > fixture.pdf.length, 'unrestricted search prefers the contents entry');
-    full.scope = () => { throw new Error('selection must reuse its prepared page scope'); };
+    full.connect = () => { throw new Error('selection must reuse its prepared page scope'); };
     const [location] = await locator.findLocations({}, [entry]);
     assert.equal(location.targets.length, 1);
     assert.equal(location.targets[0].pageNumber, 387, 'selection must stay on printed page 364');
@@ -565,7 +568,7 @@ test('ME08-364 wrapped title compounds keep both sides of the anchor boundary', 
     const target = new api.PdfConnections(locator, { raw });
     if (full) locator.getDocumentIndex = () => target;
     const index = new api.PdfConnections(locator, source);
-    index?.update([target], {});
+    index?.connect([target], {});
     const start = index.raw.indexOf('Kossuths'), end = start + 'Kossuths-Bündnis'.length;
     for (const marked of [false, true]) {
       const hit = index.range(target, start, end, false, undefined, marked);
@@ -574,7 +577,7 @@ test('ME08-364 wrapped title compounds keep both sides of the anchor boundary', 
       const reverse = index.range(target, hit.start, hit.end, true);
       assert.equal(index.raw.slice(reverse.start, reverse.end), `Kossuths${hyphen}Bündnis`);
     }
-    const candidates = index.candidates(null, false, true, true, [target]);
+    const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.ok(candidates.length, 'unrelated real OCR differences remain reviewable');
     assert.ok(candidates.every(item => item.sourceStart >= end), 'no false title insertion');
     const corrected = api.applyTextEdits(source, candidates.flatMap(item => item.options[0].edits));
@@ -589,8 +592,8 @@ test('ME05-486 joined PDF words retain matching text at passage edges', async ()
     const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
     const source = missing ? fixture.source.replace('Unsre ', '') : fixture.source;
     const index = new api.PdfConnections(locator, source), target = new api.PdfConnections(locator, { raw: fixture.pdf });
-    index?.update([target]);
-    const candidates = index.candidates(null, false, true, true, [target]);
+    index?.connect([target]);
+    const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.deepEqual(Array.from(candidates, item => ({ ...item.comparison })), missing
       ? [{ html: '×', pdf: 'X' }, { html: '', pdf: 'Unsre' }] : []);
     if (missing) {
@@ -612,8 +615,8 @@ test('ME05-284 wrapped words and dash variants do not create text highlights', a
       pages: [{ start: 0, end: fixture.pdf.length }], parts: [{ start: 0, end: fixture.pdf.length }] });
     locator.getDocumentIndex = () => target;
     const pdf = {}, index = new api.PdfConnections(locator, source);
-    index?.update([target], pdf);
-    const candidates = index.candidates(null, false, true, true, [target]);
+    index?.connect([target], pdf);
+    const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.ok(candidates.length, 'real OCR errors remain reviewable');
     for (const item of candidates) {
       assert.ok(!/Wo|ist|dem|–/.test(item.comparison.html + item.comparison.pdf),
@@ -623,9 +626,9 @@ test('ME05-284 wrapped words and dash variants do not create text highlights', a
     const documentModel = new FixtureDocument({ model: { getValue: () => corrected, getVersionId: () => 2,
       getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
     const revised = locator.editorSourceIndex(documentModel, [target]);
-    revised?.update([target], pdf);
-    assert.equal(revised.candidates(null, false, true, true, [target]).length, 0, 'replaced text stays corrected after remapping');
-    assert.equal(sourceDecorations(revised, revised.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => revised.connections.get(target)?.ranges || [])), true, true, undefined, documentModel).length, 0);
+    revised?.connect([target], pdf);
+    assert.equal(reviewCandidates(revised, { fonts: false, edits: true, text: true, targets: [target] }).length, 0, 'replaced text stays corrected after remapping');
+    assert.equal(sourceDecorations(revised, reviewCandidates(revised, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => revised.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel).length, 0);
   }
 });
 
@@ -637,14 +640,14 @@ test('ME05-284 a real missing letter disappears from review after replacement', 
   let source = fixture.source.replace('Kölnischen Zeitung', 'Kölnische Zeitung'), version = 1;
   const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => version } }), model = documentModel.model;
   const pdf = {}, index = locator.editorSourceIndex(documentModel, [target]);
-  index?.update([target], pdf);
-  const missing = index.candidates(null, false, true, true, [target]).find(item => item.comparison.pdf === 'n');
+  index?.connect([target], pdf);
+  const missing = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).find(item => item.comparison.pdf === 'n');
   assert.ok(missing, 'a real missing letter must still be detected');
   source = api.applyTextEdits(source, missing.options[0].edits); version++; documentModel.update(documentModel.content);
   assert.ok(source.includes('Kölnischen Zeitung'));
   const revised = locator.editorSourceIndex(documentModel, [target]);
-  revised?.update([target], pdf);
-  assert.equal(revised.candidates(null, false, true, true, [target]).some(item => item.comparison.pdf === 'n'), false);
+  revised?.connect([target], pdf);
+  assert.equal(reviewCandidates(revised, { fonts: false, edits: true, text: true, targets: [target] }).some(item => item.comparison.pdf === 'n'), false);
 });
 
 test('ME05-389 OCR error near the final anchor retains the complete font correction', async () => {
@@ -652,18 +655,18 @@ test('ME05-389 OCR error near the final anchor retains the complete font correct
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, fixture.source), target = new api.PdfConnections(locator, { raw: fixture.pdf, parts: fixture.parts });
   locator.getDocumentIndex = () => target;
-  index?.update([target], {});
+  index?.connect([target], {});
   const text = 'Geschrieben von Friedrich Engels.', start = index.raw.indexOf(text), end = start + text.length;
   const hit = index.range(target, start, end, false, undefined, true);
   assert.ok(hit, 'the final attribution stays in the confirmed alignment');
   assert.equal(target.raw.slice(hit.start, hit.end), 'Geschrieben vyn Friedrich Engels.');
-  const item = index.formatDifferences([], ['italic', 'bold'], true, [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])).find(item => item.sourceStart === start);
+  const item = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }).find(item => item.sourceStart === start);
   assert.equal(item?.text, text, 'surplus bold is detected across the OCR error and matching suffix');
   const corrected = api.applyTextEdits(fixture.source, item.options[0].edits);
   assert.equal(corrected, fixture.source.replace(`<b>${text}</b>`, text), 'only formatting changes');
-  assert.ok(index.candidates(null, false, true, true, [target]).some(item => item.comparison.html === 'o' && item.comparison.pdf === 'y'));
+  assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).some(item => item.comparison.html === 'o' && item.comparison.pdf === 'y'));
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel);
   assert.ok(marks.some(mark => mark.options.description === 'PDF font difference'
     && fixture.source.slice(mark.range.startColumn - 1, mark.range.endColumn - 1) === text));
   assert.ok(marks.some(mark => mark.options.description === 'PDF OCR text difference'
@@ -676,15 +679,15 @@ test('ME05-398 missing word prefix shares the highlight, click mapping and repla
     const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
     const index = new api.PdfConnections(locator, source), target = new api.PdfConnections(locator, { raw: fixture.pdf });
     locator.getDocumentIndex = () => target;
-    index?.update([target], {});
-    const at = index.raw.indexOf('versammlung'), item = index.candidates(null, false, true, true, [target]).find(item => item.sourceStart === at);
+    index?.connect([target], {});
+    const at = index.raw.indexOf('versammlung'), item = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).find(item => item.sourceStart === at);
     assert.equal(item?.comparison.html, '');
     assert.equal(item?.comparison.pdf, 'Vereinbarungs');
     assert.equal(item.sourceEnd, at);
     const hit = index.range(target, at, at, false, undefined, true);
     assert.equal(target.raw.slice(hit.start, hit.end), 'Vereinbarungs');
     const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-    const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel);
+    const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel);
     const mark = marks.find(mark => mark.options.before?.inlineClassName === 'mew-ocr-diff-insert'
       && mark.range.startColumn - 1 === source.indexOf('versammlung') && mark.range.endColumn - 1 === source.indexOf('versammlung'));
     assert.ok(mark, 'the missing prefix has its own clickable insertion caret');
@@ -695,8 +698,8 @@ test('ME05-398 missing word prefix shares the highlight, click mapping and repla
     const corrected = api.applyTextEdits(source, item.options[0].edits);
     assert.equal(corrected, source.replace('Auflösung der versammlung', 'Auflösung der Vereinbarungsversammlung'));
     const revised = new api.PdfConnections(locator, corrected);
-    revised?.update([target], {});
-    assert.ok(!revised.candidates(null, false, true, true, [target]).some(item => item.comparison.pdf.includes('Vereinbarungs')));
+    revised?.connect([target], {});
+    assert.ok(!reviewCandidates(revised, { fonts: false, edits: true, text: true, targets: [target] }).some(item => item.comparison.pdf.includes('Vereinbarungs')));
   }
 });
 
@@ -705,12 +708,12 @@ test('ME05-281 repeated anchors across a broken word preserve the complete passa
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, fixture.source), target = new api.PdfConnections(locator, { raw: fixture.pdf });
   locator.getDocumentIndex = () => target;
-  index?.update([target], {});
+  index?.connect([target], {});
   const start = index.raw.lastIndexOf('Anforderungen'), end = start + 'Anforderungen'.length;
   const hit = index.range(target, start, end, false, undefined, true);
   assert.ok(hit);
   assert.equal(api.significantText(target.raw.slice(hit.start, hit.end)), 'Anforderungen');
-  const candidates = index.candidates(null, false, true, true, [target]);
+  const candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   assert.equal(candidates.some(item => item.sourceStart < end && item.sourceEnd > start), false);
   assert.deepEqual(Array.from(candidates, item => ({ ...item.comparison })), [{ html: 'h', pdf: 'b' }, { html: 'lb', pdf: 'ih' }]);
 });
@@ -725,14 +728,14 @@ test('ME05-281 trailing whitespace cannot become a replacement from the next pag
       getTextContent: async () => ({ items: [{ str: fixture.pages[number - 1],
         transform: [1, 0, 0, 1, 0, 100], width: 100, height: 10 }] })
     }) };
-    index?.update([page], pdf);
-    const before = Array.from(index.candidates(null, false, true, true, [page]), item => ({ ...item.comparison }));
+    index?.connect([page], pdf);
+    const before = Array.from(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [page] }), item => ({ ...item.comparison }));
     const full = await locator.indexDocument(pdf);
-    index?.update([page, full], pdf);
-    assert.deepEqual(Array.from(index.candidates(null, false, true, true, [page, full]), item => ({ ...item.comparison })), before);
-    for (const connection of index.byTarget.get(full) || [])
+    index?.connect([page, full], pdf);
+    assert.deepEqual(Array.from(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [page, full] }), item => ({ ...item.comparison })), before);
+    for (const connection of index.targetConnections(full))
       assert.equal(full.raw.slice(full.pages[0].end, connection.targetEnd).trim(), '', 'next page text stays outside the confirmed connection');
-    const edits = index.candidates(null, false, true, true, [full]).flatMap(item => item.options[0].edits);
+    const edits = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [full] }).flatMap(item => item.options[0].edits);
     assert.ok(!api.applyTextEdits(index.source, edits).includes('Karl'), 'batch replacement cannot append the next header');
   }
 });
@@ -782,19 +785,19 @@ test('prepared page reuse invalidates when connections or target pages change', 
   const locator = new (engine().PdfLocator)({}, { document: { createElement: () => ({}) } });
   const source = new pdfApi.PdfConnections(locator, 'Alpha Beta Gamma Delta');
   const page = new pdfApi.PdfConnections(locator, source.raw), pdf = {};
-  source?.update([page], pdf);
+  source?.connect([page], pdf);
   const initial = source.byTarget.get(page);
   let scopeReads = 0;
   const scopes = source.scopes;
   source.scopes = { get(target) { scopeReads++; return scopes.get(target); }, set: (target, value) => scopes.set(target, value) };
-  for (let i = 0; i < 20; i++) source?.update([page], pdf);
+  for (let i = 0; i < 20; i++) source?.connect([page], pdf);
   assert.equal(scopeReads, 0, 'unchanged mappings bypass preparation entirely');
   assert.equal(source.byTarget.get(page), initial);
   source.remember(0, 5, page, { start: 0, end: 5 });
-  source?.update([page], pdf);
+  source?.connect([page], pdf);
   assert.ok(scopeReads > 0, 'new selection mappings invalidate preparation');
   const rebuilt = new pdfApi.PdfConnections(locator, source.raw);
-  source?.update([rebuilt], pdf);
+  source?.connect([rebuilt], pdf);
   assert.ok(source.byTarget.get(rebuilt)?.length, 'rebuilt text layers receive fresh mappings');
 });
 
@@ -803,11 +806,11 @@ test('file diff updates shared state and retains unchanged sequence diffs', () =
   const source = new api.PdfConnections(locator, 'Alpha wrong Omega');
   const target = new api.PdfConnections(locator, 'Alpha right Omega'), pdf = {};
   target.sourcePages = [1];
-  source.update([target], pdf);
+  source.connect([target], pdf);
   const pairs = source.pairs;
   assert.ok(pairs.length);
   assert.equal(source.pairs, pairs);
-  source.update([target], pdf);
+  source.connect([target], pdf);
   assert.equal(source.pairs, pairs, 'unchanged file diff reuses its state');
   const diffs = new Map(pairs.map(([connection]) => [connection, connection.editorDiff]));
   for (const pair of pairs) {
@@ -816,17 +819,17 @@ test('file diff updates shared state and retains unchanged sequence diffs', () =
     assert.ok(connection.editorDiff, 'file preparation still prepares sequence diffs eagerly');
     assert.equal(source.compare(index, connection), diffs.get(connection), 'sequence and global handlers share the same result');
   }
-  assert.equal(api.applyTextEdits(source.source, source.candidates(null, false, true, true, [target], pairs)
+  assert.equal(api.applyTextEdits(source.source, reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [target], connections: pairs })
     .flatMap(item => item.options[0].edits)), 'Alpha right Omega');
   const extra = new api.PdfConnections(locator, 'Alpha wrong Omega');
-  source.update([target, extra], pdf);
+  source.connect([target, extra], pdf);
   const updated = source.pairs;
   assert.notEqual(updated, pairs, 'changing targets updates the overall diff');
   assert.ok(updated.some(([, index]) => index === extra));
   for (const [connection, index] of pairs)
     assert.equal(updated.find(([item, page]) => item === connection && page === index)?.[0].editorDiff, diffs.get(connection),
       'unchanged sequences survive a global update');
-  source.update([target], {});
+  source.connect([target], {});
   assert.notEqual(source.pairs, updated, 'PDF replacement refreshes shared state');
 });
 
@@ -860,14 +863,15 @@ test('shared differences refresh target and fonts on the explicitly selected sou
   const buildText = index.textEdits;
   index.textEdits = () => assert.fail('highlight filters must reuse the shared text candidates');
   for (const fonts of [true, false, [], ['bold'], ['italic']]) for (const text of [true, false]) {
-    const marks = sourceDecorations(index, index.candidates(null, fonts, false, text, [], styled.connections), fonts, text, undefined, documentModel);
+    const marks = sourceDecorations(index, reviewCandidates(index, { fonts: fonts, edits: false, text: text, targets: [], connections: styled.connections }), fonts, text, undefined, documentModel);
     if (!text) assert.ok(marks.every(mark => mark.options.description === 'PDF font difference'));
     if (fonts === false || Array.isArray(fonts) && !fonts.length)
       assert.ok(marks.every(mark => mark.options.description === 'PDF OCR text difference'));
     assert.equal(index.getDifferences().items, styled.items, 'toggles keep the shared collection');
   }
   index.textEdits = buildText;
-  index.candidates({ html: 'wrong', pdf: 'right', source: { index, start: 6, end: 11 } }, false, true, true, []);
+  reviewCandidates(index, { selected: true, items: [{ sourceStart: 6, sourceEnd: 11,
+    selection: true, comparison: { html: 'wrong', pdf: 'right', source: { index, start: 6, end: 11 } } }] });
   assert.equal(index.getDifferences().items, styled.items, 'explicit selections keep their candidates temporary');
   assert.equal(JSON.stringify(styled.items), snapshot, 'views do not mutate the shared candidates');
   source = 'Alpha right Omega'; version++; documentModel.update(documentModel.content);
@@ -892,10 +896,10 @@ test('candidate interval lookup retains overlap and insertion boundary rules', (
   const targets = intervals.map(([start, end]) => {
     const target = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: 'XYZ' });
     index.byTarget.set(target, [{ start, end, targetStart: 0, targetEnd: 3,
-      editorDiff: { parts: [{ html: index.raw.slice(start, end), pdf: target.raw, changed: true }] } }]);
+      editorDiff: { parts: [new api.diffIndex(index.raw.slice(start, end), target.raw, 0, 0, true)] } }]);
     return target;
   });
-  assert.deepEqual(Array.from(index.candidates(null, false, true, true, targets), item => item.id),
+  assert.deepEqual(Array.from(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: targets }), item => item.id),
     ['0:2', '2:5', '5:8', '8:8', '11:14', '14:14']);
 });
 
@@ -1041,7 +1045,7 @@ test('independent text differences stay separate across tags while format runs r
   const index = locator.editorSourceIndex(documentModel);
   const target = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: index.raw.replace('liebe“ …', 'Liebe" ...').replace('abc', 'xyz') });
   index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-  const items = index.candidates(null, false, true, true, [target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   assert.deepEqual(Array.from(items, item => [item.comparison.html, item.comparison.pdf]),
     [['l', 'L'], ['“', '"'], ['…', '...'], ['abc', 'xyz']]);
   const updated = api.applyTextEdits(source, items.flatMap(item => item.options[0].edits));
@@ -1051,7 +1055,7 @@ test('independent text differences stay separate across tags while format runs r
   const formatIndex = locator.editorSourceIndex(new FixtureDocument({ model: { getValue: () => formatted, getVersionId: () => 1 } }));
   const regular = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: formatIndex.raw, parts: [{ start: 0, end: formatIndex.raw.length, font: { italic: false, bold: false } }] });
   const connection = formatIndex.remember(0, formatIndex.raw.length, regular, { start: 0, end: regular.raw.length });
-  const formats = formatIndex.formatDifferences([], ['italic', 'bold'], true, [[connection, regular]]);
+  const formats = reviewCandidates(formatIndex, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, regular]] });
   assert.deepEqual(Array.from(formats, item => item.text), ['ab cd', 'EF']);
   assert.equal(formats[0].formats.length, 4, 'both bold and italic details survive grouping');
 });
@@ -1113,7 +1117,7 @@ test('page-uniform styles become unknown independently of other pages', async ()
       for (const htmlStyle of [false, true]) {
         const index = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: full.raw, formats: Array.from(full.raw, () => ({ bold: htmlStyle, italic: htmlStyle })) });
         const connection = { start: 0, end: full.raw.length, targetStart: 0, targetEnd: full.raw.length };
-        const items = index.formatDifferences([], ['italic', 'bold'], true, [[connection, full]]);
+        const items = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, full]] });
         const knownMismatch = styles[0].some(value => value === false && htmlStyle);
         assert.equal(items.length > 0, knownMismatch);
       }
@@ -1149,15 +1153,15 @@ test('text and font differences coexist across changed text with uniform PDF fon
     const target = new api.PdfConnections(locator, { raw: pdf,
       parts: [{ start: 0, end: pdf.length, font: { bold: true, italic: false } }] });
     const connection = index.remember(0, html.length, target, { start: 0, end: pdf.length });
-    const diff = { parts: [{ html, pdf, changed: true }] };
+    const diff = { parts: [new api.diffIndex(html, pdf)] };
     connection.editorDiff = diff;
-    const fonts = index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]);
+    const fonts = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] });
     assert.deepEqual(Array.from(fonts, item => item.text), [html]);
-    assert.ok(index.candidates(null, false, true, true, [target]).length, 'font detection retains the text candidate');
+    assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).length, 'font detection retains the text candidate');
     assert.equal(api.applyTextEdits(html, fonts[0].options[0].edits), `<b>${html}</b>`);
     target.parts = [{ start: 0, end: 1, font: { bold: true } },
       { start: 1, end: pdf.length, font: { bold: false } }];
-    if (pdf.length > 1) assert.equal(index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]).length, 0,
+    if (pdf.length > 1) assert.equal(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }).length, 0,
       'unaligned text spanning conflicting PDF fonts has no inferred format edit');
   }
 });
@@ -1171,11 +1175,11 @@ test('wrong OCR readings retain eligible styles across font names and HTML-only 
       start: i, end: i + 1, font: { name: `Face${i % 2}`, bold: false, italic: false }
     })) });
     const connection = index.remember(0, text.length, target, { start: 0, end: pdf.length });
-    const items = index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]);
+    const items = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] });
     assert.equal(items.length, 1);
     assert.equal(items[0].text, text, 'the correction covers the complete HTML bold span');
     assert.equal(api.applyTextEdits(html, items[0].options[0].edits), text, 'format correction preserves the HTML reading');
-    assert.ok(index.candidates(null, false, true, true, [target]).length, 'OCR text remains separately reviewable');
+    assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).length, 'OCR text remains separately reviewable');
   }
   const index = new api.PdfConnections(locator, '<b>AxB</b>');
   const target = new api.PdfConnections(locator, { raw: 'AB', parts: [
@@ -1183,7 +1187,7 @@ test('wrong OCR readings retain eligible styles across font names and HTML-only 
     { start: 1, end: 2, font: { bold: true, italic: false } }
   ] });
   const connection = index.remember(0, 3, target, { start: 0, end: 2 });
-  assert.deepEqual(Array.from(index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]), item => item.text), ['A'],
+  assert.deepEqual(Array.from(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }), item => item.text), ['A'],
     'an HTML-only character between conflicting styles has no inferred bold correction');
   const mixed = new api.PdfConnections(locator, '<b><i>WRONG</i></b>');
   target.raw = 'RIGHT';
@@ -1192,13 +1196,13 @@ test('wrong OCR readings retain eligible styles across font names and HTML-only 
     { start: 2, end: 5, font: { bold: false, italic: true } }
   ];
   const changed = { start: 0, end: 5, targetStart: 0, targetEnd: 5,
-    editorDiff: { parts: [{ html: 'WRONG', pdf: 'RIGHT', changed: true }] } };
-  const eligible = mixed.formatDifferences([], ['italic', 'bold'], true, [[changed, target]]);
+    editorDiff: { parts: [new api.diffIndex('WRONG', 'RIGHT')] } };
+  const eligible = reviewCandidates(mixed, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[changed, target]] });
   assert.equal(api.applyTextEdits(mixed.source, eligible[0].options[0].edits), '<i>WRONG</i>',
     'uniform bold is corrected while mixed italic stays unchanged');
   target.parts[1].font.bold = null;
   target.fontVersion = (target.fontVersion || 0) + 1;
-  assert.equal(mixed.formatDifferences([], ['italic', 'bold'], true, [[changed, target]]).length, 0, 'unknown bold prevents an inferred edit');
+  assert.equal(reviewCandidates(mixed, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[changed, target]] }).length, 0, 'unknown bold prevents an inferred edit');
 });
 
 test('non-bold OCR metadata survives a page containing normal and italic text', async () => {
@@ -1231,7 +1235,7 @@ test('text and font highlights keep independent ranges across tags and adjacent 
       parts: [{ start: 0, end: pdf.length, font: { italic: false, bold: false } }] });
     const connection = index.remember(0, index.raw.length, target, { start: 0, end: pdf.length });
     index.fontEdits = () => assert.fail('Highlighting must not build format replacement edits');
-    const marks = sourceDecorations(index, index.candidates(null, true, false, true, [target], [[connection, target], [connection, target]]), true, true, item => provider.sourceHover(item, model), documentModel);
+    const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [target], connections: [[connection, target], [connection, target]] }), true, true, item => provider.sourceHover(item, model), documentModel);
     for (const [className, expected] of [['mew-ocr-diff-text', text], ['mew-font-diff-text', fonts]]) {
       assert.deepEqual(Array.from(marks.filter(mark => mark.options.inlineClassName === className),
         mark => markup.slice(mark.range.startColumn - 1, mark.range.endColumn - 1)), expected);
@@ -1246,7 +1250,7 @@ test('text and font highlights keep independent ranges across tags and adjacent 
   const target = new api.PdfConnections(locator, { raw: 'word gap RIGHT',
     parts: [{ start: 0, end: 14, font: { italic: false, bold: false } }] });
   const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-  assert.deepEqual(Array.from(sourceDecorations(index, index.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel), mark => mark.options.description),
+  assert.deepEqual(Array.from(sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [[connection, target]] }), true, true, undefined, documentModel), mark => mark.options.description),
     ['PDF font difference', 'PDF OCR text difference'], 'unchanged gaps keep unrelated differences separate');
 });
 
@@ -1258,22 +1262,22 @@ test('independent bold and italic detection limits highlights and applied styles
   const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
   const pairs = [[connection, target]], documentModel = new FixtureDocument({ model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
   for (const key of ['bold', 'italic']) {
-    const items = index.formatDifferences([], [key], true, pairs);
+    const items = reviewCandidates(index, { items: [], fonts: [key], edits: true, connections: pairs });
     assert.equal(items.length, 1);
     const result = new api.PdfConnections(locator, api.applyTextEdits(html, items[0].options[0].edits));
     assert.equal(result.formats[0][key], true);
     assert.equal(result.formats[0][key === 'bold' ? 'italic' : 'bold'], false, 'disabled style is never applied');
-    assert.equal(sourceDecorations(index, index.candidates(null, [key], false, false, [], pairs), [key], false, undefined, documentModel).length, 1);
-    assert.equal(index.formatDifferences([], ['italic', 'bold'], true, pairs)[0].font[key === 'bold' ? 'italic' : 'bold'], true,
+    assert.equal(sourceDecorations(index, reviewCandidates(index, { fonts: [key], edits: false, text: false, targets: [], connections: pairs }), [key], false, undefined, documentModel).length, 1);
+    assert.equal(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: pairs })[0].font[key === 'bold' ? 'italic' : 'bold'], true,
       'filtering preserves the cached PDF font');
   }
-  assert.equal(index.formatDifferences([], [], true, pairs).length, 0);
-  assert.equal(sourceDecorations(index, index.candidates(null, [], false, false, [], pairs), [], false, undefined, documentModel).length, 0);
+  assert.equal(reviewCandidates(index, { items: [], fonts: [], edits: true, connections: pairs }).length, 0);
+  assert.equal(sourceDecorations(index, reviewCandidates(index, { fonts: [], edits: false, text: false, targets: [], connections: pairs }), [], false, undefined, documentModel).length, 0);
   const italic = new api.PdfConnections(locator, '<p><i>Word</i></p>');
   const same = italic.remember(0, italic.raw.length, target, { start: 0, end: target.raw.length });
-  assert.equal(italic.formatDifferences([], ['italic'], true, [[same, target]]).length, 0,
+  assert.equal(reviewCandidates(italic, { items: [], fonts: ['italic'], edits: true, connections: [[same, target]] }).length, 0,
     'a bold-only fault disappears when bold detection is disabled');
-  const item = italic.formatDifferences([], ['bold'], true, [[same, target]])[0];
+  const item = reviewCandidates(italic, { items: [], fonts: ['bold'], edits: true, connections: [[same, target]] })[0];
   const updated = new api.PdfConnections(locator, api.applyTextEdits(italic.source, item.options[0].edits));
   assert.equal(updated.formats[0].bold, true);
   assert.equal(updated.formats[0].italic, true, 'adding bold preserves existing italic markup');
@@ -1286,7 +1290,7 @@ test('format differences include missing, surplus and partially marked bold ital
     const heading = new api.PdfConnections(locator, `<h${level}>2<br>Engels an Marx<br>in London</h${level}>`);
     const target = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: heading.raw, parts: [{ start: 0, end: heading.raw.length, font: { bold: false, italic: false } }] });
     const connection = heading.remember(0, heading.raw.length, target, { start: 0, end: target.raw.length });
-    assert.equal(heading.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]).length, 0, 'a heading alone does not declare bold');
+    assert.equal(reviewCandidates(heading, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }).length, 0, 'a heading alone does not declare bold');
     for (const markup of ['<b>Title</b>', '<strong>Title</strong>', '<span style="font-weight:700">Title</span>']) {
       const explicit = new api.PdfConnections(locator, `<h${level}>${markup}</h${level}>`);
       assert.equal(explicit.formats[0].bold, true, 'explicit bold inside a heading is retained');
@@ -1302,7 +1306,7 @@ test('format differences include missing, surplus and partially marked bold ital
     start: index.raw.indexOf(text), end: index.raw.indexOf(text) + text.length, font: { italic, bold, name: 'fixture' }
   })) });
   const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-  const items = index.formatDifferences([], ['italic', 'bold'], true, [[connection, target], [connection, target]]);
+  const items = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target], [connection, target]] });
   assert.deepEqual(Array.from(items, item => item.text), ['A B C', '𠀀']);
   assert.equal(items[0].htmlFont.bold, false, 'italic alone misses the bold half');
   assert.equal(items[0].formats[1].htmlFont.italic, false, 'bold alone misses the italic half');
@@ -1311,10 +1315,10 @@ test('format differences include missing, surplus and partially marked bold ital
   const corrected = new api.PdfConnections(locator, revised);
   assert.equal(corrected.raw, index.raw, 'format replacement preserves all visible text and UTF-16 characters');
   const confirmed = corrected.remember(0, corrected.raw.length, target, { start: 0, end: target.raw.length });
-  assert.equal(corrected.formatDifferences([], ['italic', 'bold'], true, [[confirmed, target, api.textDiff(corrected, target, confirmed)]]).length, 0, 'missing, surplus and mixed bold/italic are corrected together');
+  assert.equal(reviewCandidates(corrected, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[confirmed, target, api.textDiff(corrected, target, confirmed)]] }).length, 0, 'missing, surplus and mixed bold/italic are corrected together');
   assert.ok(revised.includes('<strong>D</strong> <em>E</em>'), 'already correct formatting stays unchanged');
   const documentModel = new FixtureDocument({ model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [[connection, target]] }), true, true, undefined, documentModel);
   assert.ok(marks.length >= 4);
   assert.ok(marks.every(mark => !html.slice(mark.range.startColumn - 1, mark.range.endColumn - 1).includes('<')), 'decorations exclude markup');
 });
@@ -1500,7 +1504,7 @@ test('Tesseract placeholder fonts remain unknown and cannot produce surplus HTML
     const index = new api.PdfConnections(locator, html);
     const target = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: index.raw, parts: [{ start: 0, end: index.raw.length, font: style }] });
     const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-    assert.equal(index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]).length, 0);
+    assert.equal(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }).length, 0);
   }
 });
 
@@ -1547,7 +1551,7 @@ test('ME32-007 reverse selections reuse OCR alignment around Gewißheit', async 
     isCurrent: () => true, waitForIdle: async () => {} });
   const source = new api.PdfConnections(locator, fixture.html), full = await locator.indexDocument(pdf);
   const page = new api.PdfConnections(locator, full.raw.trim());
-  source?.update([page], pdf);
+  source?.connect([page], pdf);
   for (const [word, expected] of [['hatte', 'hatte'], ['ihn', 'ihn'], ['GewiBheit', 'Gewißheit'], ['abzunehmen', 'abzunehmen']]) {
     const start = page.raw.indexOf(word, page.raw.indexOf('GewiBheit'));
     assert.ok(start >= 0);
@@ -1576,12 +1580,12 @@ test('background document mapping retains page font highlights alongside text di
   page.parts = [{ start: 0, end: page.raw.length, font: { italic: false, bold: false } }];
   index.remember(0, text.length, page, { start: 0, end: page.raw.length });
   const documentModel = new FixtureDocument({ model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
-  const marks = targets => sourceDecorations(index, index.candidates(null, true, false, true, [], targets.flatMap(target =>
-    (index.byTarget.get(target) || []).map(connection => [connection, target]))), true, true, undefined, documentModel);
+  const marks = targets => sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: targets.flatMap(target =>
+    (index.byTarget.get(target) || []).map(connection => [connection, target])) }), true, true, undefined, documentModel);
   assert.equal(marks([page]).filter(mark => mark.options.description === 'PDF font difference').length, 2);
   const full = await locator.indexDocument(pdf);
   for (let refresh = 0; refresh < 2; refresh++) {
-    index?.update([page, full], pdf);
+    index?.connect([page, full], pdf);
     const refreshed = marks([page, full]);
     assert.ok(refreshed.some(mark => mark.options.description === 'PDF OCR text difference'));
     assert.equal(refreshed.filter(mark => mark.options.description === 'PDF font difference').length, 2,
@@ -1622,7 +1626,7 @@ test('source/PDF pairs reuse one snapshot and rebuild all mappings after edits',
   const before = locator.editorSourceIndex(documentModel);
   assert.ok(before instanceof api.PdfConnections);
   assert.equal(before.source, source);
-  before?.update([target], pdf);
+  before?.connect([target], pdf);
   assert.ok(before.byTarget.get(target).length);
   assert.equal(locator.editorSourceIndex(documentModel), before);
   pdf = secondPdf;
@@ -1633,10 +1637,36 @@ test('source/PDF pairs reuse one snapshot and rebuild all mappings after edits',
   const after = locator.editorSourceIndex(documentModel);
   assert.notEqual(after, before);
   assert.equal(after.byTarget.get(target), undefined, 'markup edits invalidate mappings too');
-  after?.update([target], pdf);
+  after?.connect([target], pdf);
   assert.ok(after.byTarget.get(target).length);
   assert.equal(after.formats[0].bold, true);
   assert.equal(locator.editorSourceIndex(documentModel), after, 'all consumers share the rebuilt snapshot');
+});
+
+test('ME23-109 regression: a repeated phrase does not turn an extra letter into missing text', async () => {
+  const api = engine(), numbers = [1, 2], phrase = 'separate descriptions of price or';
+  const body = 'The second object may be represented by different quantities of metals and therefore has several '
+    + phrase + '\nappears alongside other descriptions that serve the same mathematical purpose. '
+    + 'Later the text explains also why several measures are needed in force at the same time, and gives separate descriptions of price in silver.';
+  const next = 'Another paragraph begins on the next page and describes a single unit of account.';
+  const notes = ['A footnote explains the first example.', 'The second footnote identifies its source.'];
+  const pdf = { getPage: async n => ({ getTextContent: async () => ({
+    items: [[body, next][n - 1], notes[n - 1]].map((str, i) => ({
+      str, height: 9, width: 400, transform: [9, 0, 0, 9, 20, 200 - i * 30], hasEOL: true
+    }))
+  }) }) };
+  const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) },
+    getPdf: () => pdf, getSourcePages: () => numbers, isCurrent: () => true, waitForIdle: async () => {} });
+  const edited = 'separeate descriptions of price or';
+  const html = body.replace(phrase, edited).replace('\nappears', ' apzpears');
+  const index = new api.PdfConnections(locator, '<p>' + html + '</p><p>' + next + '</p><aside><p>' + notes.join('</p><p>') + '</p></aside>');
+  const full = await locator.indexDocument(pdf, numbers);
+  const { items } = index.getDifferences();
+  assert.deepEqual(Array.from(items, item => [item.comparison.html, item.comparison.pdf, !!item.missing]),
+    [['e', '', false], ['z', '', false]]);
+  const at = full.raw.indexOf(phrase), hit = index.range(full, at, at + phrase.length, true);
+  assert.ok(hit);
+  assert.equal(index.raw.slice(hit.start, hit.end), edited);
 });
 
 test('MEW_BRIEF/23/ME23-316 prepares reusable mappings across five actual OCR pages', async () => {
@@ -1647,28 +1677,31 @@ test('MEW_BRIEF/23/ME23-316 prepares reusable mappings across five actual OCR pa
   } };
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) },
     isCurrent: () => true, waitForIdle: async () => {} });
-  const source = new api.PdfConnections(locator, fixture.html), full = await locator.indexDocument(pdf);
+  const source = new api.PdfConnections(locator, fixture.html);
+  const full = await locator.indexDocument(pdf, fixture.pages.map((_, i) => i + 1));
   for (const page of full.pages) for (const part of page.parts)
     assert.equal(full.raw.slice(part.start, part.end), part.item.str, 'page-local construction keeps global item offsets');
-  source?.update([], pdf);
-  const connections = source.byTarget.get(full);
+  source.connect([full]);
+  const connections = source.targetConnections(full);
   assert.ok(connections.length >= 8, 'footnote ordering must not discard independently validated passages');
-  source?.update([full], pdf);
-  assert.deepEqual(source.byTarget.get(full), connections, 'review initialization must reuse inverse mappings without scanning the whole volume again');
+  source.connect([full]);
+  assert.equal(source.targetConnections(full), connections, 'review initialization reuses prepared mappings');
   const touchedPages = new Set();
   let changed = 0, probes = 0;
   for (const item of connections) {
-    const ranges = source.compare(full, item).ranges;
-    for (const [position, [a, b, , , span]] of ranges.entries()) {
+    const ranges = source.compare(item).parts;
+    for (const [position, span] of ranges.entries()) {
       if (span.html.length && span.pdf.length) {
-        const start = item.start + (span.changed ? a : a + Math.floor(span.html.length / 2));
-        const end = span.changed ? item.start + b : start + 1;
+        const start = item.start + span.start + (span.changed ? 0 : Math.floor(span.html.length / 2));
+        const end = span.changed ? item.start + span.end : start + 1;
         const hit = source.range(full, start, end, false, item);
         assert.ok(hit);
-        const before = start === item.start + a && ranges[position - 1]?.[4], after = end === item.start + b && ranges[position + 1]?.[4];
-        const missing = part => part && !part.html && api.significantText(part.pdf) ? part.pdf : '';
-        assert.equal(full.raw.slice(hit.start, hit.end),
-          missing(before) + (span.changed ? span.pdf : source.raw.slice(start, end)) + missing(after));
+        const insertions = (parts, offset) => parts.filter(part =>
+          part.start === offset && part.end === offset && api.significantText(part.pdf)).map(part => part.pdf).join('');
+        const before = insertions(ranges.slice(0, position), start - item.start);
+        const after = insertions(ranges.slice(position + 1), end - item.start);
+        assert.equal(api.significantText(full.raw.slice(hit.start, hit.end)),
+          api.significantText(before + (span.changed ? span.pdf : source.raw.slice(start, end)) + after));
         const reverse = source.range(full, hit.start, hit.end, true, item);
         assert.ok(reverse.start <= start && reverse.end >= end, 'reverse selections include touching HTML-only text');
         const roundTrip = source.range(full, reverse.start, reverse.end, false, item);
@@ -1692,7 +1725,7 @@ test('long multi-page passages retain OCR mappings beyond the whole-range edit l
   const changed = [...raw]; for (const at of positions) changed[at] = '7';
   const index = raw => (new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw, normalized: api.normalized(raw), }));
   const source = index(raw), target = index(changed.join(''));
-  source.scope(target, true);
+  source.connect(target);
   assert.ok(source.byTarget.get(target).length > 1, 'bounded groups survive more than 128 total OCR edits');
   for (const at of positions) {
     const hit = source.range(target, at, at + 1);
@@ -1713,7 +1746,7 @@ test('local highlight hunks separate OCR boundary spaces', () => {
   const parts = index.compare(target, connection).parts;
   assert.deepEqual(Array.from(parts.slice(0, 4), part => [part.html, part.pdf, part.changed]),
     [['a', 'ä', true], ['ft ', 'ft ', false], ['', ' ', true], ['der\n', 'der\n', false]]);
-  const items = index.candidates(null, false, true, true, [target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   assert.deepEqual({ ...items[0].comparison }, { html: 'a', pdf: 'ä' });
   assert.equal(api.applyTextEdits(source, items[0].options[0].edits), source.replace('aft', 'äft'));
   const hit = index.range(target, 0, 3, false, connection, true);
@@ -1734,7 +1767,7 @@ test('an over-budget page comparison does not highlight or replace the whole pas
   assert.equal(api.differences(index, target, broad).text.length, 0, 'failed traceback supplies no discrepancy spans');
   assert.equal(index.range(target, 0, index.raw.length, false, broad, true), null,
     'failed traceback cannot map a discrepancy to the entire PDF page');
-  const items = index.candidates(null, false, true, true, [target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   assert.deepEqual(Array.from(items, item => [item.comparison.html, item.comparison.pdf]), [['5', 'X']]);
 });
 
@@ -1748,7 +1781,7 @@ test('ME04-608 wrapped prose stays aligned across blank-line anchors', () => {
     const index = locator.editorSourceIndex(new FixtureDocument({ model: { getValue: () => html, getVersionId: () => 1 } }));
     const target = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: pdf });
     index.remember(0, index.raw.length, target, { start: 0, end: pdf.length });
-    const items = index.candidates(null, false, true, true, [target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.deepEqual(Array.from(items, item => [item.comparison.html, item.comparison.pdf]),
       [['é', 'e'], ['b', 'h'], ['.', "'"], ['é', 'e']]);
     assert.equal(api.applyTextEdits(html, items.flatMap(item => item.options[0].edits)),
@@ -1826,7 +1859,7 @@ test('native decorations split changes around tags, map entities, and mark missi
   const connection = { start: 0, end: raw.length, targetStart: 0, targetEnd: target.raw.length };
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
   const hover = item => provider.sourceHover(item, model);
-  const decorations = sourceDecorations(index, index.candidates(null, true, false, true, [target], [[connection, target]]), true, true, hover, documentModel);
+  const decorations = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [target], connections: [[connection, target]] }), true, true, hover, documentModel);
   const ranges = decorations.map(({ range }) => markup.slice(range.startColumn - 1, range.endColumn - 1));
   assert.deepEqual([...ranges], ['X', '&amp;', '']);
   assert.ok(decorations.every(item => !('linesDecorationsClassName' in item.options) && !('linesDecorationsTooltip' in item.options)),
@@ -1836,11 +1869,11 @@ test('native decorations split changes around tags, map entities, and mark missi
   assert.match(decorations.at(-1).options.hoverMessage.value, /PDF:.*\+/);
   const saved = connection.editorDiff;
   assert.equal(index.compare(target, connection), saved, 'direct index comparisons reuse the editor diff');
-  sourceDecorations(index, index.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel);
+  sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [[connection, target]] }), true, true, undefined, documentModel);
   assert.equal(connection.editorDiff, saved);
   assert.equal(api.textDiff('a', 'b', true).parts[0].changed, true);
-  assert.deepEqual([...sourceDecorations(index, index.candidates(null, true, false, true, [target], [[{ ...connection, editorDiff: null }, target]]), true, true, hover, documentModel)], [...decorations]);
-  assert.deepEqual([...sourceDecorations(index, index.candidates(null, true, false, true, [target], [[connection, target]]), true, true, hover, documentModel)], [...decorations]);
+  assert.deepEqual([...sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [target], connections: [[{ ...connection, editorDiff: null }, target]] }), true, true, hover, documentModel)], [...decorations]);
+  assert.deepEqual([...sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [target], connections: [[connection, target]] }), true, true, hover, documentModel)], [...decorations]);
 });
 
 test('ME04-004 quote markers exclude matching paragraphs, PDF wrapping and the footnote', async () => {
@@ -1853,9 +1886,9 @@ test('ME04-004 quote markers exclude matching paragraphs, PDF wrapping and the f
   const documentModel = new FixtureDocument({ model: { getValue: () => fixture.html, getVersionId: () => 1,
     getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
   const index = locator.editorSourceIndex(documentModel);
-  index.scope(target, true);
+  index.connect(target);
   const connections = (index.byTarget.get(target) || []).map(connection => [connection, target]);
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], connections), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: connections }), true, true, undefined, documentModel);
   const quote = fixture.html.indexOf('entwickeln.') + 'entwickeln.'.length;
   const mark = marks.find(({ range }) => range.startColumn - 1 <= quote && range.endColumn - 1 > quote);
   assert.equal(mark, undefined, 'normalized quote shapes are not reported as text differences');
@@ -1905,11 +1938,11 @@ test('ME07-073 and ME07-074 alignment excludes neighboring pages and preserves t
     }) };
     const html = lf ? fixture.html.replace(/\r\n/g, '\n') : fixture.html;
     const index = new api.PdfConnections(locator, html), pages = fixture.pages.map(raw => new api.PdfConnections(locator, raw));
-    index?.update(pages, pdf);
-    const before = index.candidates(null, false, true, true, pages).map(item => item.comparison);
+    index?.connect(pages, pdf);
+    const before = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: pages }).map(item => item.comparison);
     const full = await locator.indexDocument(pdf);
-    index?.update(pages, pdf);
-    const after = index.candidates(null, false, true, true, [...pages, full]).map(item => item.comparison);
+    index?.connect(pages, pdf);
+    const after = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [...pages, full] }).map(item => item.comparison);
     assert.deepEqual(after, before, 'background alignment must not add neighboring text or delete final punctuation');
     const page = full.pages[fixture.number - 72];
     for (const connection of index.byTarget.get(full) || []) {
@@ -1935,9 +1968,9 @@ test('ME07-066 missing page-end text maps before whole-document indexing', async
     const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
     const index = new api.PdfConnections(locator, html), target = new api.PdfConnections(locator, fixture.layerRaw);
     const pdf = {};
-    index?.update([target], pdf);
+    index?.connect([target], pdf);
     assert.equal(locator.getDocumentIndex(pdf), undefined, 'only the visible page is available');
-    const item = index.candidates(null, false, true, true, [target]).find(item => item.comparison.pdf.includes('Delegierten'));
+    const item = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).find(item => item.comparison.pdf.includes('Delegierten'));
     assert.ok(item, 'the missing word is highlighted without waiting for the full PDF');
     assert.equal(item.sourceStart, item.sourceEnd, 'HTML has an insertion point, not selectable text');
     assert.equal(item.comparison.html, '');
@@ -1956,17 +1989,17 @@ test('ME04-117 adjacent-page quotations cannot override a complete page mapping'
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getTargets: () => pages });
   const index = new api.PdfConnections(locator, fixture.html);
   const pages = fixture.pages.map(page => new api.PdfConnections(locator, page.raw));
-  index?.update(pages, {});
+  index?.connect(pages, {});
   // Font metadata can rebuild just the adjacent layer after the first preparation.
   pages[1] = new api.PdfConnections(locator, fixture.pages[1].raw);
-  index?.update([pages[1]], {});
+  index?.connect([pages[1]], {});
   const connections = pages.flatMap(page => (index.byTarget.get(page) || []).map(connection => [connection, page]));
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], connections), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: connections }), true, true, undefined, documentModel);
   const at = fixture.html.indexOf('Gesellschaft nur') + 8;
   assert.ok(!marks.some(({ range }) => range.startColumn - 1 <= at && range.endColumn - 1 > at),
     'the uppercase H in the next page quotation is not a difference in this page');
-  assert.ok(index.candidates(null, false, true, true, pages).some(item => /ooo/.test(item.comparison?.pdf)), 'actual OCR differences remain reviewable');
+  assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: pages }).some(item => /ooo/.test(item.comparison?.pdf)), 'actual OCR differences remain reviewable');
 });
 
 test('ME17-463/464 discard prepared font mappings to a shorter adjacent-page quotation', () => {
@@ -1980,15 +2013,15 @@ test('ME17-463/464 discard prepared font mappings to a shorter adjacent-page quo
     const adjacent = page(quote, !italic), own = page(index.raw, italic), pdf = {};
     own.parts = index.formats.map((font, start) => ({ start, end: start + 1,
       font: { italic: font.italic, bold: font.bold } }));
-    index?.update([adjacent], pdf);
-    assert.ok(index.formatDifferences([], ['italic', 'bold'], true, [adjacent].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])).length,
+    index?.connect([adjacent], pdf);
+    assert.ok(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [adjacent].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }).length,
       'the repeated quotation initially maps to the adjacent page with different formatting');
     index.remember(0, index.raw.length, own, { start: 0, end: own.raw.length });
     index.scopes.set(own, { prepared: true, connections: index.byTarget.get(own) });
-    index?.update([adjacent, own], pdf);
+    index?.connect([adjacent, own], pdf);
     assert.deepEqual(index.scopes.get(adjacent).connections, index.byTarget.get(adjacent),
       'superseded quotations must also leave the prepared highlight snapshot');
-    assert.equal(index.formatDifferences([], ['italic', 'bold'], true, [adjacent, own].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])).length, 0);
+    assert.equal(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [adjacent, own].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }).length, 0);
   }
 });
 
@@ -1998,11 +2031,11 @@ test('ME04-037 keeps the matching heading out of deletion/reinsertion markers', 
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   for (const html of [fixture.html, fixture.html.replace(/\r\n/g, '\n')]) {
     const index = new api.PdfConnections(locator, html), target = new api.PdfConnections(locator, fixture.layerRaw);
-    index.scope(target, true);
+    index.connect(target);
     const connections = (index.byTarget.get(target) || []).map(connection => [connection, target]);
     assert.ok(connections.length);
     const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-    const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], connections), true, true, undefined, documentModel);
+    const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: connections }), true, true, undefined, documentModel);
     const start = html.indexOf('[Erklärung', html.indexOf('<h1>'));
     const end = start + '[Erklärung gegen Karl Grün'.length;
     assert.ok(marks.length, 'actual OCR differences still receive markers');
@@ -2028,7 +2061,7 @@ test('ME32-169 word-ending noise maps past an overlapping connection ending at i
   const at = index.raw.indexOf('gewähren.') + 'gewähren.'.length, end = target.raw.indexOf(',  , <');
   index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
   index.remember(0, at, target, { start: 0, end });
-  const item = index.candidates(null, false, true, true, [target]).find(item => item.sourceStart === at);
+  const item = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).find(item => item.sourceStart === at);
   assert.ok(item && item.sourceEnd === at, 'the extra OCR noise has an HTML insertion marker');
   const hit = index.range(target, at, at, false, undefined, true);
   assert.ok(hit, 'the insertion uses the overlapping connection that contains its diff');
@@ -2046,10 +2079,10 @@ test('ME07-261 missing prefixes use a caret before the term and retain their cli
     const index = new api.PdfConnections(locator, html), target = new api.PdfConnections(locator, pdf);
     index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
     const connections = index.byTarget.get(target).map(connection => [connection, target]);
-    const [mark, ...extra] = sourceDecorations(index, index.candidates(null, true, false, true, [], connections), true, true, undefined, documentModel);
+    const [mark, ...extra] = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: connections }), true, true, undefined, documentModel);
     assert.equal(extra.length, 0);
     assert.ok(mark, 'whitespace-only HTML changes must still mark missing PDF letters');
-    const [item] = index.candidates(null, false, true, true, [target]);
+    const [item] = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.equal(mark.range.startColumn, html.indexOf('schließt') + 1);
     assert.equal(html.slice(mark.range.startColumn - 1, mark.range.endColumn - 1), '');
     assert.equal(mark.options.before?.inlineClassName, 'mew-ocr-diff-insert');
@@ -2080,7 +2113,7 @@ test('space markers cover only changed spaces while prefixes use carets without 
   ]) {
     const markup = '<p>' + html + '</p>', index = new api.PdfConnections(locator, markup), target = new api.PdfConnections(locator, pdf);
     index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-    const [mark] = sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
+    const [mark] = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
     const insertion = pdf === 'SoX wenig' ? markup.indexOf(' wenig') : markup.indexOf('wenig');
     assert.equal(mark.range.startColumn - 1, space === null ? insertion : index.starts[space]);
     assert.equal(mark.range.endColumn - 1, space === null ? insertion : index.ends[space]);
@@ -2089,7 +2122,7 @@ test('space markers cover only changed spaces while prefixes use carets without 
       end: api.lowerBound(index.starts, mark.range.endColumn - 1) };
     const hit = index.range(target, from.start, from.end, false, undefined, true);
     assert.ok(hit?.approximate, 'the highlighted space still reaches the actual difference');
-    const [item] = index.candidates(null, false, true, true, [target]);
+    const [item] = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.equal(api.applyTextEdits(markup, item.options[0].edits), '<p>' + pdf + '</p>');
   }
 });
@@ -2099,16 +2132,16 @@ test('ME07-316 missing heading text marks the insertion before the closing tag a
   const api = engine();
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, fixture.html), target = new api.PdfConnections(locator, fixture.layerRaw);
-  index?.update([target], {});
+  index?.connect([target], {});
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], index.byTarget.get(target).map(connection => [connection, target])), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: index.byTarget.get(target).map(connection => [connection, target]) }), true, true, undefined, documentModel);
   const marker = marks.find(mark => mark.options.before?.inlineClassName === 'mew-ocr-diff-insert');
   const offset = marker.range.startColumn - 1;
   assert.equal(offset, fixture.html.indexOf('</h1>'));
   const at = api.lowerBound(index.ends, offset + 1);
   const hit = index.range(target, at, at, false, undefined, true);
   assert.equal(target.raw.slice(hit.start, hit.end), '12763');
-  const item = index.candidates(null, false, true, true, [target]).find(item => item.comparison.pdf === '12763');
+  const item = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).find(item => item.comparison.pdf === '12763');
   assert.equal(item.options[0].edits[0].start, offset);
   assert.equal(api.applyTextEdits(fixture.html, item.options[0].edits), fixture.html.replace('</h1>', '12763</h1>'));
 });
@@ -2120,8 +2153,7 @@ test('source decorations ignore whitespace and hyphens while preserving subseque
     const index = new api.PdfConnections(new api.PdfLocator(), { raw, model,
       starts: Array.from({ length: raw.length }, (_, i) => i),
       ends: Array.from({ length: raw.length }, (_, i) => i + 1) });
-    return sourceDecorations(index, index.candidates(null, true, false, true, [],
-      [[{ start: 0, end: raw.length, targetStart: 0, targetEnd: pdf.length }, { raw: pdf }]]));
+    return sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [[{ start: 0, end: raw.length, targetStart: 0, targetEnd: pdf.length }, { raw: pdf }]] }));
   };
   for (const [html, pdf] of [
     ['word word', 'wordword'], ['wordword', 'word word'],
@@ -2333,14 +2365,14 @@ test('local textDiff serves review candidates and popup comparisons', () => {
   const index = locator.editorSourceIndex(new FixtureDocument({ model: { getValue: () => source, getVersionId: () => 1 } }));
   const target = new pdfApi.PdfConnections(new pdfApi.PdfLocator(), { raw: index.raw.replace('wrong', 'right') });
   index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-  const localItems = index.candidates(null, false, true, true, [target]);
+  const localItems = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   assert.ok(localItems.length);
   const item = { options: [{ id: 'pdf', edits: [] }], comparison: { html: index.raw, pdf: target.raw } };
   const provider = providers.get('pdf-ocr');
   const localRows = provider.content({ items: [item], choices: new Map() }, item).comparison;
   assert.ok(localRows.every(row => row.parts.some(part => part.changed)));
   for (const connection of index.byTarget.get(target)) delete connection.editorDiff;
-  const refreshedItems = index.candidates(null, false, true, true, [target]);
+  const refreshedItems = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   for (const items of [localItems, refreshedItems])
     assert.equal(api.applyTextEdits(source, items.flatMap(item => item.options[0].edits)), source.replace('wrong', 'right'));
   const refreshedRows = provider.content({ items: [item], choices: new Map() }, item).comparison;
@@ -2362,34 +2394,32 @@ test('text candidates, font candidates and decorations reuse one traversal and r
   ] });
   const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
   let reads = 0;
-  connection.editorDiff = { parts: [
-    { html: 'Alpha beta ', pdf: 'Alpha beta ', changed: false },
-    { html: 'gamma', pdf: 'GAMMA', changed: true }
-  ].map(part => new Proxy(part, { get(object, key) { reads++; return object[key]; } })) };
+  connection.editorDiff = { parts: connectionParts(api, [['Alpha beta ', 'Alpha beta '], ['gamma', 'GAMMA']])
+    .map(part => new Proxy(part, { get(object, key) { reads++; return Reflect.get(object, key); } })) };
   let fontReads = 0;
   const fontRuns = target.fontRuns.bind(target);
   target.fontRuns = (...args) => { fontReads++; return fontRuns(...args); };
-  const items = index.candidates(null, false, true, true, [target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   const traversed = reads;
   const { ranges } = connection.editorDiff;
-  const fonts = index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]);
+  const fonts = reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] });
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [[connection, target]] }), true, true, undefined, documentModel);
   assert.equal(reads, traversed, 'review and highlight consumers share the classified spans');
   assert.deepEqual(Array.from(items, item => item.comparison.pdf), ['GAMMA']);
   assert.deepEqual(Array.from(fonts, item => item.text), ['beta']);
   assert.equal(marks.filter(mark => mark.options.description === 'PDF OCR text difference').length, 1);
   assert.equal(marks.filter(mark => mark.options.description === 'PDF font difference').length, 1);
-  assert.deepEqual(index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]), fonts, 'merging output does not mutate cached font data');
-  assert.deepEqual(index.candidates(null, false, true, true, [target]), items, 'candidate generation reuses the same data');
+  assert.deepEqual(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }), fonts, 'merging output does not mutate cached font data');
+  assert.deepEqual(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }), items, 'candidate generation reuses the same data');
   assert.equal(reads, traversed, 'repeated consumers do not revisit diff parts');
   assert.equal(fontReads, 1, 'font runs are read once across all consumers');
   target.parts[1].font.bold = false;
   target.fontVersion++;
-  assert.equal(index.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]).length, 0);
+  assert.equal(reviewCandidates(index, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }).length, 0);
   assert.equal(reads, traversed, 'new font metadata reuses prepared text spans');
   assert.equal(connection.editorDiff.ranges, ranges, 'font refresh preserves mapped ranges');
-  assert.equal(index.candidates(null, false, true, true, [target])[0].comparison.pdf, 'GAMMA');
+  assert.equal(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] })[0].comparison.pdf, 'GAMMA');
   assert.equal(fontReads, 2, 'updated font data is shared by subsequent text review');
 });
 
@@ -2417,7 +2447,7 @@ test('all prepared highlights remain visible together after selection history fi
   for (let i = 160; i < 400; i++)
     index.remember(i * 2, i * 2 + 1, target, { start: i * 2, end: i * 2 + 1 });
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel);
+  const marks = sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel);
   const columns = new Set(marks.map(mark => mark.range.startColumn));
   for (let i = 0; i < 160; i++) assert.ok(columns.has(i * 2 + 1), `prepared highlight ${i} remains visible`);
   assert.equal(marks.length, 288);
@@ -2440,11 +2470,11 @@ test('passage pruning matches pairwise containment and ignores cache recency ord
     const expected = pages.map(page => index.byTarget.get(page).filter(item => !all.some(other => other.page !== page
       && other.item.start <= item.start && other.item.end >= item.end
       && other.item.end - other.item.start > item.end - item.start)));
-    index?.update(pages, pdf);
+    index?.connect(pages, pdf);
     const ranges = items => items.map(({ start, end }) => [start, end]);
     pages.forEach((page, i) => assert.deepEqual(ranges(index.byTarget.get(page)), ranges(expected[i])));
     const preparation = index.prepared;
-    index?.update([...pages].reverse(), pdf);
+    index?.connect([...pages].reverse(), pdf);
     assert.ok(index.prepared === preparation, 'LRU recency changes do not invalidate prepared mappings');
   }
 });
@@ -2495,7 +2525,7 @@ test('OCR page reads publish font styles into the same aligned spans without a s
     'rendered OCR layers and the document index use the same detected style object');
   const changed = new api.PdfConnections(locator, '<p>Regular BADDDD RIGHT</p>');
   const mismatch = changed.remember(0, changed.raw.length, target, { start: 0, end: target.raw.length });
-  assert.equal(changed.formatDifferences([], ['italic', 'bold'], true, [[mismatch, target, api.textDiff(changed, target, mismatch)]]).length, 0,
+  assert.equal(reviewCandidates(changed, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[mismatch, target, api.textDiff(changed, target, mismatch)]] }).length, 0,
     'styled PDF text cannot be applied to a different HTML word without aligned characters');
   await locator.indexFonts(pdf);
   assert.deepEqual([pageReads, textReads, operatorReads], [1, 1, 1], 'review and native layers never reread this page');
@@ -2618,7 +2648,7 @@ test('edge differences without OCR words are missing and anchor to the nearest w
     const first = pdf.search(/\S/), last = pdf.trimEnd().length;
     target.parts = [{ start: first, end: last, node: { length: last - first } }];
     index.byTarget.set(target, [{ start: 0, end: html.length, targetStart: 0, targetEnd: pdf.length }]);
-    const items = index.candidates(null, false, true, true, [target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.ok(items.length, html);
     for (const item of items) {
       assert.equal(!!item.missing, absent, `${html} / ${pdf}`);
@@ -2655,12 +2685,12 @@ test('text replacement refreshes font differences for the existing second format
     const target = new api.PdfConnections(locator, { raw: pdf,
       parts: [{ start: 0, end: pdf.length, font: { italic, bold } }] });
     index.byTarget.set(target, [{ start: 0, end: index.raw.length, targetStart: 0, targetEnd: pdf.length }]);
-    const items = index.candidates(null, false, true, true, [target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     const result = api.applyTextEdits(source, items.flatMap(item => item.options[0].edits));
     const refreshed = new api.PdfConnections(locator, result);
     assert.equal(refreshed.raw, pdf, 'first replacement restores the text');
     refreshed.byTarget.set(target, [{ start: 0, end: pdf.length, targetStart: 0, targetEnd: pdf.length }]);
-    const formats = refreshed.candidates(null, true, true, false, [target]);
+    const formats = reviewCandidates(refreshed, { fonts: true, edits: true, text: false, targets: [target] });
     const final = new api.PdfConnections(locator, api.applyTextEdits(result, formats.flatMap(item => item.options[0].edits)));
     assert.equal(final.raw, pdf, 'format replacement retains the restored text');
     for (const key of ['italic', 'bold']) if (typeof ({ italic, bold })[key] === 'boolean')
@@ -2680,7 +2710,7 @@ test('OCR mapped to another HTML passage cannot consume missing edge text', () =
     const mapped = { start: mappedStart, end: mappedStart + 8, targetStart: mappedPdf, targetEnd: mappedPdf + 7 };
     const broad = { start: 0, end: html.length, targetStart: 0, targetEnd: pdf.length };
     index.byTarget.set(target, [mapped, broad]);
-    const items = index.candidates(null, false, true, true, [target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     const at = html.indexOf(missing), edge = items.filter(item => item.sourceStart < at + missing.length && item.sourceEnd > at);
     assert.equal(edge.map(item => item.comparison.html).join('').trim(), missing, 'even coincidental matching letters belong to the missing remainder');
     assert.ok(edge.every(item => item.missing), `${html}: occupied OCR leaves the edge missing`);

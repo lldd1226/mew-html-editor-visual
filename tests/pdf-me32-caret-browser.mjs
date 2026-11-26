@@ -127,7 +127,7 @@ try {
         ReplacementReview.close(); PdfSelection.clear();
         const editor = readerMonaco.editor, model = editor.getModel(), locator = PdfSelection.locator;
         const index = locator.editorSourceIndex(editor.document), start = index.raw.indexOf('raison') + 5;
-        window.reviewItem = index.candidates(null, false, true, true, locator.environment.getTargets()).find(item => item.sourceStart === start);
+        window.reviewItem = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: locator.environment.getTargets() }).items.find(item => item.sourceStart === start);
         if (olderSelection) {
           const previous = index.raw.indexOf('honneur');
           editor.setSelection(editor.document.rangeAt(index.starts[previous] ?? index.source.length,

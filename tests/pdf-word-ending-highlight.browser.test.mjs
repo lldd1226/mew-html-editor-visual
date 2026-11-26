@@ -27,12 +27,12 @@ test('ME08-432 paints both missing word endings on first preparation without sel
       await PdfSelectionDiff.ready;
       const locator = new PdfReviewProvider.PdfLocator({}, { document });
       const index = new window.PdfSelectionDiff.PdfConnections(locator, fixture.source), target = new PdfSelectionDiff.PdfConnections(locator, { raw: fixture.pdf });
-      index?.update([target]);
+      index?.connect([target]);
       const editor = monaco.editor.create(document.getElementById('editor'), { value: fixture.source, wordWrap: 'on' });
       editor.document = new window.MewEditorCore.DocumentModel({ model: editor.getModel() });
-      const marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, editor.getModel());
+      const marks = window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }).items, true, true, undefined, editor.getModel());
       editor.createDecorationsCollection(marks); editor.render(true);
-      const candidates = index.candidates(null, false, true, true, [target]), endings = [];
+      const candidates = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: [target] }).items, endings = [];
       for (const [word, letter] of [['sag', 't'], ['Stiebe', 'r']]) {
         const at = index.raw.indexOf('sag Stiebe') + (word === 'sag' ? 3 : 10);
         const candidate = candidates.find(c => c.sourceStart === at && c.sourceEnd === at && c.comparison.pdf === letter);

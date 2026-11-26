@@ -11,7 +11,7 @@ const require = createRequire(new URL('../extension.cjs', import.meta.url));
 const source = await readFile(path.join(root, 'extension.cjs'), 'utf8');
 const uri = value => ({ scheme: 'file', path: value, toString: () => value });
 const htmlUri = uri('file:///pages/1.html'), pdfUri = uri('file:///book.pdf');
-const handlers = [], disposable = { dispose() {} };
+const handlers = [], selectionListeners = [], disposable = { dispose() {} };
 let text = '<p>Before WRONG after.</p>', version = 1, saves = 0, editCalls = 0, diffCalls = 0;
 const original = text, snapshots = [];
 class Position { constructor(line, character) { this.line = line; this.character = character; } }
@@ -19,7 +19,15 @@ class Range {
   constructor(a, b, c, d) {
     this.start = typeof a === 'number' ? new Position(a, b) : a;
     this.end = typeof a === 'number' ? new Position(c, d) : b;
+    if (this.start.character > this.end.character) [this.start, this.end] = [this.end, this.start];
   }
+  contains(position) { return position.character >= this.start.character && position.character <= this.end.character; }
+  intersection(range) {
+    const start = Math.max(this.start.character, range.start.character), end = Math.min(this.end.character, range.end.character);
+    return start <= end ? new Range(0, start, 0, end) : undefined;
+  }
+  union(range) { return new Range(0, Math.min(this.start.character, range.start.character),
+    0, Math.max(this.end.character, range.end.character)); }
 }
 class Selection extends Range { constructor(a, b) { super(a, b); this.anchor = a; this.active = b; } }
 const document = { uri: htmlUri, get version() { return version; }, get isDirty() { return text !== original; },
@@ -41,11 +49,16 @@ const context = { extensionUri: '', subscriptions: [], globalState: { get: (key,
 class MarkdownString { appendText() { return this; } appendMarkdown() { return this; } }
 const vscode = { Position, Range, Selection, MarkdownString,
   CodeActionKind: { QuickFix: 'quickfix' },
-  TextEditorSelectionChangeKind: { Mouse: 1, Keyboard: 2 },
+  TextEditorSelectionChangeKind: { Mouse: 1, Keyboard: 2, Command: 3 },
   languages: Object.fromEntries(['registerHoverProvider', 'registerCodeActionsProvider', 'registerCompletionItemProvider'].map(name => [name, () => disposable])), ThemeColor: class { constructor(id) { this.id = id; } }, TextEditorRevealType: { InCenterIfOutsideViewport: 0 },
-  commands: { registerCommand: () => disposable, async executeCommand(command) { assert.equal(command, 'vscode.diff'); diffCalls++; } },
+  commands: { registerCommand: () => disposable, async executeCommand(command) {
+    if (['editor.action.showHover', 'editor.action.hideHover'].includes(command)) return;
+    assert.equal(command, 'vscode.diff'); diffCalls++;
+  } },
   Uri: { parse: uri, joinPath: (base, ...parts) => `${base}/${parts.join('/')}` },
-  window: { activeTextEditor: editor, onDidChangeActiveTextEditor: () => disposable, onDidChangeTextEditorSelection: () => disposable, visibleTextEditors: [editor], createTextEditorDecorationType: () => ({ dispose() {} }),
+  window: { activeTextEditor: editor, onDidChangeActiveTextEditor: () => disposable,
+    onDidChangeTextEditorSelection(callback) { selectionListeners.push(callback); return disposable; },
+    visibleTextEditors: [editor], createTextEditorDecorationType: () => ({ dispose() {} }),
     showTextDocument: async () => editor }, workspace: { onDidChangeTextDocument: () => disposable, registerTextDocumentContentProvider: () => disposable, openTextDocument: async () => document } };
 const sandbox = { require: name => name === 'vscode' ? vscode : require(name), exports: {}, module: { exports: {} }, console, setTimeout, clearTimeout };
 vm.createContext(sandbox);
@@ -89,7 +102,7 @@ const browser = await launchBrowser();
 try {
   const page = await browser.newPage({ viewport: { width: 1200, height: 850 } });
   const errors = [];
-  let nativeHover = false;
+  let nativeHover = false, selectionHover = 0;
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') console.error(message.text()); });
   const panel = controller.panel = { onDidDispose() {}, webview: { onDidReceiveMessage(callback) { handlers.push(callback); return disposable; }, postMessage: async message => {
@@ -99,6 +112,7 @@ try {
   reviewHost.attach(controller, panel, sourceBridge, async () => {});
   controller.ready = true;
   await page.exposeFunction('nativePostMessage', async message => {
+    if (message.type === 'reviewHover') selectionHover++;
     if (message.type === 'reviewDecorations') nativeHover ||= message.decorations.some(mark =>
       mark.hoverMessage?.value.includes('mewReader:mew.pdf-difference'));
     if (message.type.startsWith('review')) handlers.forEach(callback => callback(message));
@@ -117,15 +131,40 @@ try {
   assert.equal(await page.evaluate(() => typeof PdfReviewProvider.sourceHover), 'undefined');
 
   await page.evaluate(() => window.PdfReviewProvider.locator.prepareReview({ editor: window.ReaderUI.getSourceEditor() }));
-  assert.equal(await page.locator('.replacement-review:not([hidden])').count(), 0,
-    'native selection differences do not open a review popup');
+  const popup = page.locator('.replacement-review');
+  function changeSelection(anchor, active, kind) {
+    const selection = editor.selection = new Selection(new Position(0, anchor), new Position(0, active));
+    selectionListeners.forEach(callback => callback({ textEditor: editor, selections: [selection], kind }));
+    return selection;
+  }
+  const highlight = await page.evaluate(() => {
+    const editor = window.ReaderUI.getSourceEditor();
+    const mark = [...editor.collections].flatMap(collection => collection.values())
+      .find(value => value.options.inlineClassName === 'mew-ocr-diff-text');
+    return mark.range.startColumn - 1;
+  });
+  const { Mouse, Command } = vscode.TextEditorSelectionChangeKind;
+  changeSelection(highlight, highlight, Command);
+  for (let i = 0; selectionHover === 0 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(selectionHover, 'programmatic selection still maps to a native hover');
+  assert.equal(await popup.isVisible(), false, 'programmatic selection leaves PDF review closed');
+
+  for (const [anchor, active, expected] of [[highlight, highlight, 'PDF:'],
+    [original.indexOf(' after') + 6, original.indexOf('Before'), 'Before RIGHT after']]) {
+    const selection = changeSelection(anchor, active, Mouse);
+    await page.waitForFunction(expected => {
+      const panel = document.querySelector('.replacement-review:not([hidden])[data-side="pdf"]');
+      return panel?.querySelector('[data-comparison]').textContent.includes(expected);
+    }, expected);
+    assert.equal(editor.selection, selection, 'opening the PDF popup preserves the native selection and its direction');
+    await popup.locator('[data-close]').click();
+  }
   await page.locator('#tools summary').click();
   await page.getByRole('button', { name: 'PDF 文字差异审阅', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.replacement-review [data-comparison]')?.textContent.includes('HTML:'), null, { timeout: 10000 }).catch(async error => {
     console.log(await page.locator('.replacement-review').textContent()); console.log(errors); throw error;
   });
   assert.equal(text, original, 'opening review does not edit native source');
-  const popup = page.locator('.replacement-review');
   await popup.locator('[data-preview-diff]').click();
   for (let i = 0; diffCalls === 0 && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(diffCalls, 1, 'review preview opens the VS Code diff editor');
@@ -151,5 +190,5 @@ try {
   assert.equal(await page.evaluate(() => typeof window.monaco), 'undefined');
   assert.ok(nativeHover, 'the native host receives the PDF difference Hover command');
   await page.screenshot({ path: path.join(root, 'test/artifacts/pdf-review.png') });
-  console.log('PASS: real PDF + shared review with native preview/edit/save, stale-version rejection.');
+  console.log('PASS: native HTML click and reversed selection open real PDF review, with preview/edit/save and stale-version rejection.');
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

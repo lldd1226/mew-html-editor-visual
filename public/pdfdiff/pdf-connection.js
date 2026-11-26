@@ -84,7 +84,9 @@ class PdfConnections {
     const runs = [];
     const first = this.parts && Math.min(this.parts.length - 1, lowerBound(this.parts, start + 1, part => part.end));
     const parts = this.parts ? this.parts.slice(first, (start === end ? first : lowerBound(this.parts, end, part => part.end)) + 1)
-      : this.pages?.filter(page => start < page.end && end > page.start).flatMap(page => page.parts) || [];
+      : this.pages?.slice(lowerBound(this.pages, start + 1, page => page.end), lowerBound(this.pages, end, page => page.start))
+        .flatMap(({ parts }) => nodes ? parts : parts.slice(lowerBound(parts, start + 1, part => part.end),
+          lowerBound(parts, end, part => part.start))) || [];
     if (nodes) return parts;
     for (const part of parts) {
       const a = Math.max(start, part.start), b = Math.min(end, part.end);
@@ -183,31 +185,27 @@ class PdfConnections {
         expected: this.source.slice(segment.start, segment.end) }));
   }
   // Compare this snapshot; the caller selects the current editor index explicitly.
-  getDifferences(pages = [], update) {
-    this.connect(pages, update);
-    if (!this.prepared.differences || !this.fontsCurrent) {
-      this.prepared.differences = { index: this, connections: this.prepared.pairs, items: this.candidates() };
-      this.prepared.fonts = this.prepared.pages.map(({ parts, pages, fontVersion }) => ({ parts, pages, fontVersion }));
+  getDifferences(pages = []) {
+    const prepared = this.connect(pages);
+    if (!prepared.differences || !this.fontsCurrent) {
+      prepared.differences = { index: this, connections: prepared.pairs, items: this.candidates() };
+      prepared.fonts = prepared.pages.map(({ parts, pages, fontVersion }) => ({ parts, pages, fontVersion }));
     }
-    return this.prepared.differences;
+    return prepared.differences;
   }
-  connect(pages = [], update) {
-    const scoped = pages !== null && !Array.isArray(pages), prepare = pages !== null && update?.prepare !== false;
-    const prior = this.prepared, full = scoped ? null : this.#fullIndex || prior?.full;
-    const targets = new Set((scoped ? [pages] : [full, ...(pages || []), ...(this.environment.getTargets?.() || [])]).filter(Boolean));
-    const previous = !this.change && update?.previous, unchanged = previous?.raw === this.raw;
-    if (previous) this.change = { ...(update.change || changedRange(previous.raw, this.raw)), before: previous.raw };
-    const { start, oldEnd, newEnd } = this.change || {}, change = newEnd - oldEnd, insertion = start === oldEnd;
+  inherit(previous) {
+    if (this.change) return;
+    const unchanged = previous.raw === this.raw;
+    const { start, oldEnd, newEnd } = changedRange(previous.raw, this.raw);
+    this.change = { start, oldEnd, newEnd, before: previous.raw };
+    const change = newEnd - oldEnd, insertion = start === oldEnd;
     const shift = (a, b) => b <= start ? 0 : a >= oldEnd ? change : null;
-    if (!previous && prepare && !scoped && prior && prior.pdf === this.pdf && prior.full === full
-      && prior.pages?.length === targets.size && prior.pages.every((page, i) => targets.has(page) && this.targetConnections(page) === prior.connections[i])) return prior;
-
-    for (const page of targets) {
-      const preparePage = prepare && (scoped || page !== prior?.full);
-      if (!previous && !preparePage) continue;
+    const full = this.#fullIndex || this.prepared?.full;
+    for (const page of new Set([full, ...(this.environment.getTargets?.() || [])])) {
+      if (!page) continue;
       let state = this.connections.get(page);
       if (!state) this.connections.set(page, state = {});
-      const cached = previous && previous.connections.get(page), reverse = previous && page.connections.get(previous);
+      const cached = previous.connections.get(page), reverse = page.connections.get(previous);
       if (reverse) {
         const ranges = [];
         for (const item of reverse.ranges || noConnections) {
@@ -218,9 +216,10 @@ class PdfConnections {
           page.connections.set(this, { ...(unchanged ? reverse : {}), ranges: ranges.length ? ranges : undefined });
       }
 
-      const live = cached?.ranges || noConnections, prepared = cached?.preparedRanges, scope = cached?.scope;
+      if (!cached) continue;
+      const { ranges: live = noConnections, preparedRanges: prepared, scope } = cached;
       const migrated = scope && prepared && prepared !== live ? new Map() : null;
-      for (const items of migrated ? [live, prepared] : cached ? [live] : noConnections) {
+      for (const items of migrated ? [live, prepared] : [live]) {
         const isLive = items === live, retained = [];
         for (const item of items) {
           let kept = isLive ? undefined : migrated.get(item);
@@ -235,7 +234,7 @@ class PdfConnections {
                   && style.name === old.name && style.definition?.open === old.definition?.open;
               })) kept.comparisonVersion = this.textVersion;
             if (!kept && covers(item, start, oldEnd)) {
-              if (!item.editorDiff && previous.pairs.includes(item)) previous.compare(item, undefined, { textOnly: true });
+              if (!item.editorDiff && previous.pairs.includes(item)) previous.compare(item, true);
               const diff = item.editorDiff;
               if (diff && diff.reliable !== false) {
                 const tailEnd = item.start + (diff.parts?.findLast(part => part.pdf.trim())?.end ?? item.end - item.start);
@@ -255,8 +254,17 @@ class PdfConnections {
         Object.assign(state, { prepared: cached.prepared, scope: { start: scope.start + (delta ?? 0), end: scope.end + (delta ?? change) } });
         if (!migrated) state.preparedRanges = prepared === live ? retained : undefined;
       }
+    }
+  }
+  connect(pages = []) {
+    if (!Array.isArray(pages)) return this.#connectPage(pages);
+    const prior = this.prepared, full = this.#fullIndex || prior?.full;
+    const targets = new Set([full, ...pages, ...(this.environment.getTargets?.() || [])].filter(Boolean));
+    if (prior && prior.pdf === this.pdf && prior.full === full
+      && prior.pages.length === targets.size && prior.pages.every((page, i) => targets.has(page) && this.targetConnections(page) === prior.connections[i])) return prior;
 
-      if (!preparePage) continue;
+    for (const page of targets) {
+      if (page === prior?.full) continue;
       if (page === full && !full.sourcePages) full.#connectPage(this);
       const entry = matchingPage(full, page), projected = entry && full.sourcePages?.length > 1 ? new Set() : null;
       for (const pair of entry ? this.targetConnections(full) : noConnections) {
@@ -266,11 +274,10 @@ class PdfConnections {
         const mapping = hit && this.remember(hit.start, hit.end, page, from - entry.start, to - entry.start, hit === pair && { connection: pair });
         if (mapping) projected?.add(mapping);
       }
-      const ranges = projected?.size && state.ranges.filter(item => projected.has(item));
-      if (ranges) Object.assign(state, { prepared: true, preparedRanges: ranges, scope: connectionBounds(ranges) });
-      else this.#connectPage(page, state);
+      if (!projected?.size) { this.#connectPage(page); continue; }
+      const state = this.connections.get(page), ranges = state.ranges.filter(item => projected.has(item));
+      Object.assign(state, { prepared: true, preparedRanges: ranges, scope: connectionBounds(ranges) });
     }
-    if (scoped || !prepare) return scoped ? this.connections.get(pages)?.scope : prior;
     const allPages = [...targets], pairs = this.targetConnections(allPages), connections = [];
     for (const page of allPages) {
       const state = this.connections.get(page);
@@ -285,8 +292,9 @@ class PdfConnections {
     }
     return this.prepared = { pdf: this.pdf, full, pages: allPages, connections, pairs };
   }
-  #connectPage(page, state = this.connections.get(page)) {
-    if (state?.prepared) return;
+  #connectPage(page) {
+    let state = this.connections.get(page);
+    if (state?.prepared) return state.scope;
     if (!state) this.connections.set(page, state = {});
     const pageEnd = page.raw.length;
     const pageCount = page.sourcePages?.length, partial = page.layer && this.environment.getSourcePages?.()?.length > 1;
@@ -380,8 +388,9 @@ class PdfConnections {
     const pages = blocks || multiPage || partial ? page.pages || (blocks && [{ start: 0, end: pageEnd, breaks: page.breaks }]) : null;
     this.#recoverPageGaps(page, pages, sourceBegin);
     const preparedRanges = state.ranges || noConnections;
-    Object.assign(state, { prepared: true, preparedRanges,
-      scope: preparedRanges.length && (!scope || blocks) ? connectionBounds(preparedRanges) : scope || null });
+    state.prepared = true;
+    state.preparedRanges = preparedRanges;
+    return state.scope = preparedRanges.length && (!scope || blocks) ? connectionBounds(preparedRanges) : scope || null;
   }
   #recoverPageGaps(page, pages, sourceBegin) {
     const sourceGaps = () => connectionGaps([...this.targetConnections(page, false)].sort((a, b) => a.start - b.start), 0, this.raw.length);
@@ -453,35 +462,31 @@ class PdfConnections {
     }
   }
   get livePairs() { return this.targetConnections(this.prepared?.pages || [], false); }
-  compare(connection, update, { textOnly = false } = {}) {
-    const context = connection.comparisonContext;
-    if (!update && context && connection.comparisonVersion === this.textVersion && connection.editorDiff === context[0]
-      && connection.target?.parts === context[1] && connection.target?.pages === context[2] && connection.target?.fontVersion === context[3])
-      return connection.editorDiff.reliable ? connection.editorDiff : null;
-    if (!connection.editorDiff || update) connection.editorDiff = textDiff(connection.html ?? this.raw.slice(connection.start, connection.end),
-      connection.pdf ?? connection.target.raw.slice(connection.targetStart, connection.targetEnd), true, Infinity, true, update);
-    const diff = connection.editorDiff, parts = diff.parts ||= [];
-    diff.reliable ??= diff.distance <= 256 || !parts.some(part => part.inconsistent
+  compare(connection, textOnly = false) {
+    const diff = connection.editorDiff ??= textDiff(connection.html, connection.pdf, true, Infinity, true);
+    diff.reliable ??= diff.distance <= 256 || !diff.parts.some(part => part.inconsistent
       && (significantText(part.html).length > 256 || significantText(part.pdf).length > 256));
-    if (textOnly) return diff.reliable ? diff : null;
-    if (!diff.reviewRanges) {
-      diff.reviewRanges = connection.spans ? [] : parts.filter(part => part.inconsistent);
-      if (connection.spans) {
-        const left = this.normalized, right = connection.target.normalized;
-        const h = lowerBound(left.starts, connection.start), p = lowerBound(right.starts, connection.targetStart);
-        const [start, , from] = connection.reversedSpans ? reverseRangeKeys : forwardRangeKeys;
-        const html = connection.reversedSpans ? 'pdf' : 'html', pdf = connection.reversedSpans ? 'html' : 'pdf';
-        for (const span of connection.spans) if (span.changed) {
-          const i = h + span[start], j = p + span[from];
-          const a = left.starts[i] ?? left.ends.at(-1), x = right.starts[j] ?? right.ends.at(-1);
-          const b = span[html] ? left.ends[i + span[html].length - 1] : a;
-          const y = span[pdf] ? right.ends[j + span[pdf].length - 1] : x;
-          const sourceText = this.raw.slice(a, b), targetText = connection.target.raw.slice(x, y);
-          if (significantText(sourceText) !== significantText(targetText))
-            diff.reviewRanges.push(new diffIndex(sourceText, targetText, a - connection.start, x - connection.targetStart, true));
-        }
+    const context = connection.comparisonContext;
+    if (textOnly || context && connection.comparisonVersion === this.textVersion && diff === context[0]
+      && connection.target?.parts === context[1] && connection.target?.pages === context[2] && connection.target?.fontVersion === context[3])
+      return diff.reliable ? diff : null;
+    if (!diff.reviewRanges && connection.spans) {
+      diff.reviewRanges = [];
+      const left = this.normalized, right = connection.target.normalized;
+      const h = lowerBound(left.starts, connection.start), p = lowerBound(right.starts, connection.targetStart);
+      const [start, , from] = connection.reversedSpans ? reverseRangeKeys : forwardRangeKeys;
+      const html = connection.reversedSpans ? 'pdf' : 'html', pdf = connection.reversedSpans ? 'html' : 'pdf';
+      for (const span of connection.spans) if (span.changed) {
+        const i = h + span[start], j = p + span[from];
+        const a = left.starts[i] ?? left.ends.at(-1), x = right.starts[j] ?? right.ends.at(-1);
+        const b = span[html] ? left.ends[i + span[html].length - 1] : a;
+        const y = span[pdf] ? right.ends[j + span[pdf].length - 1] : x;
+        const sourceText = this.raw.slice(a, b), targetText = connection.target.raw.slice(x, y);
+        if (significantText(sourceText) !== significantText(targetText))
+          diff.reviewRanges.push(new diffIndex(sourceText, targetText, a - connection.start, x - connection.targetStart, true));
       }
     }
+    diff.reviewRanges ??= diff.parts.filter(part => part.inconsistent);
     connection.comparisonVersion = this.textVersion;
     connection.comparisonContext = [diff, connection.target?.parts, connection.target?.pages, connection.target?.fontVersion];
     connection.fontItems = [];
@@ -567,7 +572,10 @@ class PdfConnections {
     connection.distance = (aligned || diff).distance;
     connection.spans = aligned ? aligned.spans : diff.parts;
     connection.reversedSpans = !!aligned && !!aligned.reversedSpans !== !!reverse;
-    if (previous?.editorDiff) this.compare(connection, change || {});
+    if (previous?.editorDiff) {
+      connection.editorDiff = textDiff(connection.html, connection.pdf, true, Infinity, true, change);
+      this.compare(connection);
+    }
     const ranges = state.ranges = (state.ranges === state.preparedRanges ? state.ranges?.slice() : state.ranges) || [];
     for (let i = ranges.length - 1; i >= 0; i--) {
       if (ranges[i] === connection || ranges[i].start === start && ranges[i].end === end) ranges.splice(i, 1);
@@ -604,7 +612,7 @@ class PdfConnections {
     let first = Infinity, last = -1, covered = start;
     for (const item of connection ? [connection] : connections) {
       if (!connection && !(start === end ? containing(item) : overlaps(item, start, end, keys))) continue;
-      const diff = this.compare(item, undefined, { textOnly: true });
+      const diff = this.compare(item, true);
       if (!diff) continue;
       if (item[begin] > covered) return null;
       covered = Math.max(covered, item[stop]);
@@ -624,11 +632,8 @@ class PdfConnections {
     const explicit = !visiblePage && entry.range, destination = reverse ? this : target;
     const mapped = !explicit && this.range(target, entry.start, entry.end, reverse, undefined, marked);
     if (visiblePage && !mapped) return null;
-    if (mapped) {
-      const exact = visiblePage && entry.text !== this.raw.slice(entry.start, entry.end)
-        ? significantText(entry.text) === significantText(destination.raw.slice(mapped.start, mapped.end)) : !mapped.approximate;
-      if (exact) return mapped;
-    }
+    if (mapped && (visiblePage && entry.text !== this.raw.slice(entry.start, entry.end)
+      ? significantText(entry.text) === significantText(destination.raw.slice(mapped.start, mapped.end)) : !mapped.approximate)) return mapped;
     const hit = explicit || destination.search(entry, scope) || mapped;
     if (!hit || hit === mapped || visiblePage) return hit || null;
     return { ...hit, connection: reverse ? this.remember(hit.start, hit.end, target, entry.start, entry.end)
@@ -636,25 +641,28 @@ class PdfConnections {
   }
 
   // The same confirmed edges locate missing text for the queue and for PDF selections.
-  missingRange(target, start, end = start) {
-    let ranges = this.prepared?.differences?.items?.missingRanges;
-    if (!ranges?.context) ranges = this.candidates([target], undefined, true).missingRanges;
-    const context = ranges.context;
-    if (start === undefined || !context) return ranges;
-    const hit = ranges.find(range => !range.resolved && range.sourceStart <= start && range.sourceEnd >= end);
-    if (!hit?.matched) return null;
-    const a = hit.edge, parts = ranges.parts ||= context.index.parts || context.index.pages?.flatMap(page => page.parts) || [];
-    let position = a ? lowerBound(parts, a, part => part.start) - 1 : 0, from;
-    for (; position >= 0 && position < parts.length; position += a ? -1 : 1) {
-      const part = parts[position], text = context.index.raw.slice(part.start, Math.min(a || part.end, part.end));
-      if (!text.trim()) continue;
-      from = part.start + (a ? text.trimEnd().length : text.length - text.trimStart().length);
-      break;
+  missingRange(target, start, end = start, record) {
+    const prepared = this.prepared?.differences?.items?.missingRanges;
+    const ranges = prepared?.index ? prepared : this.candidates([target], undefined, true).missingRanges;
+    const { index } = ranges;
+    if (start === undefined || !index) return ranges;
+    const hit = record?.sourceStart !== undefined ? record : ranges.find(range => !range.resolved && range.sourceStart <= start && range.sourceEnd >= end);
+    let anchor = hit?.anchor;
+    if (!anchor && hit?.edge !== undefined) {
+      const { edge } = hit, parts = ranges.parts ||= index.parts || index.pages?.flatMap(page => page.parts) || [];
+      for (let i = edge ? lowerBound(parts, edge, part => part.start) - 1 : 0; parts[i]; i += edge ? -1 : 1) {
+        const part = parts[i], text = index.raw.slice(part.start, Math.min(edge || part.end, part.end));
+        if (!text.trim()) continue;
+        const at = part.start + (edge ? text.trimEnd().length : text.length - text.trimStart().length);
+        anchor = { start: at, end: at, endBias: edge > 0 };
+        break;
+      }
     }
-    if (from === undefined) return null;
-    const endBias = a > 0;
-    if (context.page && (from < context.page.start || from > context.page.end || endBias && from === context.page.start)) return null;
-    return { start: from - context.offset, end: from - context.offset, endBias };
+    if (!anchor) return null;
+    if (target === index) return { ...anchor };
+    const page = matchingPage(index, target);
+    return page && anchor.start >= page.start && anchor.end <= page.end && !(anchor.endBias && anchor.start === page.start)
+      ? { ...anchor, start: anchor.start - page.start, end: anchor.end - page.start } : null;
   }
   // One traversal collects review items, uncovered intervals and their PDF edges.
   candidates(targets = this.prepared?.pages || [], connections, missingOnly = false) {
@@ -663,44 +671,21 @@ class PdfConnections {
       || connections.find(connection => connection.target?.sourcePages?.length)?.target);
     const live = connections.length ? connections : this.livePairs;
     const compared = live.length || !missingOnly ? live : this.targetConnections(target?.layer ? this.prepared?.full : target);
-    const index = target?.layer ? this.prepared?.full || this.#fullIndex : target;
-    const page = target?.layer && matchingPage(index, target);
-    const context = target && index && (!target.layer || page) ? { index, page, offset: page?.start || 0 } : null;
+    const full = target?.layer ? this.prepared?.full || this.#fullIndex : target;
+    const index = !target?.layer || matchingPage(full, target) ? full : undefined;
     const items = [], ranges = [], edges = [], ordered = [];
-    const addCandidate = (start, html, pdf, connection, outside) => {
-      const number = /^[^\p{L}\d]*(\d+)[^\p{L}\d]*$/u;
-      const left = number.exec(html), right = number.exec(pdf), digits = left && right;
-      const from = start + (digits ? html.indexOf(left[1]) : 0), end = from + (digits ? left[1] : html).length;
-      let missing = !connection;
-      if (connection) {
-        const value = significantText(this.raw.slice(from, end));
-        let first;
-        for (const other of value || !missingOnly ? compared : noConnections) {
-          if (other !== connection && !(covers(other, from, end)
-            && (from < end || other.end > from || other.start === from))) continue;
-          first ??= other;
-          if (!value) break;
-          if (other !== connection && this.range(other.target, from, end, false, other)?.approximate === false) return;
-        }
-        const insideWord = connection.target.sourcePages?.length > 1 && /^\p{L}+$/u.test(value)
-          && (from > connection.start && /\p{L}/u.test(this.raw[from - 1]) || end < connection.end && /\p{L}/u.test(this.raw[end]));
-        missing = outside && !insideWord && /[\p{L}\p{N}]/u.test(html)
-          && (!pdf.trim() || /\p{L}/u.test(html) && !/\p{L}/u.test(pdf));
-        if (missing) ranges.push({ sourceStart: from, sourceEnd: end, connection });
-        if (!missingOnly && first !== connection) return;
-      }
+    const addCandidate = item => {
       if (missingOnly) return;
+      const { sourceStart: from, sourceEnd: end } = item;
       const at = lowerBound(items, from, item => item.sourceStart), next = items[at];
-      if (at && items[at - 1].sourceEnd > from
-        || next && (end === from ? next.sourceStart === from : next.sourceStart < end && next.sourceEnd > from)) return;
-      items.splice(at, 0, { sourceStart: from, sourceEnd: end, ...(missing && { missing: true }),
-        comparison: digits ? { html: left[1], pdf: right[1] } : { html, pdf } });
+      if (!(at && items[at - 1].sourceEnd > from
+        || next && (end === from ? next.sourceStart === from : next.sourceStart < end && next.sourceEnd > from))) items.splice(at, 0, item);
     };
-    const prepared = this.connections.get(target)?.prepared;
+    const prepared = this.connections.get(target)?.prepared, number = /^[^\p{L}\d]*(\d+)[^\p{L}\d]*$/u;
     let gaps = missingOnly || prepared;
-    for (const connection of (!target || context) ? compared : []) {
+    for (const connection of (!target || index) ? compared : []) {
       gaps ||= connections.length > 0 && connection.target === target && connection.recovered;
-      const base = !context || connection.target === index || connection.target?.layer && !index.pages?.length
+      const base = !index || connection.target === index || connection.target?.layer && !index.pages?.length
         ? 0 : matchingPage(index, connection.target)?.start ?? null;
       const diff = this.compare(connection);
       if (!diff) continue;
@@ -708,33 +693,56 @@ class PdfConnections {
       if (base !== null) {
         ordered.push(connection);
         for (const part of diff.parts) {
-          if (part.sourceEdge > part.start && part.targetEdge > part.targetStart)
-            edges.push({ sourceEnd: connection.start + part.sourceEdge, targetEnd: base + connection.targetStart + part.targetEdge });
-          if (diff.reviewRanges.length && !part.changed && /\p{L}/u.test(part.pdf)) {
-            first ??= part;
-            last = part;
-          }
+          const { sourceEdge, targetEdge } = part;
+          if (sourceEdge > part.start && targetEdge > part.targetStart)
+            edges.push({ sourceEnd: connection.start + sourceEdge, targetEnd: base + connection.targetStart + targetEdge });
+          if (!diff.reviewRanges.length || part.changed || !/\p{L}/u.test(part.pdf)) continue;
+          first ??= part;
+          last = part;
         }
       }
       for (const part of diff.reviewRanges) {
+        const { html, pdf } = part, left = number.exec(html), right = number.exec(pdf), digits = left && right;
+        const from = connection.start + part.start + (digits ? html.indexOf(left[1]) : 0);
+        const end = from + (digits ? left[1] : html).length, value = significantText(this.raw.slice(from, end));
+        let owner;
+        for (const other of value || !missingOnly ? compared : noConnections) {
+          if (other !== connection && !(covers(other, from, end) && (from < end || other.end > from || other.start === from))) continue;
+          owner ??= other;
+          if (!value) break;
+          if (other !== connection && this.range(other.target, from, end, false, other)?.approximate === false) { owner = null; break; }
+        }
+        if (owner === null) continue;
         const outside = base !== null && (!first || part.end <= first.start || part.start >= last.end);
-        addCandidate(connection.start + part.start, part.html, part.pdf, connection, outside);
+        const insideWord = connection.target.sourcePages?.length > 1 && /^\p{L}+$/u.test(value)
+          && (from > connection.start && /\p{L}/u.test(this.raw[from - 1]) || end < connection.end && /\p{L}/u.test(this.raw[end]));
+        if (outside && !insideWord && /[\p{L}\p{N}]/u.test(html) && (!pdf.trim() || /\p{L}/u.test(html) && !/\p{L}/u.test(pdf)))
+          ranges.push({ sourceStart: from, sourceEnd: end });
+        else if (owner === connection) addCandidate({ sourceStart: from, sourceEnd: end,
+          comparison: digits ? { html: left[1], pdf: right[1] } : { html, pdf } });
       }
     }
-    if (gaps && context) for (const [sourceStart, sourceEnd] of connectionGaps(ordered.sort((a, b) => a.start - b.start),
-      this.raw.length - this.raw.trimStart().length, this.raw.trimEnd().length)) ranges.push({ sourceStart, sourceEnd });
+    if (gaps && index) for (const [sourceStart, sourceEnd] of connectionGaps(ordered.sort((a, b) => a.start - b.start),
+      this.raw.length - this.raw.trimStart().length, this.raw.trimEnd().length)) {
+      const hit = prepared && this.range(target, sourceStart, sourceEnd, false, undefined, true);
+      ranges.push({ sourceStart, sourceEnd, resolved: !!(hit && !hit.approximate && /[\p{L}\p{N}]/u.test(target.raw.slice(hit.start, hit.end))) });
+    }
     edges.sort((a, b) => a.sourceEnd - b.sourceEnd);
-    let at = 0, edge = 0;
+    let at = 0, edge = edges.length ? 0 : undefined;
     for (const range of ranges.sort((a, b) => a.sourceStart - b.sourceStart || a.sourceEnd - b.sourceEnd)) {
       while (at < edges.length && edges[at].sourceEnd <= range.sourceStart) edge = edges[at++].targetEnd;
-      const hit = !range.connection && target && prepared
-        && this.range(target, range.sourceStart, range.sourceEnd, false, undefined, true);
-      range.edge = edge; range.matched = !!edges.length;
-      range.resolved = !!(hit && !hit.approximate && /[\p{L}\p{N}]/u.test(target.raw.slice(hit.start, hit.end)));
+      range.edge = edge;
       const html = this.raw.slice(range.sourceStart, range.sourceEnd);
-      if (!range.resolved && significantText(html)) addCandidate(range.sourceStart, html, '');
+      if (range.resolved || !significantText(html)) continue;
+      const [anchor, duplicate] = index?.matches([html], undefined, { limit: 2 }) || noConnections;
+      // Comparison copies expose only the text used by review notices.
+      Object.defineProperties(range, { anchor: { value: duplicate ? undefined : anchor, writable: true },
+        sourceStart: { enumerable: false }, sourceEnd: { enumerable: false }, edge: { enumerable: false },
+        resolved: { enumerable: false } });
+      if (!missingOnly) addCandidate({ sourceStart: range.sourceStart, sourceEnd: range.sourceEnd, missing: true,
+        comparison: Object.assign(range, { html, pdf: '' }) });
     }
-    Object.defineProperty(items, 'missingRanges', { value: Object.assign(ranges, { context }) });
+    Object.defineProperty(items, 'missingRanges', { value: Object.assign(ranges, { index }) });
     return items;
   }
   matches(queries, haystack = this.normalized, options = {}) {
@@ -823,19 +831,28 @@ class PdfConnections {
   }
   locateSource(chunks) {
     const first = chunks[0], last = chunks.at(-1);
-    this.connect(chunks.map(chunk => chunk.index));
+    const { items } = this.getDifferences(chunks.map(chunk => chunk.index)), { full } = this.prepared;
     const entry = first.index.entry(first.start, first.end, undefined,
       chunks.map(({ index, start, end }) => index.raw.slice(start, end)).join("\n"));
     entry.after = last.index.raw.slice(last.end, last.end + 160);
     const left = this.connections.get(first.index)?.scope, right = this.connections.get(last.index)?.scope;
     const scope = left && right && left.start <= right.start ? { start: left.start, end: right.end } : null;
-    const full = this.prepared?.full, from = matchingPage(full, first.index), to = matchingPage(full, last.index);
+    const from = matchingPage(full, first.index), to = matchingPage(full, last.index);
     const start = from && from.start + first.start, end = to && to.start + last.end;
     const mapped = from && to && start < end
       && (first === last || significantText(full.raw.slice(start, end)) === significantText(entry.text))
       && this.range(full, start, end, true, this.targetConnections(full).find(pair => covers(pair, start, end, reverseRangeKeys)));
     const hit = mapped && (mapped.connection || !mapped.approximate) ? mapped
       : first === last ? this.locate(first.index, entry, true, scope) : this.search(entry, scope);
+    const item = start < end && from === to && items.find(({ missing, comparison, sourceStart, sourceEnd }) =>
+      missing && (comparison.anchor?.start <= start && comparison.anchor.end >= end
+        || hit && !hit.approximate && sourceStart <= hit.start && sourceEnd >= hit.end));
+    if (item) {
+      const { sourceStart, sourceEnd, comparison } = item;
+      comparison.anchor ||= { start, end };
+      return { hit: { start: sourceStart, end: sourceEnd }, range: this.missingRange(first.index, sourceStart, sourceEnd, comparison),
+        difference: { ...comparison, missing: true } };
+    }
     const html = hit && this.raw.slice(hit.start, hit.end);
     const difference = !hit ? { message: "No reliable HTML match" } : html !== entry.text ? { html, pdf: entry.text } : null;
     return { hit, difference };

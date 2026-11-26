@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
@@ -17,10 +18,10 @@ test('unknown PDF styles do not scan HTML formats while text differences remain 
     return Reflect.get(values, key);
   } });
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(source, source.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel);
+  const marks = sourceDecorations(source, reviewCandidates(source, { fonts: true, edits: false, text: true, targets: [], connections: [[connection, target]] }), true, true, undefined, documentModel);
   assert.ok(marks.some(mark => mark.options.description === 'PDF OCR text difference'));
   assert.equal(reads, 0, 'unknown PDF styles cannot establish a format mismatch');
   target.parts[0].font.bold = false;
-  assert.ok(source.formatDifferences([], ['italic', 'bold'], true, [[connection, target]]).length);
+  assert.ok(reviewCandidates(source, { items: [], fonts: ['italic', 'bold'], edits: true, connections: [[connection, target]] }).length);
   assert.ok(reads > 0, 'known styles still compare against HTML formatting');
 });

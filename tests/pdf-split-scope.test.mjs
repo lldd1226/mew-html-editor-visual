@@ -16,7 +16,7 @@ test('file comparison uses its bounded PDF cache even when a volume cache is war
   assert.equal(diff.getDocumentIndex(pdf), volume);
   assert.equal(diff.getDocumentIndex(pdf, []), empty);
   const source = new FixtureConnections(diff, '<p>Independent passage for page 2 with enough context for a unique source match.</p>');
-  source.update([page], pdf);
+  source.connect([page], pdf);
   assert.equal(source.prepared.full, page, 'page preparation uses only the corresponding file range');
   assert.equal(source.byTarget.has(volume), false, 'whole-volume mappings cannot enter the file comparison');
 });

@@ -22,7 +22,7 @@ test('mapped first and last PDF words show edge carets and anchor at the same ed
       return ['extra same text', 'same text extra'].map(html => {
         const index = new window.PdfSelectionDiff.PdfConnections(locator, html);
         index.byTarget.set(target, [{ start: 0, end: html.length, targetStart: 0, targetEnd: 9 }]);
-        const item = index.candidates(null, false, true, true, [target]).find(item => item.missing);
+        const item = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: [target] }).items.find(item => item.missing);
         const hit = index.missingRange(target, item.sourceStart, item.sourceEnd);
         item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
         const anchor = locator.reviewAnchor(item, index);
@@ -69,17 +69,17 @@ test('ME08-350 ready page highlights survive a raw diff dominated by OCR whitesp
       const locator = new PdfReviewProvider.PdfLocator({}, { document });
       locator.indexDocument = () => { throw new Error('ready-page highlighting must not index the volume'); };
       const index = new window.PdfSelectionDiff.PdfConnections(locator, fixture.source), target = new PdfSelectionDiff.PdfConnections(locator, { raw: fixture.pdf });
-      index?.update([target]);
+      index?.connect([target]);
       const connection = index.byTarget.get(target)[0], diff = index.compare(target, connection);
       if (!diff) throw new Error('OCR whitespace discarded the confirmed page diff');
       const editor = monaco.editor.create(document.getElementById('editor'), { value: fixture.source });
       editor.document = new window.MewEditorCore.DocumentModel({ model: editor.getModel() });
-      const items = index.candidates(null, false, true, true, [target]), marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, editor.getModel());
+      const items = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: [target] }).items, marks = window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }).items, true, true, undefined, editor.getModel());
       const collection = editor.createDecorationsCollection(marks); editor.render(true);
       const corrected = PdfSelectionDiff.applyTextEdits(fixture.source, items.flatMap(item => item.options[0].edits));
       // An unresolved whole-passage fallback must still be rejected.
       const broad = { ...connection, editorDiff: { distance: 129,
-        parts: [{ html: index.raw, pdf: fixture.pdf, changed: true }] } };
+        parts: [new PdfSelectionDiff.diffIndex(index.raw, fixture.pdf, 0, 0, true)] } };
       const rejected = index.compare(target, broad) === null;
       const result = { rawDistance: diff.distance, comparisons: items.map(item => item.comparison),
         marks: marks.length, applied: collection.length, corrected, rejected };
@@ -117,7 +117,7 @@ test('Monaco selection matches share PDF review pointers, popup navigation and o
       window.editor.document = new window.MewEditorCore.DocumentModel({ model: window.editor.getModel() });
       window.pdf = {};
       window.locator = new PdfReviewProvider.PdfLocator({}, { document });
-      locator.reviewAnchor = () => ({ left: 720, top: 100, bottom: 120 });
+      locator.reviewAnchors = entries => new Map(entries.map(entry => [entry, { left: 720, top: 100, bottom: 120 }]));
       window.PdfSelection = { viewer: { pdfDocument: pdf }, locator,
         showReviewPointer(editor, items) { window.pointed = items.map(item => [item.sourceStart, item.sourceEnd]); }, clearReviewPointer() {} };
       window.readerMonaco = { editor, save: async () => true };
@@ -681,8 +681,7 @@ test('Monaco standalone renders native character and insertion decorations', asy
       const model = editor.getModel(), raw = model.getValue();
       const index = new PdfSelectionDiff.PdfConnections(new PdfReviewProvider.PdfLocator(),
         { raw, model, starts: [...Array(raw.length).keys()], ends: Array.from({ length: raw.length }, (_, i) => i + 1) });
-      window.marks = editor.createDecorationsCollection(window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [],
-        [[{ start: 0, end: raw.length, targetStart: 0, targetEnd: raw.length + 1 }, { raw: 'first\naY!𠀀Z+' }]])));
+      window.marks = editor.createDecorationsCollection(window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: true, edits: false, text: true, targets: [], connections: [[{ start: 0, end: raw.length, targetStart: 0, targetEnd: raw.length + 1 }, { raw: 'first\naY!𠀀Z+' }]] }).items));
     });
     assert.equal(await page.locator('.mew-ocr-diff-line').count(), 0, 'native decorations omit unused gutter marks');
     await page.waitForSelector('.mew-ocr-diff-text');

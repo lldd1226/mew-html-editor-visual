@@ -28,14 +28,14 @@ try {
       addEventListener('pdf-selection-difference', event => { window.caretNotices = event.detail.notices; });
       window.expectedMarks = () => {
         const locator = PdfSelection.locator, editor = readerMonaco.editor, index = locator.editorSourceIndex(editor.document), targets = locator.environment.getTargets();
-        return markState(window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, false, false, true, targets, targets.filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), false, true, undefined, editor.getModel()));
+        return markState(window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: false, text: true, targets: targets, connections: targets.filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }).items, false, true, undefined, editor.getModel()));
       };
     });
     await page.waitForFunction(() => htmlMarks() === expectedMarks());
     const before = await page.evaluate(() => htmlMarks());
     const cases = await page.evaluate(() => {
       const locator = PdfSelection.locator, index = locator.editorSourceIndex(readerMonaco.editor.document);
-      return index.candidates(null, false, true, true, locator.environment.getTargets()).map(item => ({
+      return window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: locator.environment.getTargets() }).items.map(item => ({
         start: item.sourceStart, end: item.sourceEnd, missing: !!item.missing,
         html: item.comparison.html, pdf: item.comparison.pdf
       }));

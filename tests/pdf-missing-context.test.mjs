@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
@@ -11,14 +12,14 @@ for (const page of pages) test(`ME08-${page.number} OCR differences use ordinary
     set innerHTML(text) { this.content = { textContent: text.replace(/&nbsp;/g, '\u00a0') }; }
   }) } });
   const index = new api.PdfConnections(locator, page.source), target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: [page.physical], parts: [] });
-  index?.update([target]);
+  index?.connect([target]);
   locator.getDocumentIndex = () => target;
-  const items = index.candidates(null, false, true, true, [target]), missing = items.filter(item => item.missing);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }), missing = items.filter(item => item.missing);
   assert.ok(items.length, 'normal differences take priority when the OCR mapping is reliable');
   if (page.number === 452) assert.ok(missing.some(item => item.comparison.html.includes('Namentlich schwankte Fleury')),
     'unresolved OCR retains selection review after shared phrases are recovered');
   const documentModel = new FixtureDocument({ model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
-  const decorations = () => sourceDecorations(index, index.candidates(null, false, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), false, true, undefined, documentModel);
+  const decorations = () => sourceDecorations(index, reviewCandidates(index, { fonts: false, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }), false, true, undefined, documentModel);
   const marks = JSON.stringify(decorations());
   for (const item of missing) for (const segment of index.sourceSegments(item.sourceStart, item.sourceEnd)) assert.ok(decorations().some(mark =>
     !mark.options.before && mark.options.inlineClassName === 'mew-ocr-diff-text'
@@ -42,21 +43,21 @@ for (const page of pages) test(`ME08-${page.number} OCR differences use ordinary
       assert.equal(JSON.stringify(decorations()), marks, 'selection leaves the prepared HTML ranges fixed');
     }
   }
-  assert.equal(sourceDecorations(index, index.candidates(null, false, false, false, [target], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), false, false, undefined, documentModel).length, 0);
+  assert.equal(sourceDecorations(index, reviewCandidates(index, { fonts: false, edits: false, text: false, targets: [target], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), false, false, undefined, documentModel).length, 0);
   assert.equal(index.source, page.source);
   delete target.sourcePages;
-  assert.equal(index.candidates(null, false, true, true, [target]).filter(item => item.missing).length, 0, 'a clipped visible page cannot establish missing file edges');
+  assert.equal(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing).length, 0, 'a clipped visible page cannot establish missing file edges');
 });
 
 test('ME08-327 recovers exact words before its first passage without treating the page header as a replacement', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const page = pages.find(page => page.number === 327), index = new api.PdfConnections(locator, page.source);
   const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: [page.physical], parts: [] });
-  index?.update([target]);
+  index?.connect([target]);
   const start = index.raw.indexOf('erklärt:'), end = start + 'erklärt:'.length;
   const range = index.range(target, start, end);
   assert.equal(target.raw.slice(range.start, range.end), 'erklärt:');
-  const items = index.candidates(null, false, true, true, [target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   assert.ok(!items.some(item => item.sourceStart < end && item.sourceEnd > start));
   assert.ok(items.some(item => item.missing && item.comparison.html.includes('Kinkel')));
   assert.ok(!items.some(item => item.comparison.pdf.includes('Die großen Männer des Exils')));
@@ -66,8 +67,8 @@ test('ME08-452 recovers shared phrases when punctuation noise exceeds the fine t
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const page = pages.find(page => page.number === 452), index = new api.PdfConnections(locator, page.source);
   const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: [page.physical], parts: [] });
-  index?.update([target]);
-  const items = index.candidates(null, false, true, true, [target]);
+  index?.connect([target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   for (const text of ['Dronke und', 'Abend wieder zu ihm', 'nur im ersten', 'An die Redaktion der', 'während welcher Zeit ihm']) {
     const start = index.raw.indexOf(text), end = start + text.length;
     assert.ok(start >= 0);
@@ -96,8 +97,8 @@ test('missing-context popup shows an ordinary text comparison and warning withou
   reviewProvider(api, providers, { refresh() {} });
   const provider = providers.get('pdf-ocr'), index = new api.PdfConnections(new api.PdfLocator({}, { document: { createElement: () => ({}) } }), '<p>Missing from OCR. A confirmed passage with enough words to match uniquely.' + ' Missing ending.'.repeat(10) + '</p>');
   const target = new api.PdfConnections(index.locator, { raw: 'A confirmed passage with enough words to match uniquely.', sourcePages: [1] });
-  index?.update([target]);
-  const item = index.candidates(null, false, true, true, [target]).filter(item => item.missing)[0];
+  index?.connect([target]);
+  const item = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing)[0];
   const content = provider.content({ context: { index }, model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }, item);
   assert.match(content.message, /PDF OCR.*文字/u);
   assert.equal(content.comparison.length, 2);
@@ -112,11 +113,11 @@ test('ME08-453 normal diff resolves the missing phrase without selecting its who
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const page = pages.find(page => page.number === 453), index = new api.PdfConnections(locator, page.source);
   const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: [page.physical], parts: [] });
-  index?.update([target]);
+  index?.connect([target]);
   locator.getDocumentIndex = () => target;
   const text = 'gemacht, die in Beziehung zu de', start = index.raw.indexOf(text), end = start + text.length;
   assert.ok(start >= 0);
-  assert.ok(!index.candidates(null, false, true, true, [target]).filter(item => item.missing).some(item => item.sourceStart < end && item.sourceEnd > start));
+  assert.ok(!reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing).some(item => item.sourceStart < end && item.sourceEnd > start));
   const location = locator.findLocations({}, [{ index, start, end, text, marked: true }], true)[0];
   assert.ok(!location.notice?.missing);
   assert.ok(location.targets.length);
@@ -133,9 +134,9 @@ test('missing additions have no fabricated PDF carets and retain missing-context
   const target = new api.PdfConnections(locator, { raw: text, sourcePages: [1] });
   const rendered = new api.PdfConnections(locator, { raw: text, layer: {}, parts: [{ start: 0, end: text.length }] });
   visible.push({ number: 1, index: rendered });
-  index?.update([target, rendered]);
+  index?.connect([target, rendered]);
   locator.getDocumentIndex = () => target;
-  const connections = index.byTarget.get(rendered), gaps = index.candidates(null, false, true, true, [target]).filter(item => item.missing);
+  const connections = index.byTarget.get(rendered), gaps = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing);
   assert.equal(gaps.length, 2);
   for (const [side, gap] of gaps.entries()) {
     const { targets, notice } = locator.findLocations({}, [{ index, start: gap.sourceStart, end: gap.sourceEnd,

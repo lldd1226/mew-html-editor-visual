@@ -17,7 +17,8 @@ if (typeof module === 'object' && module.exports) {
       if (!current || !sameUri(current.volume.pdfUri, reader.panelPdfUri)) return { uri: null, text: '', readOnly: true };
       const document = await vscode.workspace.openTextDocument(current.uri);
       if (reader.current !== current || reader.panel !== panel || disposed) return null;
-      const editor = editors()[0], groups = vscode.window.tabGroups?.all || [];
+      const visible = editors(), active = vscode.window.activeTextEditor;
+      const editor = visible.includes(active) ? active : visible[0], groups = vscode.window.tabGroups?.all || [];
       const html = groups.find(group => group.viewColumn === editor?.viewColumn
         && group.tabs.some(tab => sameUri(tab.input?.uri, current.uri)))
         || groups.find(group => group.tabs.some(tab => sameUri(tab.input?.uri, current.uri)));
@@ -33,16 +34,16 @@ if (typeof module === 'object' && module.exports) {
           splitView: editor && panel.visible ? true : html && pdf ? html !== pdf
             : sourceColumn != null && pdfColumn != null ? sourceColumn !== pdfColumn : null } };
     }
-    async function publish() {
+    async function publish(userSelection = false) {
       if (disposed || reader.panel !== panel || !reader.ready) return;
       const value = await snapshot();
       if (!value || disposed || reader.panel !== panel) return;
       if (previous?.uri !== value.uri || previous?.version !== value.version) clear();
       previous = value;
       const key = JSON.stringify(value);
-      if (key === signature) return;
+      if (key === signature && !userSelection) return;
       signature = key;
-      await panel.webview.postMessage({ type: 'reviewSource', snapshot: value });
+      await panel.webview.postMessage({ type: 'reviewSource', snapshot: value, userSelection });
     }
     async function document(message) {
       const current = reader.current;
@@ -66,8 +67,15 @@ if (typeof module === 'object' && module.exports) {
         changes: event.contentChanges.map(({ rangeOffset, rangeLength, text }) => ({ rangeOffset, rangeLength, text })) };
       changed();
     }));
+    subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
+      const kinds = vscode.TextEditorSelectionChangeKind;
+      const userSelection = !panel.active && event.textEditor === vscode.window.activeTextEditor
+        && sameUri(event.textEditor.document.uri, reader.current?.uri)
+        && (event.kind === kinds.Mouse || event.kind === kinds.Keyboard);
+      void publish(userSelection).catch(reader.report);
+    }));
     for (const [owner, event] of [[vscode.workspace, 'onDidSaveTextDocument'],
-      [vscode.window, 'onDidChangeTextEditorSelection'], [vscode.window, 'onDidChangeVisibleTextEditors'],
+      [vscode.window, 'onDidChangeVisibleTextEditors'],
       [vscode.window.tabGroups, 'onDidChangeTabGroups'], [vscode.window.tabGroups, 'onDidChangeTabs']])
       if (owner?.[event]) subscriptions.push(owner[event](changed));
     subscriptions.push(panel.webview.onDidReceiveMessage(message => {
@@ -127,7 +135,7 @@ if (typeof module === 'object' && module.exports) {
   let activeEditor = null, syncingPdf = false, contexts = [], locationSearch = null, scrolled = false, positioned = false;
   let reviewPointer = null, defaultPointer = null;
   let viewer = null, revision = 0, timer, stopped = false, diffHighlight = true, sourceDiffHighlight = true, selectionHighlight = true;
-  let preferenceWrites = Promise.resolve(), selectionRevision = 0, notifiedSelection = -1, interactionId = 0;
+  let preferenceWrites = Promise.resolve(), selectionRevision = 0, notifiedSelection = -1, interactionId = 0, userSelection = false;
   try {
     const settings = options.settings;
     if (settings) {
@@ -284,9 +292,10 @@ if (typeof module === 'object' && module.exports) {
     clearLayers();
     window.dispatchEvent(new CustomEvent('pdf-selection-reset'));
   }
-  function select(entries, plain = false) {
+  function select(entries, plain = false, fromUser = false) {
     if (!selectionHighlight && entries.length) return;
     ++selectionRevision;
+    userSelection = fromUser;
     if (entries.length) lastInteraction = performance.now();
     const decode = text => (plain ? String(text || "") : new window.MewEditorCore.DocumentModel({ text: String(text || "") }).parse(document).raw).trim();
     contexts = entries.map(input => {
@@ -360,12 +369,13 @@ if (typeof module === 'object' && module.exports) {
         return [item ? index.candidateEntry(item) : index.entry(a, b, !!mark)];
       }) : [];
       if (viewer && (!index || index.prepared?.pdf !== viewer.pdfDocument)) queueWarm();
-      select(entries, true);
+      select(entries, true, event?.userSelection);
 
     };
     for (const name of ["onDidChangeCursorSelection", "onDidChangeModel", "onDidChangeModelContent"]) {
       const subscription = editor[name]?.(event => {
         if (name !== "onDidChangeCursorSelection") { read(event); return; }
+        if (event?.userSelection) ++interactionId;
         lastInteraction = performance.now();
         read(event);
       });
@@ -532,10 +542,10 @@ if (typeof module === 'object' && module.exports) {
     const model = editor?.getModel();
     if (!model || !editor.setSelection) return;
     activeEditor = editor;
-    const index = review.locator.editorSourceIndex(editor.document), { hit, difference } = index.locateSource(chunks);
+    const index = review.locator.editorSourceIndex(editor.document), { hit, range: missingAnchor, difference } = index.locateSource(chunks);
     select([]);
     for (const chunk of chunks) {
-      const result = nativeBoxes(chunk.div, [], [{ range: { start: chunk.start, end: chunk.end }, difference }]);
+      const result = nativeBoxes(chunk.div, [], [{ range: missingAnchor || { start: chunk.start, end: chunk.end }, difference }]);
       paint(chunk.div, result.boxes, result.notices.map(notice => ({ ...notice, source: hit && { index, start: hit.start, end: hit.end } })));
     }
     report("idle", { mode: "pdf-selection", differences: difference ? [difference] : [] });
@@ -664,7 +674,7 @@ if (typeof module === 'object' && module.exports) {
       const anchor = box && { left: page.left + box.x * page.width, top: page.top + box.y * page.height,
         bottom: page.top + (box.y + box.h) * page.height };
       window.dispatchEvent(new CustomEvent('pdf-selection-difference', { detail: {
-        editor, model, pdf: viewer?.pdfDocument, notices, anchor, anchorElement: div, anchorBox: box, interactionId, side
+        editor, model, pdf: viewer?.pdfDocument, notices, anchor, anchorElement: div, anchorBox: box, interactionId, side, userSelection
       } }));
     }, 0);
   }

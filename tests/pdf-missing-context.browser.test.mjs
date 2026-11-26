@@ -69,12 +69,12 @@ test('real ME08 corrupted OCR uses normal text additions, warnings and no missin
         const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
         const target = locator.getDocumentIndex(mockViewer.pdfDocument, [mockViewer.currentPageNumber]);
         return target && index.scopes.get(target)?.prepared
-          && (!index.candidates(null, false, true, true, locator.environment.getTargets()).some(item => item.missing)
+          && (!window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: locator.environment.getTargets() }).items.some(item => item.missing)
             || testEditor.getModel().getAllDecorations().some(mark => mark.options.inlineClassName === 'mew-ocr-diff-text' && !mark.options.before));
       }, null, { timeout: 5000 });
       const gaps = await page.evaluate(() => {
         const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
-        return index.candidates(null, false, true, true, locator.environment.getTargets()).filter(item => item.missing)
+        return window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: locator.environment.getTargets() }).items.filter(item => item.missing)
           .map(item => [item.sourceStart, item.sourceEnd]);
       });
       if (!gaps.length) continue;
@@ -139,7 +139,7 @@ test('real ME08 corrupted OCR uses normal text additions, warnings and no missin
     // Click inside the actual HTML addition, rather than either boundary.
     await page.evaluate(() => {
       const locator = PdfSelection.locator, index = locator.editorSourceIndex(testEditor.document);
-      const item = index.candidates(null, false, true, true, locator.environment.getTargets()).find(item => item.missing);
+      const item = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: locator.environment.getTargets() }).items.find(item => item.missing);
       window.addition = item;
     });
     const addition = await page.evaluate(() => window.addition && [addition.sourceStart, addition.sourceEnd]);

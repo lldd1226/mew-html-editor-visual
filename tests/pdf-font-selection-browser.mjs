@@ -104,7 +104,7 @@ try {
     const overlay = div.querySelector('.mew-pdf-selection-highlight:not(.mew-pdf-review-pointer)');
     const actual = overlay.firstChild.getBoundingClientRect();
     const index = PdfSelection.locator.editorSourceIndex(testEditor.document);
-    const item = index.formatDifferences([], ['italic', 'bold'], true, PdfSelection.locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []))[0];
+    const item = window.PdfReviewProvider.locator.cacheReview({ index: index, items: [] }, { fonts: ['italic', 'bold'], edits: true, connections: PdfSelection.locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }).items[0];
     item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
     return { visible: getComputedStyle(overlay).visibility, actual: [actual.left, actual.right], expected: [expected.left, expected.right],
       anchor: PdfSelection.locator.reviewAnchor(item, index), popup: document.querySelector('.replacement-review').getBoundingClientRect().toJSON() };

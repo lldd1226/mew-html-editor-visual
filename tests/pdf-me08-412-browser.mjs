@@ -19,8 +19,8 @@ try {
     const result = await page.evaluate(() => {
       const editor = readerMonaco.editor, locator = PdfSelection.locator, index = locator.editorSourceIndex(editor.document);
       const targets = locator.environment.getTargets();
-      index?.update(targets);
-      const target = targets.find(t => t.layer), candidates = index.candidates(null, false, true, true, targets);
+      index?.connect(targets);
+      const target = targets.find(t => t.layer), candidates = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: targets }).items;
       const sentence = 'Beweise der Wahrheit und Beweise der Zuverlässigkeit!', at = index.raw.indexOf(sentence);
       const hit = index.range(target, at, at + sentence.length, false, undefined, true);
       const item = candidates.find(c => c.sourceStart >= at && c.comparison.pdf === 'aftigk');
@@ -73,7 +73,7 @@ try {
   const before = await page.evaluate(() => {
     const editor = readerMonaco.editor, model = editor.getModel(), locator = PdfSelection.locator;
     const index = locator.editorSourceIndex(editor.document), targets = locator.environment.getTargets();
-    const candidates = index.candidates(null, false, true, true, targets), at = index.raw.indexOf('597–601') + 3;
+    const candidates = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: targets }).items, at = index.raw.indexOf('597–601') + 3;
     const item = candidates.find(c => c.sourceStart === at && c.sourceEnd === at + 1);
     const range = editor.document.rangeAt(index.starts[at] ?? index.source.length,
       (at + 1 > at ? index.ends[(at + 1) - 1] : index.starts[at]) ?? index.source.length);

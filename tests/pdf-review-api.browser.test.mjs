@@ -89,7 +89,7 @@ for (const order of [
         const locator = PdfSelection.locator, index = locator.editorSourceIndex(documentModel);
         const target = new window.PdfSelectionDiff.PdfConnections(locator, '<p>Before RIGHT after.</p>');
         const connection = index.remember(0, index.raw.length, target, { start: 0, end: target.raw.length });
-        const marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], [[connection, target]]), true, true, undefined, documentModel);
+        const marks = window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: true, edits: false, text: true, targets: [], connections: [[connection, target]] }).items, true, true, undefined, documentModel);
         const combined = [
           ['<i>heine</i>', 'keine'], ['<i>keXne</i>', 'keine'], ['<i>keinX</i>', 'keine'],
           ['<i>heeine</i>', 'keine'], ['<i>heine Worte</i>', 'keine Worte'],
@@ -101,8 +101,8 @@ for (const order of [
           const pdf = new PdfSelectionDiff.PdfConnections(locator, { raw,
             parts: [{ start: 0, end: raw.length, font: { italic: false, bold: false } }] });
           const pair = source.remember(0, source.raw.length, pdf, { start: 0, end: raw.length });
-          const decorations = window.PdfReviewProvider.sourceDecorations(source, source.candidates(null, true, false, true, [pdf], [[pair, pdf]]), true, true, item => PdfReviewProvider.sourceHover(item, model), documentModel);
-          const text = source.candidates(null, false, true, true, [pdf]);
+          const decorations = window.PdfReviewProvider.sourceDecorations(source, window.PdfReviewProvider.locator.cacheReview({ index: source }, { fonts: true, edits: false, text: true, targets: [pdf], connections: [[pair, pdf]] }).items, true, true, item => PdfReviewProvider.sourceHover(item, model), documentModel);
+          const text = window.PdfReviewProvider.locator.cacheReview({ index: source }, { fonts: false, edits: true, text: true, targets: [pdf] }).items;
           return { ranges: decorations.map(({ range }) => markup.slice(range.startColumn - 1, range.endColumn - 1)),
             textRanges: decorations.filter(mark => mark.options.inlineClassName === 'mew-ocr-diff-text')
               .map(({ range }) => markup.slice(range.startColumn - 1, range.endColumn - 1)),

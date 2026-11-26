@@ -35,8 +35,8 @@ export function selectionFixture(cases, { markup = text => text } = {}) {
   vm.runInNewContext(providerSource, { window, document: {}, setInterval: () => 0, clearInterval() {} });
   const provider = providers.get('pdf-ocr'), context = { editor, model, documentModel, source, version, snapshot: documentModel.snapshot };
   const base = locator.reviewItems();
-  function select(query, replacement, paragraph = 0) {
-    const start = starts[paragraph] + cases[paragraph].text.indexOf(query), end = start + query.length;
+  function select(query, replacement, paragraph = 0, from = 0) {
+    const start = starts[paragraph] + cases[paragraph].text.indexOf(query, from), end = start + query.length;
     selectedRange = `${start}:${end}`;
     const notice = { html: query, pdf: replacement, source: { index, start, end } };
     const data = locator.reviewItems({ ...context, request: { notice } });

@@ -10,23 +10,17 @@ function section(source, start, end) {
   return source.slice(a, b);
 }
 const preparationEntry = section(reviewFile, '  prepareReview(context = {}) {', '  reviewItems(context = {}) {').trim();
-const reviewEntry = section(reviewFile, '  reviewItems(context = {}) {', '  pattern(value, index = this.index) {').trim();
+const reviewEntry = section(reviewFile, '  reviewItems(context = {}) {', '  get currentReview() {').trim();
 const mappingSection = section(reviewFile, '// Source/PDF mapping and candidate generation.',
   '// Shared popup and session initialization.').replace(preparationEntry, '').replace(reviewEntry, '');
 const selectionFile = await readFile(new URL('../../public/pdfdiff/pdf-selection.js', import.meta.url), 'utf8');
-const selectionMapping = section(selectionFile, '  function findLocations(', '  function nativeBoxes(')
-  .replace('visiblePages().map(number => ({ number, index: layerIndex(viewer.getPageView(number - 1)?.div) }))',
-    'environment.getVisiblePages?.() || []')
-  .replace('viewer?.pdfDocument', 'environment.getPdf?.()')
-  .replaceAll('review.locator', 'locator');
-const mappingSource = '(() => {\n' + mappingSection + '\nwindow.PdfReviewProvider = { PdfLocator, textItemBaseline: window.PdfSelectionDiff.pdfTextBaseline, fontStyle: window.PdfSelectionDiff.pdfFontStyle, sourceDecorations, sourceHover, fontSummary, comparisonRows, reviewIds, readPageText, readPageFonts, layerFonts };\n})();';
+const mappingSource = '(() => {\n' + mappingSection + '\nwindow.PdfReviewProvider = { PdfLocator, textItemBaseline: pdfTextBaseline, fontStyle: pdfFontStyle, sourceDecorations, sourceHover, fontSummary, comparisonRows, reviewIds, readPageText, readPageFonts, layerFonts };\n})();';
 // Adapt page assembly and delegate selection mapping to the production connection class.
 const selectionMappingSource = mappingSource.replace('window.PdfReviewProvider =', `class SelectionLocator extends PdfLocator {
   constructor(options = {}, environment = {}) {
     super(options, environment);
     const locator = this;
-    ${selectionMapping}
-    Object.assign(this, { findLocations,
+    Object.assign(this, {
       locateSource: (index, chunks) => index.locateSource(chunks, environment.getPdf?.()),
       locateLayer: (index, queries, targets) => index.locateLayer(queries, targets) });
   }
@@ -47,7 +41,7 @@ const diffSource = coreSource + '\n' + (await Promise.all(['pdf-selection-diff.j
   .map(name => readFile(new URL('../../public/pdfdiff/' + name, import.meta.url), 'utf8')))).map(inlineModule).join('\n') + textEditFixture;
 const engineSource = diffSource + '\n' + selectionMappingSource;
 const highlightSource = popupSource.split('// Shared review popup, session, navigation and saving.')[0];
-const providerSource = highlightSource + '\n(() => {\nconst nativeEditor = !!window.PdfSelectionOptions?.nativeEditor;\nconst { fontKeys } = window.PdfSelectionDiff;\nconst { PdfLocator, textItemBaseline, fontStyle, sourceDecorations, sourceHover, fontSummary, comparisonRows, reviewIds, readPageText, readPageFonts, layerFonts } = window.PdfReviewProvider;\n'
+const providerSource = highlightSource + '\n(() => {\nconst nativeEditor = !!window.PdfSelectionOptions?.nativeEditor;\nconst { fontKeys } = window.PdfSelectionDiff;\nconst { PdfLocator, textItemBaseline: pdfTextBaseline, fontStyle: pdfFontStyle, sourceDecorations, sourceHover, fontSummary, comparisonRows, reviewIds, readPageText, readPageFonts, layerFonts } = window.PdfReviewProvider;\n'
   + section(reviewFile, '// PDF comparison is one review provider. Selection synchronization remains independent.', 'window.PdfReviewReady = (async () => {')
     .replace('function presentation(context, item) {', `PdfLocator.prototype.prepareReview ||= function ${preparationEntry};\nPdfLocator.prototype.reviewItems ||= function ${reviewEntry};\nfunction presentation(context, item) {`)
   + section(reviewFile, '  host = window.ReplacementReview;', '  return window.PdfReviewProvider;')
@@ -83,7 +77,16 @@ function locator(options = {}, environment = {}, script = engineSource, globals 
   vm.runInNewContext(script, { window, ...globals });
   return new window.PdfReviewProvider.PdfLocator(options, environment);
 }
-const { sourceDecorations, PdfConnections } = engine();
+const { sourceDecorations, PdfConnections, PdfLocator } = engine();
+const reviewCandidates = (index, { items, ...options } = {}) => new PdfLocator().cacheReview({ index, items }, options).items;
+function connectionParts({ diffIndex }, rows) {
+  const parts = [];
+  for (const [html, pdf, changed] of rows) {
+    const previous = parts.at(-1);
+    parts.push(new diffIndex(html, pdf, previous?.end, previous?.targetEnd, changed));
+  }
+  return parts;
+}
 export { DocumentModel, PdfConnections, sourceDecorations, coreSource, textEditFixture, reviewFile, popupSource, diffSource, mappingSource, engineSource, highlightSource,
   providerSource, fullReviewSource, fullReviewSource as fullProviderSource, source, readerMenu,
-  countedEngineSource, engine, locator, reviewProvider, highlightSelectionSource };
+  countedEngineSource, engine, locator, reviewProvider, highlightSelectionSource, connectionParts, reviewCandidates };

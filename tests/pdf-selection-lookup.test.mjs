@@ -54,7 +54,7 @@ test('connection lookup reads local entries and refreshes when the connection ta
   const ranges = Array.from({ length: 10000 }, (_, i) => ({
     get start() { reads++; return i * 4; }, end: i * 4 + 4, targetStart: i * 4, targetEnd: i * 4 + 4
   }));
-  const diff = { ranges: [[0, 4, 0, 4, { changed: false }]] };
+  const diff = { parts: [new api.diffIndex('xxxx', 'xxxx')] };
   source.compare = () => diff;
   source.connections.set(target, { ranges, prepared: true });
   source.range(target, 39996, 39997);
@@ -74,12 +74,12 @@ test('a selection spanning thousands of diff fragments reads only its boundary f
   const source = new api.PdfConnections(locator, { raw: 'a'.repeat(10000) });
   const target = new api.PdfConnections(locator, { raw: source.raw });
   let reads = 0;
-  const parts = Array.from({ length: 10000 }, (_, i) => [i, i + 1, i, i + 1, { changed: false }]);
+  const parts = Array.from({ length: 10000 }, (_, i) => new api.diffIndex('a', 'a', i, i));
   const ranges = new Proxy(parts, { get(array, key) {
     if (typeof key === 'string' && /^\d+$/.test(key)) reads++;
     return Reflect.get(array, key);
   } });
-  source.compare = () => ({ ranges });
+  source.compare = () => ({ parts: ranges });
   const connection = { start: 0, end: 10000, targetStart: 0, targetEnd: 10000 };
   for (const reverse of [false, true]) {
     reads = 0;

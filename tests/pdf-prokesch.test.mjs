@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
@@ -10,7 +11,7 @@ for (const newline of ['\r\n', '\n']) test(`ME32-018 wrapped compound shares the
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, page.source.replace(/\r?\n/g, newline));
   const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: page.physical, parts: [] });
-  index.update([target]);
+  index.connect([target]);
   const start = index.raw.indexOf('Prokesch-Osten'), end = start + 'Prokesch-Osten'.length;
   assert.ok(start >= 0);
   const pairs = [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []);
@@ -20,10 +21,10 @@ for (const newline of ['\r\n', '\n']) test(`ME32-018 wrapped compound shares the
   assert.equal(diff.parts.map(part => part.pdf).join(''), target.raw.slice(connection.targetStart, connection.targetEnd));
   assert.deepEqual(diff.parts, api.textDiff(index.raw.slice(connection.start, connection.end),
     target.raw.slice(connection.targetStart, connection.targetEnd), true, Infinity, true).parts);
-  assert.ok(!index.candidates(null, false, true, true, [target]).some(item => item.sourceStart <= end && item.sourceEnd >= start),
+  assert.ok(!reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).some(item => item.sourceStart <= end && item.sourceEnd >= start),
     'line wrapping cannot delete kesch or insert a second kesch-');
   const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-  for (const { range } of sourceDecorations(index, index.candidates(null, false, false, true, [], pairs), false, true, undefined, documentModel)) {
+  for (const { range } of sourceDecorations(index, reviewCandidates(index, { fonts: false, edits: false, text: true, targets: [], connections: pairs }), false, true, undefined, documentModel)) {
     assert.ok(range.endColumn - 1 <= index.starts[start] || range.startColumn - 1 >= index.ends[end - 1]);
   }
   for (const [a, b, pdf] of [[start, end, 'Pro-\nkesch-Osten'], [start + 3, end, 'kesch-Osten'], [start + 3, start + 8, 'kesch']]) {
@@ -34,8 +35,8 @@ for (const newline of ['\r\n', '\n']) test(`ME32-018 wrapped compound shares the
     assert.equal(reverse.start, a);
     assert.equal(reverse.end, b);
   }
-  assert.ok(!api.comparisonParts({ html: 'Prokesch-Osten', pdf: 'Pro-\nkesch-Osten' }).some(part => part.changed));
-  assert.ok(api.comparisonParts({ html: 'Prokesch-Osten', pdf: 'Pro-\nkesdi-Osten' }).some(part => part.changed),
+  assert.ok(!api.comparisonIndex({ html: 'Prokesch-Osten', pdf: 'Pro-\nkesch-Osten' }).parts.some(part => part.inconsistent));
+  assert.ok(api.comparisonIndex({ html: 'Prokesch-Osten', pdf: 'Pro-\nkesdi-Osten' }).parts.some(part => part.inconsistent),
     'an actual OCR error remains reviewable inside a wrapped compound');
 });
 
@@ -45,7 +46,7 @@ for (const number of [188, 198]) for (const newline of ['\r\n', '\n'])
     const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
     const index = new api.PdfConnections(locator, page.source.replace(/\r?\n/g, newline));
     const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: page.physical, parts: [] });
-    index.update([target]);
+    index.connect([target]);
     const word = number === 188 ? 'hineinzuziehen' : 'Revolutions-Agitations-';
     const pdf = number === 188 ? 'hin-,\neinzuziehen' : 'Revolutions-\nAgitations-';
     const start = index.raw.indexOf(word), end = start + word.length;
@@ -56,7 +57,7 @@ for (const number of [188, 198]) for (const newline of ['\r\n', '\n'])
     const reverse = index.range(target, hit.start, hit.end, true);
     assert.equal(reverse.start, start);
     assert.equal(reverse.end, end);
-    const items = index.candidates(null, false, true, true, [target]).filter(item => item.sourceStart < end && item.sourceEnd >= start);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.sourceStart < end && item.sourceEnd >= start);
     if (number === 198) assert.equal(items.length, 0, 'a line-wrapped compound has no false deletion or insertion');
     else {
       assert.equal(items.length, 1);
@@ -68,7 +69,7 @@ for (const number of [188, 198]) for (const newline of ['\r\n', '\n'])
       assert.equal(preview.replace(/[^\p{L}\p{N}]/gu, ''), index.raw.replace(/[^\p{L}\p{N}]/gu, ''),
         'reviewing the comma cannot delete or duplicate the word');
       const typo = index.raw.indexOf('trokkener') + 4;
-      assert.ok(index.candidates(null, false, true, true, [target]).some(item => item.sourceStart === typo && item.sourceEnd === typo + 1
+      assert.ok(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).some(item => item.sourceStart === typo && item.sourceEnd === typo + 1
         && item.comparison.html === 'k' && api.significantText(item.comparison.pdf) === '^'),
         'a real OCR error next to a line-break hyphen remains visible');
     }
@@ -77,7 +78,7 @@ for (const number of [188, 198]) for (const newline of ['\r\n', '\n'])
     assert.equal(diff.parts.map(part => part.html).join(''), index.raw.slice(connection.start, connection.end));
     assert.equal(diff.parts.map(part => part.pdf).join(''), target.raw.slice(connection.targetStart, connection.targetEnd));
     const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-    for (const { range } of sourceDecorations(index, index.candidates(null, false, false, true, [], [[connection, target]]), false, true, undefined, documentModel)) {
+    for (const { range } of sourceDecorations(index, reviewCandidates(index, { fonts: false, edits: false, text: true, targets: [], connections: [[connection, target]] }), false, true, undefined, documentModel)) {
       if (range.startColumn - 1 < index.ends[end - 1] && range.endColumn - 1 > index.starts[start])
         assert.equal(range.startColumn, range.endColumn, 'unchanged letters cannot receive a difference highlight');
     }

@@ -39,6 +39,29 @@ test('missing anchors ignore OCR noise and stay inside the paired part of a text
   }
 });
 
+test('missing anchors reuse the missing ranges from final candidates', () => {
+  const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+  const source = new api.PdfConnections(locator, 'word missing tail');
+  const target = new api.PdfConnections(locator, { raw: 'word noise tail', parts: [
+    { start: 0, end: 4 }, { start: 5, end: 10 }, { start: 11, end: 15 }
+  ], sourcePages: [1] });
+  const connections = [
+    api.diffIndex.between(source, 0, 4, target, 0, 4),
+    api.diffIndex.between(source, 13, 17, target, 11, 15)
+  ];
+  source.connections.set(target, { prepared: true, preparedRanges: connections });
+  const items = source.candidates([target]);
+  const missing = items.find(item => item.missing);
+  assert.ok(missing);
+  assert.ok(items.missingRanges.includes(missing.comparison));
+  assert.deepEqual({ ...missing.comparison }, { html: ' missing ', pdf: '' });
+  assert.ok(!Object.keys(items).includes('missingRanges'));
+  source.prepared = { full: target, pages: [target], pairs: connections, differences: { index: source, items } };
+  source.candidates = () => { throw new Error('missing anchor rebuilt the candidate queue'); };
+  assert.deepEqual({ ...source.missingRange(target, missing.sourceStart, missing.sourceEnd) },
+    { start: 4, end: 4, endBias: true });
+});
+
 test('missing before any correspondence uses the first nonblank document box', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const source = new api.PdfConnections(locator, 'missing word'), target = new api.PdfConnections(locator,

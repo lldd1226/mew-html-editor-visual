@@ -24,12 +24,12 @@ try {
     PdfReviewProvider.setFontEnabled(false);
     const editor = readerMonaco.editor, locator = PdfSelection.locator;
     const index = locator.editorSourceIndex(editor.document), targets = locator.environment.getTargets();
-    index?.update(targets);
+    index?.connect(targets);
     window.markState = marks => JSON.stringify(marks.filter(mark => /text.*difference/.test(mark.options.description))
       .map(({ range, options: o }) => { const r = editor.getModel().validateRange(range);
         return [r.startLineNumber, r.startColumn, r.endLineNumber, r.endColumn, o.inlineClassName, o.before?.inlineClassName]; }).sort());
     window.htmlMarks = () => markState(editor.getModel().getAllDecorations());
-    window.expectedMarks = () => markState(window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, PdfReviewProvider.locator.fontStyles, false, true, locator.environment.getTargets(), locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), PdfReviewProvider.locator.fontStyles, true, undefined, editor.getModel()));
+    window.expectedMarks = () => markState(window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: PdfReviewProvider.locator.fontStyles, edits: false, text: true, targets: locator.environment.getTargets(), connections: locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }).items, PdfReviewProvider.locator.fontStyles, true, undefined, editor.getModel()));
     window.paragraphNotice = null;
     addEventListener('pdf-selection-difference', event => {
       window.paragraphNotice = event.detail.notices?.find(n => n.source && n.target?.end > n.target?.start);

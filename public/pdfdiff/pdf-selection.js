@@ -510,10 +510,10 @@
     const model = editor?.getModel();
     if (!model || !editor.setSelection) return;
     activeEditor = editor;
-    const index = review.locator.editorSourceIndex(editor.document), { hit, difference } = index.locateSource(chunks);
+    const index = review.locator.editorSourceIndex(editor.document), { hit, range: missingAnchor, difference } = index.locateSource(chunks);
     select([]);
     for (const chunk of chunks) {
-      const result = nativeBoxes(chunk.div, [], [{ range: { start: chunk.start, end: chunk.end }, difference }]);
+      const result = nativeBoxes(chunk.div, [], [{ range: missingAnchor || { start: chunk.start, end: chunk.end }, difference }]);
       paint(chunk.div, result.boxes, result.notices.map(notice => ({ ...notice, source: hit && { index, start: hit.start, end: hit.end } })));
     }
     report("idle", { mode: "pdf-selection", differences: difference ? [difference] : [] });

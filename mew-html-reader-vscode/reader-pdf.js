@@ -349,11 +349,11 @@ async function initializeReview() {
       reviewRequests.set(id, { resolve, reject, timer }); send(type, { id, ...data });
     });
   }
-  function receiveSource(snapshot) {
+  function receiveSource(snapshot, userSelection) {
     if (!snapshot) return;
     if (sourceSnapshot?.uri !== snapshot.uri) window.ReplacementReview?.close();
     sourceSnapshot = snapshot;
-    source.receive(snapshot);
+    source.receive(snapshot, userSelection);
     window.ReplacementReview?.refreshMenu();
     window.ReplacementReview?.refreshPresentation();
   }
@@ -391,7 +391,7 @@ async function initializeReview() {
       void source.runReviewAction(message.action).catch(error => showStatus(error.message));
     if (message?.type === "reviewSourceAction" && message.request?.model === sourceSnapshot?.uri && message.request.version === sourceSnapshot?.version)
       void source.getAction(message.action)?.run(source, message.request).catch(error => showStatus(error.message));
-    if (message?.type === "reviewSource") receiveSource(message.snapshot);
+    if (message?.type === "reviewSource") receiveSource(message.snapshot, message.userSelection);
     if (message?.type === "reviewResult") {
       const request = reviewRequests.get(message.id);
       if (!request) return;

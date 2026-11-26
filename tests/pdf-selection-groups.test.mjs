@@ -5,7 +5,6 @@ import { selectionFixture } from './support/pdf-selection-group-fixture.mjs';
 for (const markup of [false, true]) for (const [name, query, replacement, texts] of [
   ['word start', 'WRoot', 'VRoot', ['WRooting', 'WRooter', 'preWRooting']],
   ['word end', 'RootW', 'RootV', ['aaRootW', 'bbRootW', 'RootWtail']],
-  ['single-character selection', 'W', 'V', ['aaW', 'Wbb', 'xWx']],
   ['two patterns', 'W aa Z', 'V aa Y', ['preW aa Z', 'W aa Ztail', 'otherW aa Zend']],
   ['non-BMP context', '𠀀W', '𠀀V', ['aa𠀀W', '𠀀Wtail', 'other𠀀W']]
 ]) {
@@ -44,6 +43,21 @@ for (const markup of [false, true]) for (const [name, query, replacement, texts]
   });
 }
 
+for (const markup of [false, true]) test(`single-character selections require the same whole word${markup ? ' with inline tags' : ''}`, async () => {
+  const cases = ['teWrm', 'teWrm', 'otWrm', 'teWrd'].map(text => ({ text, pdf: text.replace('W', 'V') }));
+  const fixture = selectionFixture(cases, { markup: markup ? text => text.replace('W', '<i>W</i>') : undefined });
+  const { item, state } = fixture.select('W', 'V');
+  assert.ok(item);
+  assert.deepEqual(Array.from(fixture.locator.reviewLists.get(item).items, value => value.sourceStart),
+    [fixture.starts[0] + 2, fixture.starts[1] + 2]);
+  await fixture.provider.apply(state, false).apply();
+  assert.equal(fixture.source, cases.map(({ text }, at) => {
+    let value = markup ? text.replace('W', '<i>W</i>') : text;
+    if (at < 2) value = value.replace('W', 'V');
+    return `<p>${value}</p>`;
+  }).join(''));
+});
+
 test('a selection cutting into one cached diff only replaces the selected characters', async () => {
   const fixture = selectionFixture([{ text: 'aaabcd', pdf: 'aaWXYZ' }, { text: 'abcdtail', pdf: 'WXYZtail' },
     { text: 'abcdcorrect', pdf: 'abcdcorrect' }, { text: 'abcddifferent', pdf: 'QRSTdifferent' }]);
@@ -54,6 +68,78 @@ test('a selection cutting into one cached diff only replaces the selected charac
   assert.equal(fixture.highlighted.length, 2);
   await fixture.provider.apply(state, false).apply();
   assert.equal(fixture.source, '<p>aaaXYd</p><p>aXYdtail</p><p>abcdcorrect</p><p>abcddifferent</p>');
+});
+
+test('whitespace-only differences stay out of the default queue but remain selectable and replaceable', async () => {
+  for (const [html, pdf, query, replacement] of [
+    ['A B', 'A  B', ' ', '  '],
+    ['A B', 'A\nB', ' ', '\n'],
+    ['A\nB', 'A B', '\n', ' ']
+  ]) {
+    const fixture = selectionFixture([{ text: html, pdf }]);
+    assert.equal(fixture.base.items.length, 0, 'whitespace alone must not enter the default review queue');
+    const { data, item, state } = fixture.select(query, replacement);
+    assert.ok(item, JSON.stringify([html, pdf]));
+    assert.equal(data.items, fixture.base.items);
+    assert.equal(data.items.length, 0);
+    const content = fixture.provider.content(state, item);
+    assert.ok(content.comparison.every(row => row.parts.some(part => part.changed)));
+    await fixture.provider.apply(state, false).apply();
+    assert.equal(fixture.source, `<p>${pdf}</p>`);
+  }
+});
+
+test('ME04-426: selecting e in verschiedenen does not remove e in der', async () => {
+  const html = 'Die Vereinigung der Demokraten der verschiedenen Nationen.';
+  const pdf = 'Die Vereinigung der Demokraten dr verschiednen Nationen.';
+  const fixture = selectionFixture([{ text: html, pdf }]), at = html.lastIndexOf('verschiedenen') + 9;
+  const { data, item, state } = fixture.select('e', '', 0, at);
+  assert.ok(item);
+  assert.deepEqual(Array.from(fixture.locator.reviewLists.get(item).items, value => value.sourceStart), [at]);
+  await fixture.provider.apply(state, false).apply();
+  assert.equal(fixture.source, `<p>${html.slice(0, at) + html.slice(at + 1)}</p>`);
+});
+
+test('normalized-only differences stay selectable without entering the default queue', async () => {
+  for (const [html, pdf, query, replacement] of [
+    ['word-word', 'wordword', '-', ''],
+    ['word\u2010word', 'wordword', '\u2010', ''],
+    ['word\u2011word', 'wordword', '\u2011', ''],
+    ['word\u00adword', 'wordword', '\u00ad', ''],
+    ['Prokesch-Osten', 'Prokesch-\nOsten', '-', '-\n'],
+    ['Ａ', 'A', 'Ａ', 'A'],
+    ['ﬁ', 'fi', 'ﬁ', 'fi'],
+    ['So’wenig', "So'wenig", '’', "'"],
+    ['café', 'cafe\u0301', 'é', 'e\u0301'],
+    ['A\u030A', 'Å', 'A\u030A', 'Å']
+  ]) {
+    const fixture = selectionFixture([{ text: html, pdf }]);
+    assert.equal(fixture.base.items.length, 0, `normalized-only difference entered the queue: ${JSON.stringify([html, pdf])}`);
+    const { data, item, state } = fixture.select(query, replacement);
+    assert.ok(item, JSON.stringify([html, pdf]));
+    assert.equal(data.items, fixture.base.items);
+    assert.equal(data.items.length, 0);
+    const content = fixture.provider.content(state, item);
+    assert.ok(content.comparison.every(row => row.parts.some(part => part.changed)), JSON.stringify([html, pdf]));
+    await fixture.provider.apply(state, false).apply();
+    assert.equal(fixture.source, `<p>${pdf}</p>`);
+  }
+});
+
+test('standalone selections leave an existing default queue unchanged', () => {
+  for (const [html, pdf, query, replacement] of [
+    ['word-word X', 'wordword Y', '-', ''],
+    ['A B X', 'A  B Y', ' ', '  '],
+    ['café X', 'cafe\u0301 Y', 'é', 'e\u0301']
+  ]) {
+    const fixture = selectionFixture([{ text: html, pdf }]), ids = Array.from(fixture.base.items, item => item.id);
+    assert.equal(ids.length, 1);
+    const { data, item } = fixture.select(query, replacement);
+    assert.ok(item);
+    assert.equal(data.items, fixture.base.items);
+    assert.equal(data.items.length, 1);
+    assert.deepEqual(Array.from(data.items, value => value.id), ids);
+  }
 });
 
 test('ordinary faults still require the same whole-word context', () => {

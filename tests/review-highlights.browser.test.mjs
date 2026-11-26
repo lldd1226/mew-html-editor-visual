@@ -59,14 +59,16 @@ test('highlight tool works without PDF modules and keeps consumers and decoratio
         getDomNode: () => div, createDecorationsCollection: () => collection,
         onDidChangeModel(callback) { modelChanged = callback; return { dispose() { subscriptions++; } }; }
       };
-      const key = [index], decorations = () => { builds++; return []; };
+      const reviewItem = { id: 'fixture' };
+      const key = [index], decorations = () => { builds++; return [{ range: mark, options: {}, reviewItem }]; };
       first.updateSource(editor, key, decorations);
       first.updateSource(editor, key, decorations);
       const cacheReused = updates === 1 && builds === 1;
       modelChanged();
       first.updateSource(editor, key, decorations);
       const range = { isEmpty: () => true, getStartPosition: () => ({ lineNumber: 1, column: 2 }) };
-      const selectsMark = first.selectionRange(editor, {}, range) === mark;
+      const selected = first.selectionRange(editor, {}, range);
+      const selectsMark = selected?.range === mark && selected.item === reviewItem;
       const dragKept = first.selectionRange(editor, {}, { isEmpty: () => false }) === null;
       first.dispose();
       const independent = !painted.node.isConnected && second.getHighlight(div).node.isConnected;

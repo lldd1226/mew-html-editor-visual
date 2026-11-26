@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { PdfConnections as FixtureConnections } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
@@ -15,8 +16,8 @@ test('ME32-323 highlights both ends of a relocated footnote, while tolerating an
     const index = new api.PdfConnections(locator, fixture.source);
     const target = new api.PdfConnections(locator, { raw: relocated ? fixture.raw : fixture.raw.replace('etc.1,', 'etc.,'),
       sourcePages: fixture.physical, parts: [] });
-    index.update([target]);
-    const items = index.candidates(null, false, true, true, [target]);
+    index.connect([target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     const at = index.raw.indexOf('etc.1)') + 4;
     assert.ok(at > 4);
     const deletion = items.find(item => item.sourceStart === at && item.sourceEnd === at + 1);
@@ -39,7 +40,7 @@ test('ME32-496 reuses rejected cross-page gaps until a confirmed neighbour chang
   const index = new api.PdfConnections(locator, reordered.source);
   const target = new api.PdfConnections(locator, { raw: reordered.raw.slice(reordered.pages[0].start, reordered.pages[0].end),
     layer: {}, parts: [] });
-  index.update([target]);
+  index.connect([target]);
   const remember = index.remember, failures = [];
   index.remember = function (start, end, page, hit, ...rest) {
     const result = remember.call(this, start, end, page, hit, ...rest);
@@ -55,7 +56,9 @@ test('ME32-496 reuses rejected cross-page gaps until a confirmed neighbour chang
     assert.deepEqual(index.range(target, 0, target.raw.length, true), reverse);
   }
   assert.equal(failures.length, first, 'forward and reverse lookups do not retry rejected gaps');
-  index.byTarget.set(target, index.byTarget.get(target).map(connection => ({ ...connection })));
+  const state = index.connections.get(target);
+  state.ranges = state.ranges.map(connection =>
+    Object.defineProperty({ ...connection, gap: undefined }, 'target', { value: target }));
   assert.deepEqual(index.range(target, 0, index.raw.length), forward);
   assert.ok(failures.length > first, 'replaced neighbours trigger fresh comparisons');
 });
@@ -66,9 +69,9 @@ for (const newline of ['\r\n', '\n']) test(`ME32-496 prepares footnotes reordere
     const index = new api.PdfConnections(locator, reordered.source.replace(/\r?\n/g, newline));
     const target = new api.PdfConnections(locator, { raw: reordered.raw.replace(/ - /g, ` ${separator} `),
       sourcePages: reordered.physical, pages: reordered.pages, parts: [] });
-    index.update([target]);
+    index.connect([target]);
     const pairs = [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []);
-    const items = index.candidates(null, false, true, true, [target], pairs);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target], connections: pairs });
     let previous = 0;
     for (const text of ['vorerst', 'Vereinigtem Königreich', 'englischen Gesetze über Beweisführung']) {
       const start = index.raw.indexOf(text), end = start + text.length;
@@ -84,7 +87,7 @@ for (const newline of ['\r\n', '\n']) test(`ME32-496 prepares footnotes reordere
     }
     assert.ok(items.some(item => item.comparison.html === 'su' && item.comparison.pdf === 'ni'),
       'the OCR error in versuchte/vernichte remains reported');
-    assert.equal(JSON.stringify(index.candidates(null, false, true, true, [target], pairs)), JSON.stringify(items),
+    assert.equal(JSON.stringify(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target], connections: pairs })), JSON.stringify(items),
       'selection lookups do not change the prepared review');
     api.validateEdits(index.source, items.flatMap(item => item.options[0].edits));
   }
@@ -99,8 +102,8 @@ test('ME32-524 partial selections cannot suppress cross-page group recovery', as
     locator.getDocumentIndex = () => target;
     const start = index.raw.indexOf(word), at = target.raw.indexOf(word);
     if (word) assert.ok(index.remember(start, start + word.length, target, { start: at, end: at + word.length }));
-    index.update([target]);
-    const items = index.candidates(null, false, true, true, [target]);
+    index.connect([target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     for (const text of ['8 S. G. ', 'sie 7 Eideshelfer', 'Will oder kann sie das nicht', 'Beste Grüße an Euch alle.']) {
       const from = index.raw.indexOf(text), end = from + text.length;
       assert.ok(from >= 0);
@@ -110,7 +113,7 @@ test('ME32-524 partial selections cannot suppress cross-page group recovery', as
     const hit = index.range(target, initials, initials + 8);
     assert.ok(hit, 'initials map before selection');
     assert.equal(target.raw.slice(hit.start, hit.end).trim(), '8 S. G,');
-    assert.deepEqual(index.candidates(null, false, true, true, [target]), items,
+    assert.deepEqual(reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }), items,
       'selection lookup does not change the prepared review');
     assert.ok(items.some(item => item.missing && item.comparison.html.includes('F. E.')),
       'the signature absent from OCR must still be reported');
@@ -123,8 +126,8 @@ test('ME32-099 prepares both bounded PDF pages without reusing an incomplete rev
   const index = new api.PdfConnections(locator, page.source);
   const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: page.physical, parts: [] });
   locator.getDocumentIndex = () => target;
-  index.update([target]);
-  const items = index.candidates(null, false, true, true, [target]);
+  index.connect([target]);
+  const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   for (const [html, pdf] of [['in Manchester', 'in Manchester'], ['– wirklich gekostet haben.“', 'r wirklich gekostet haben*']]) {
     const start = index.raw.indexOf(html), end = start + html.length;
     const hit = index.range(target, start, end);
@@ -142,17 +145,25 @@ test('ME32-099 missing signatures cannot highlight the entire following PDF page
   const page = JSON.parse(await readFile(new URL('./fixtures/pdf-selection-me32-099.json', import.meta.url), 'utf8'));
   const pdf = {}, locator = selectionLocator({}, { getPdf: () => pdf, getSourcePages: () => page.physical });
   const index = new FixtureConnections(locator, page.source), Index = index.constructor;
-  const target = new Index(locator, { raw: page.raw, sourcePages: page.physical, parts: [] });
-  const layer = new Index(locator, { raw: page.raw.slice(page.raw.indexOf('100 52')), layer: {}, parts: [] });
+  const seam = page.raw.indexOf('100 52');
+  const pages = [
+    { number: page.physical[0], start: 0, end: seam, parts: [{ start: 0, end: seam }] },
+    { number: page.physical[1], start: seam, end: page.raw.length, parts: [{ start: seam, end: page.raw.length }] }
+  ];
+  const target = new Index(locator, { raw: page.raw, pdf, sourcePages: page.physical, pages });
+  const layer = new Index(locator, { raw: page.raw.slice(seam), pdf,
+    layer: { closest: () => ({ dataset: { pageNumber: String(page.physical[1]) } }) }, parts: [] });
   locator.getDocumentIndex = () => target;
   locator.environment.getTargets = () => [target, layer];
   locator.environment.getVisiblePages = () => [{ number: 125, index: layer }];
-  index.update([target, layer], pdf);
+  index.connect([target, layer], pdf);
   for (const text of ['Moore zeichnete.', 'Dein\nK.M.']) {
     const start = index.raw.indexOf(text), end = start + text.length;
     const [location] = locator.findLocations(pdf, [index.entry(start, end, true)], true);
     assert.ok(location.notice?.missing, 'the missing-OCR reminder remains available');
-    assert.equal(location.targets.length, 0, 'page 100 has no counterpart for a missing signature on page 99');
+    assert.equal(location.targets.length, 1, 'the missing signature has one caret');
+    assert.equal(location.targets[0].pageNumber, page.physical[0], 'the caret stays on page 99');
+    assert.equal(location.targets[0].range.start, location.targets[0].range.end);
   }
 });
 
@@ -160,13 +171,13 @@ test('ME32-151 prepares the rendered footnotes before placing missing-letter car
   const page = JSON.parse(await readFile(new URL('./fixtures/pdf-selection-me32-151.json', import.meta.url), 'utf8'));
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, page.source);
-  const layer = new api.PdfConnections(locator, { raw: page.raw, layer: {}, parts: [] });
+  const layer = new api.PdfConnections(locator, { raw: page.raw, layer: { closest: () => null }, parts: [] });
   const target = new api.PdfConnections(locator, { raw: page.pdf, sourcePages: page.physical, parts: [] });
-  index?.update([layer, target]);
-  const connections = index.scopes.get(layer).connections;
+  index?.connect([layer, target]);
+  const connections = index.targetConnections(layer);
   for (const [word, letter] of [['Führern', 'h'], ['Philipp', 'P']]) {
     const start = index.raw.indexOf(word) + word.indexOf(letter);
-    const item = index.candidates(null, false, true, true, [layer, target]).find(item => item.sourceStart <= start && item.sourceEnd > start);
+    const item = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [layer, target] }).find(item => item.sourceStart <= start && item.sourceEnd > start);
     assert.ok(item && item.comparison.html.includes(letter));
     const hit = index.range(layer, item.sourceStart, item.sourceEnd, false, undefined, true);
     assert.ok(hit, `${word} has a prepared rendered-layer mapping`);
@@ -186,10 +197,13 @@ for (const page of pages) for (const newline of ['\r\n', '\n'])
     const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
     const source = page.source.replace(/\r?\n/g, newline), index = new api.PdfConnections(locator, source);
     const target = new api.PdfConnections(locator, { raw: page.raw, sourcePages: page.physical, parts: [] });
-    index?.update([target]);
-    const items = index.candidates(null, false, true, true, [target]);
-    const documentModel = new FixtureDocument({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-    const marks = JSON.stringify(sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel));
+    index?.connect([target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
+    const documentModel = new FixtureDocument({ model: {
+      getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }),
+      getOffsetAt: ({ column }) => column - 1
+    } });
+    const marks = JSON.stringify(sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel));
     let previous = 0;
     for (const [html, pdf] of passages[page.number]) {
       const start = index.raw.indexOf(html), end = start + html.length;
@@ -203,7 +217,7 @@ for (const page of pages) for (const newline of ['\r\n', '\n'])
       const reverse = index.range(target, hit.start, hit.end, true);
       assert.ok(reverse && reverse.start <= start && reverse.end >= end - 1, `${html} maps back through the same alignment`);
     }
-    assert.equal(JSON.stringify(sourceDecorations(index, index.candidates(null, true, false, true, [], [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || [])), true, true, undefined, documentModel)), marks);
+    assert.equal(JSON.stringify(sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => index.connections.get(target)?.preparedRanges || index.connections.get(target)?.ranges || []) }), true, true, undefined, documentModel)), marks);
     api.validateEdits(source, items.flatMap(item => item.options[0].edits));
     if (page.number === 162) {
       assert.ok(items.some(item => item.missing && item.comparison.html.includes('F. E.')),

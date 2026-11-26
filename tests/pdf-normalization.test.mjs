@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -10,8 +11,8 @@ for (const page of pages) test(`ME08-${page.number} ordered OCR passages keep pa
       (_, name) => ({ amp: '&', lt: '<', gt: '>' })[name]) }; }
   }) } });
   const index = new api.PdfConnections(locator, page.source), target = new api.PdfConnections(locator, { raw: page.raw });
-  index?.update([target]);
-  const connections = index.byTarget.get(target) || [], items = index.candidates(null, false, true, true, [target]);
+  index?.connect([target]);
+  const connections = index.byTarget.get(target) || [], items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
   const covered = new Set(connections.flatMap(c => Array.from({ length: c.end - c.start }, (_, i) => c.start + i))).size;
   const minimum = { 241: 2579, 247: 2054, 432: 2294, 446: 2684, 447: 2917, 448: 2609,
     449: 2674, 450: 2675, 451: 2542, 452: 1836, 453: 2213, 454: 1787, 455: 1743, 456: 2348, 457: 113 };
@@ -39,7 +40,7 @@ for (const page of pages) test(`ME08-${page.number} selections align both ways a
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getVisiblePages: () => visible });
   const index = new api.PdfConnections(locator, page.source), target = new api.PdfConnections(locator, { raw: page.raw, parts: [] });
   visible.push({ number: 1, index: target });
-  index?.update([target]);
+  index?.connect([target]);
   const start = index.raw.indexOf(page.selection.from), end = index.raw.indexOf(page.selection.to, start) + page.selection.to.length;
   assert.ok(start >= 0 && end > start);
   const forward = index.range(target, start, end, false, undefined, true);
@@ -68,7 +69,7 @@ test('ellipsis variants normalize equally on either side and keep replacement co
     const diff = index.compare(target, connection);
     assert.equal(diff.parts.map(p => p.html).join(''), source);
     assert.equal(diff.parts.map(p => p.pdf).join(''), target.raw);
-    const items = index.candidates(null, false, true, true, [target]);
+    const items = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] });
     assert.ok(items.length);
     api.validateEdits(source, items.flatMap(item => item.options[0].edits));
   }
@@ -85,7 +86,7 @@ test('expanded glyphs split by OCR changes never duplicate raw text', () => {
       const diff = index.compare(target, connection);
       assert.equal(diff.parts.map(p => p.html).join(''), source);
       assert.equal(diff.parts.map(p => p.pdf).join(''), target.raw);
-      api.validateEdits(source, index.candidates(null, false, true, true, [target]).flatMap(item => item.options[0].edits));
+      api.validateEdits(source, reviewCandidates(index, { fonts: false, edits: true, text: true, targets: [target] }).flatMap(item => item.options[0].edits));
     }
   }
 });
@@ -148,7 +149,7 @@ test('ME08-449 damaged opening word anchors progressively longer selections in b
   const page = pages.find(page => page.number === 449), api = engine();
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, page.source), target = new api.PdfConnections(locator, { raw: page.raw });
-  index?.update([target]);
+  index?.connect([target]);
   const start = index.raw.indexOf('Wie');
   for (const last of ['Wie', 'Stieber', 'weiß', 'Hypothesen']) {
     const end = index.raw.indexOf(last, start) + last.length;
@@ -174,7 +175,7 @@ for (const [number, from, to, pdfStart, pdfEnd] of [
   const page = pages.find(page => page.number === number), api = engine();
   const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const index = new api.PdfConnections(locator, page.source), target = new api.PdfConnections(locator, { raw: page.raw });
-  index?.update([target]);
+  index?.connect([target]);
   index.search = () => { throw new Error('selection must use the contextual diff map'); };
   const start = index.raw.indexOf(from), end = index.raw.indexOf(to, start) + to.length;
   const forward = index.range(target, start, end, false, undefined, true);

@@ -52,11 +52,11 @@ try {
   const sourceColors = () => editor.locator('.mew-ocr-diff-text').evaluateAll(nodes => nodes.map(node => getComputedStyle(node).backgroundColor));
   assert.ok((await sourceColors()).every(color => color === 'rgba(255, 166, 40, 0.3)'), 'normal differences stay gold');
   await reader.evaluate(() => {
-    const original = PdfSelection.locator.reviewAnchor;
-    PdfSelection.locator.reviewAnchor = function (item, index) {
-      const anchor = original.call(this, item, index);
-      window.activePopupAnchor = anchor && { ...anchor, sourceStart: item.sourceStart };
-      return anchor;
+    const original = PdfSelection.locator.reviewAnchors;
+    PdfSelection.locator.reviewAnchors = function (entries, pdf) {
+      const anchors = original.call(this, entries, pdf), entry = entries[0], anchor = anchors.get(entry);
+      if (anchor) window.activePopupAnchor = { ...anchor, sourceStart: entry.start };
+      return anchors;
     };
     PdfSelection.popupPlacement = () => { throw new Error('Popup must not choose among all preview highlights'); };
   });

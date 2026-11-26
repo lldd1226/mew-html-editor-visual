@@ -1,0 +1,44 @@
+@dataclass
+class connectionindex
+   text
+   index
+   inconsistence
+   ......
+class connection
+    connected = new (data)class connectionindex  .....
+    diffng
+    PDFpages
+    HTMLtexts
+    
+    connect() {
+       for (p of PDFpages)
+       PDFtexts+=PDFpages
+       this.connected=diffng(PDFtexts)
+       HTMLuncomparedlist=[]
+       PDFuncomparedlist=[]
+       for (c of this.connected)
+         if (update) {
+            ...... 
+        }
+        c.scopeindex=......
+        pdf.scopeindex=......
+        if(c.connected== unconnected and len(PDFpages)>1)
+        HTMLuncompared.texts+=c.texts
+        PDFuncompared.texts+=pdf.texts
+        
+        HTMLuncomparedlist+=[HTMLuncompared]
+        PDFuncomparedlist+=[PDFuncompared]
+    } // locator: conneciton.connect( ......,update)
+    candidates() {
+        for (c of connected) {
+            if c.inconsistence candidates+=......  
+            if ......     
+        }
+        return candidates
+    }
+    auxliarary funcitons1() ......
+
+      
+
+
+    

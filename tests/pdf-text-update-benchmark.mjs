@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { launchBrowser } from './support/browser.mjs';
@@ -55,8 +56,8 @@ try {
           });
           // Distinct target objects model separately cached pages of a larger source.
           const initial = locator.editorSourceIndex(documentModel, targets);
-          initial.update(targets, pdf);
-          initial.candidates(null, true, true, true, [], targets.filter(Boolean).flatMap(target => initial.connections.get(target)?.preparedRanges || initial.connections.get(target)?.ranges || []));
+          initial.connect(targets, pdf);
+          reviewCandidates(initial, { fonts: true, edits: true, text: true, targets: [], connections: targets.filter(Boolean).flatMap(target => initial.connections.get(target)?.preparedRanges || initial.connections.get(target)?.ranges || []) });
           const word = /[A-Za-z]{5,}/g;
           word.lastIndex = Math.floor(initial.raw.length / 2);
           const match = word.exec(initial.raw), at = initial.starts[match.index];
@@ -65,9 +66,9 @@ try {
           version++; documentModel.update(documentModel.content);
           const begin = performance.now();
           const current = locator.editorSourceIndex(documentModel, targets), indexed = performance.now();
-          current.update(targets, pdf);
+          current.connect(targets, pdf);
           const prepared = performance.now();
-          const items = current.candidates(null, true, true, true, [], targets.filter(Boolean).flatMap(target => current.connections.get(target)?.preparedRanges || current.connections.get(target)?.ranges || []));
+          const items = reviewCandidates(current, { fonts: true, edits: true, text: true, targets: [], connections: targets.filter(Boolean).flatMap(target => current.connections.get(target)?.preparedRanges || current.connections.get(target)?.ranges || []) });
           const end = performance.now();
           if (round >= 2) samples.push({ index: indexed - begin, prepare: prepared - indexed, candidates: end - prepared, total: end - begin });
           if (round === 8) signatures.push(JSON.stringify(items.map(item => ({ start: item.sourceStart, end: item.sourceEnd,

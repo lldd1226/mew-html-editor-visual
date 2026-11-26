@@ -1,7 +1,8 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { engine } from './support/pdf-harness.mjs';
+import { engine, connectionParts } from './support/pdf-harness.mjs';
 
 test('a confirmed selection supplies reverse mapping and review without another text search', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
@@ -45,16 +46,44 @@ test('an explicit PDF caret bypasses search and remains independent of rendering
 test('selection additions leave the prepared default mapping intact', () => {
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const source = new api.PdfConnections(locator, 'Before a unique selected word after.'), target = new api.PdfConnections(locator, source.raw);
-  const prepared = source.update([target]), defaults = source.pairs;
+  const prepared = source.connect([target]), defaults = source.pairs;
   const start = source.raw.indexOf('selected'), end = start + 8;
   const selected = source.remember(start, end, target, { start, end });
   assert.equal(source.entry(start, end).index, source);
   assert.equal(source.pairs, defaults);
   assert.ok(!defaults.some(([connection]) => connection === selected));
   assert.ok([target].filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || []).some(([connection]) => connection === selected));
-  source.update([target]);
+  source.connect([target]);
   assert.ok(!source.pairs.some(([connection]) => connection === selected));
   assert.equal(source.range(target, start, end).connection, selected);
+});
+
+test('layout punctuation remains an ordinary difference instead of missing OCR text', () => {
+  const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+  const source = new api.PdfConnections(locator, 'before ..... after'), target = new api.PdfConnections(locator, { raw: 'before  after', parts: [] });
+  const connection = { start: 0, end: source.raw.length, targetStart: 0, targetEnd: target.raw.length, target };
+  source.connections.set(target, { prepared: true, ranges: [connection], preparedRanges: [connection] });
+  const item = reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [], connections: [connection] }).find(item => item.comparison.html.includes('.....'));
+  assert.ok(item);
+  assert.equal(item.missing, undefined);
+  assert.equal(item.comparison.pdf, '');
+});
+
+test('an overlapping confirmed mapping removes a broad connection seam from the queue', () => {
+  const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
+  const source = new api.PdfConnections(locator, 'before wich-\r\n\r\n1 footnote tail');
+  const target = new api.PdfConnections(locator, { raw: 'before\nfootnote tail', parts: [] });
+  const broad = { start: 0, end: source.raw.length, targetStart: 0, targetEnd: target.raw.length, target };
+  broad.editorDiff = { reliable: true, parts: connectionParts(api, [
+    ['before wich-', 'before'], ['\r\n\r\n1 ', '\n'], ['footnote tail', 'footnote tail']
+  ]) };
+  const seamTarget = new api.PdfConnections(locator, { raw: '\r\n1 footnote tail', parts: [] });
+  const seam = { start: source.raw.indexOf('\r\n\r\n'), end: source.raw.length, targetStart: 0, targetEnd: seamTarget.raw.length, target: seamTarget };
+  source.connections.set(target, { prepared: true, ranges: [broad], preparedRanges: [broad] });
+  source.connections.set(seamTarget, { prepared: true, ranges: [seam], preparedRanges: [seam] });
+  const items = reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [], connections: [broad, seam] });
+  assert.ok(items.some(item => item.comparison.html === 'before wich-'));
+  assert.ok(!items.some(item => item.sourceStart < seam.end && item.sourceEnd > seam.start));
 });
 
 test('font refresh invalidates classified results while retaining text alignment', () => {
@@ -66,12 +95,12 @@ test('font refresh invalidates classified results while retaining text alignment
     { start, end, font: { italic: false, bold: false } },
     { start: end, end: source.raw.length, font: { italic: false, bold: false } }
   ] });
-  source.update([target]);
+  source.connect([target]);
   const original = source.getDifferences(), connection = source.byTarget.get(target)[0];
-  const alignment = connection.editorDiff.parts, versions = source.prepared.fontVersions;
+  const alignment = connection.editorDiff.parts;
   assert.ok(original.items.some(item => item.font && item.text === 'word'));
   assert.equal(source.getDifferences(), original);
-  assert.equal(source.prepared.fontVersions, versions);
+  assert.equal(source.fontsCurrent, true);
   target.parts[1].font.italic = true;
   target.fontVersion++;
   assert.equal(source.fontsCurrent, false);

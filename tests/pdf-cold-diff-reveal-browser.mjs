@@ -26,7 +26,7 @@ try {
     const index = PdfSelection.locator.editorSourceIndex(editor.document);
     const target = window.coldIndex;
     if (!target) return false;
-    const candidate = index.candidates(null, false, true, true, [target]).find(item => {
+    const candidate = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: [target] }).items.find(item => {
       const hit = index.range(target, item.sourceStart, item.sourceEnd, false, undefined, true);
       return hit && target.pages.some(p => p.number === 452 && hit.start >= p.start && hit.start < p.end);
     });

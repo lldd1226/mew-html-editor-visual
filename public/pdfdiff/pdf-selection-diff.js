@@ -8,18 +8,18 @@ const foldGlyphs = text => text.normalize('NFKC').replace(/Å¿/g, 's').replace(/Ã
 const significantText = text => foldGlyphs(text).replace(/[\s\-\u00ad\u2010\u2011]/g, '');
 // An aligned interval: text, coordinates and discrepancy metadata travel together.
 class diffIndex {
+  #cachedInconsistent;
   constructor(html, pdf, start = 0, targetStart = 0, changed = html !== pdf, previous) {
     if (previous) Object.assign(this, previous);
     this.html = html; this.pdf = pdf; this.changed = changed;
     this.start = start; this.end = start + html.length;
     this.targetStart = targetStart; this.targetEnd = targetStart + pdf.length;
   }
-  get inconsistent() {
-    return this.changed && significantText(this.html) !== significantText(this.pdf);
-  }
+  get inconsistent() { return this.changed && (this.#cachedInconsistent ??= significantText(this.html) !== significantText(this.pdf)); }
   get sourceEdge() { return this.start + this.html.trimEnd().length; }
   get targetEdge() { return this.targetStart + this.pdf.trimEnd().length; }
   append(html, pdf, end = this.end + html.length, targetEnd = this.targetEnd + pdf.length) {
+    this.#cachedInconsistent = undefined;
     this.html += html; this.pdf += pdf;
     this.end = end; this.targetEnd = targetEnd;
   }
@@ -80,18 +80,19 @@ function textDiff(left, right, details = false, limit = Infinity, condense = fal
   const fallback = details ? localTextDiff(left, right, true, 128) : null;
   if (fallback?.distance <= 128) return fallback;
   try {
-    const alignment = diffComputer.computeDiff(left.split("\n"), right.split("\n"), {
+    const linesA = left.split("\n"), linesB = right.split("\n");
+    const alignment = diffComputer.computeDiff(linesA, linesB, {
       ignoreTrimWhitespace: false, maxComputationTimeMs: 1000,
       computeMoves: false, extendToSubwords: false
     });
     if (alignment.hitTimeout) throw new Error("Monaco diff timed out");
-    const offsets = text => {
+    const offsets = lines => {
       const starts = [0];
-      for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
+      for (let i = 0; i < lines.length - 1; i++) starts.push(starts[i] + lines[i].length + 1);
       return range => [starts[range.startLineNumber - 1] + range.startColumn - 1,
         starts[range.endLineNumber - 1] + range.endColumn - 1];
     };
-    const offsetA = offsets(left), offsetB = offsets(right);
+    const offsetA = offsets(linesA), offsetB = offsets(linesB);
     const diff = details ? new diffIndex(left, right) : {};
     diff.distance = 0;
     diff.parts = details ? [] : undefined;
@@ -162,20 +163,19 @@ function localTextDiff(left, right, details = false, limit = Infinity, equal = (
   if (failed) distance = bound + 1;
   if (!details) return { distance };
   const diff = new diffIndex(typeof source === 'string' ? source : originalA.join(''), typeof target === 'string' ? target : originalB.join(''));
-  diff.parts = [];
+  diff.parts = failed ? [new diffIndex(diff.html, diff.pdf, 0, 0, true)] : [];
   diff.distance = distance;
-  const reversed = [];
-  let x = n, k = n - m;
-  for (let score = failed ? 0 : distance; score > 0; score--) {
-    const move = waves[score].trace[k + score], previousK = k + (move === 1 ? -1 : move === 2 ? 1 : 0);
-    const previousX = waves[score - 1].row[previousK + score - 1], previousY = previousX - previousK;
-    const fromX = previousX + (move !== 2), fromY = previousY + (move !== 1);
-    if (x > fromX) reversed.push({ html: a.slice(fromX, x).join(''), pdf: b.slice(fromY, x - k).join(''), changed: false });
-    reversed.push({ html: move === 2 ? '' : a[previousX], pdf: move === 1 ? '' : b[previousY], changed: true });
-    x = previousX; k = previousK;
-  }
-  if (failed) diff.parts.push(new diffIndex(diff.html, diff.pdf, 0, 0, true));
-  else {
+  if (!failed) {
+    const reversed = [];
+    let x = n, k = n - m;
+    for (let score = distance; score > 0; score--) {
+      const move = waves[score].trace[k + score], previousK = k + (move === 1 ? -1 : move === 2 ? 1 : 0);
+      const previousX = waves[score - 1].row[previousK + score - 1], previousY = previousX - previousK;
+      const fromX = previousX + (move !== 2), fromY = previousY + (move !== 1);
+      if (x > fromX) reversed.push({ html: a.slice(fromX, x).join(''), pdf: b.slice(fromY, x - k).join(''), changed: false });
+      reversed.push({ html: move === 2 ? '' : a[previousX], pdf: move === 1 ? '' : b[previousY], changed: true });
+      x = previousX; k = previousK;
+    }
     diff.appendPart(originalA.slice(0, start).join(''), originalB.slice(0, start).join(''), false);
     for (const part of reversed.reverse()) diff.appendPart(part.html, part.pdf, part.changed);
     diff.appendPart(originalA.slice(endA).join(''), originalB.slice(endB).join(''), false);
@@ -219,11 +219,11 @@ function changedRange(before, after, equal = (a, b) => a === b) {
 }
 function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, foldCase = true) {
   const units = [], { starts, ends } = result;
-  let previous = result.text.at(-1);
+  const last = result.text.at(-1);
   const emit = (value, start, end) => {
     for (const unit of foldCase ? value.toLowerCase() : value) {
-      if (unit === ' ' && previous === ' ') { ends[ends.length - 1] = end; continue; }
-      units.push(unit); previous = unit;
+      if (unit === ' ' && (units.at(-1) ?? last) === ' ') { ends[ends.length - 1] = end; continue; }
+      units.push(unit);
       for (let i = 0; i < unit.length; i++) { starts.push(start); ends.push(end); }
     }
   };
@@ -232,11 +232,12 @@ function normalized(raw, result = { text: "", starts: [], ends: [] }, base = 0, 
     if (match[1] || char === '\u00ad') continue;
     if (match[2] || match[3]) {
       let after = start, last = '';
-      for (const glyph of char.matchAll(/[A-Za-z0-9]/g)) {
-        const at = start + glyph.index;
-        if (match[2] && /[a-z]/.test(last) && /[A-Z]/.test(glyph[0])) emit(' ', after, at);
-        emit(glyph[0], at, at + 1);
-        after = at + 1; last = glyph[0];
+      for (let i = 0; i < char.length; i++) {
+        const glyph = char[i], at = start + i;
+        if (match[2] && /\s/u.test(glyph)) continue;
+        if (at > after && /[a-z]/.test(last) && /[A-Z]/.test(glyph)) emit(' ', after, at);
+        emit(glyph, at, at + 1);
+        after = at + 1; last = glyph;
       }
     } else emit(match[4] ? ' ' : match[5] ? char.replace(/\s/g, '') : foldGlyphs(char).replace(/\s/g, ' '), start, end);
   }
@@ -288,16 +289,19 @@ const ready = window.PdfSelectionOptions?.nativeEditor ? Promise.resolve() : imp
     .then(({ DefaultLinesDiffComputer }) => diffComputer = new DefaultLinesDiffComputer())
     .catch(() => null);
 
-function* matchPositions(index, needle, { text }, anchors) {
+const anchorBlocks = new WeakMap();
+function* matchPositions(needle, haystack, anchors) {
+  const { text } = haystack;
   if (!anchors || text.length < 65536) {
     for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) yield at;
     return;
   }
   // Index aligned 8-character blocks so short anchors also avoid full-volume rescans.
-  index.anchorBlocks ||= Map.groupBy(Array.from({ length: Math.floor(text.length / 8) }, (_, i) => i * 8),
-    at => text.slice(at, at + 8));
+  let blocks = anchorBlocks.get(haystack);
+  if (blocks?.text !== text) anchorBlocks.set(haystack, blocks = { text,
+    positions: Map.groupBy(Array.from({ length: Math.floor(text.length / 8) }, (_, i) => i * 8), at => text.slice(at, at + 8)) });
   for (let offset = 0; offset < 8 && offset + 8 <= needle.length; offset++) {
-    for (const position of index.anchorBlocks.get(needle.slice(offset, offset + 8)) || []) {
+    for (const position of blocks.positions.get(needle.slice(offset, offset + 8)) || []) {
       const at = position - offset;
       if (at >= 0 && text.startsWith(needle, at)) yield at;
     }
@@ -347,7 +351,7 @@ function findMatches(index, queries, haystack = index.normalized, {
         for (const size of long ? [24, 12] : [24, 12, 4]) {
           const anchor = left ? context.slice(-size) : context.slice(0, size);
           let anchored = false;
-          for (const at of matchPositions(index, anchor, haystack)) {
+          for (const at of matchPositions(anchor, haystack)) {
             anchored = true;
             let boundary = left ? at + anchor.length : at;
             if (left) {
@@ -376,7 +380,7 @@ function findMatches(index, queries, haystack = index.normalized, {
       continue;
     }
     if (!needle) continue;
-    for (const at of matchPositions(index, needle, haystack, anchors)) {
+    for (const at of matchPositions(needle, haystack, anchors)) {
       const end = at + needle.length;
       if (wholeWords && (word(needle[0]) && /[\p{L}\p{N}_]$/u.test(haystack.text.slice(Math.max(0, at - 2), at))
         || word([...needle].at(-1)) && /^[\p{L}\p{N}_]/u.test(haystack.text.slice(end, end + 2)))) continue;
@@ -384,11 +388,11 @@ function findMatches(index, queries, haystack = index.normalized, {
       if (found.size >= limit || anchors && !best && found.size > 1) return [...found.values()];
     }
   }
-  if (best && bestHit?.score >= (contextual ? before.length + after.length - 1 : Math.min(24, before.length + after.length)))
+  if (!best) return [...found.values()];
+  if (bestHit?.score >= (contextual ? before.length + after.length - 1 : Math.min(24, before.length + after.length)))
     return bestTied ? null : bestHit;
-  if (best && !fuzzy && !anchors && !contextual) return findMatches(index, queries, haystack, { anchors, fuzzy: true, before, after, wholeWords, best });
-  if (best) return null;
-  return [...found.values()];
+  return !fuzzy && !anchors && !contextual
+    ? findMatches(index, queries, haystack, { fuzzy: true, before, after, wholeWords, best }) : null;
 }
 window.PdfSelectionDiff = { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };
 export { diffIndex, fontKeys, mapDiffRange, forwardRangeKeys, reverseRangeKeys, textDiff, localTextDiff, changedRange, normalized, lowerBound, significantText, extendPageRange, comparisonIndex, findMatches, ready };

@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
@@ -30,9 +31,9 @@ for (const name of (await readdir(new URL('./fixtures/', import.meta.url))).sort
             transform: [1, 0, 0, 1, 0, 10], width: 500, height: 10 }];
           return { getTextContent: async () => ({ items }) };
         } });
-      source.scope(target, true);
+      source.connect(target);
       const pairs = (source.byTarget.get(target) || []).map(connection => [connection, target]);
-      const marks = sourceDecorations(source, source.candidates(null, true, false, true, [], pairs), true, true, undefined, new window.MewEditorCore.DocumentModel({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
+      const marks = sourceDecorations(source, reviewCandidates(source, { fonts: true, edits: false, text: true, targets: [], connections: pairs }), true, true, undefined, new window.MewEditorCore.DocumentModel({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }));
       const elapsed = performance.now() - start;
       assert.ok(pairs.length, `${name}: no source/PDF mappings`);
       for (const [connection] of pairs) {

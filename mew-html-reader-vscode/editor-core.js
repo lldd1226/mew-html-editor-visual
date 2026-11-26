@@ -158,7 +158,7 @@
       }
     }
     emit(name, event) { this.listeners.get(name)?.forEach(callback => callback(event)); }
-    receive(snapshot) {
+    receive(snapshot, userSelection = false) {
       const previous = this.snapshot;
       this.snapshot = snapshot;
       if (previous?.uri === snapshot.uri) this.document?.update(snapshot.text);
@@ -181,8 +181,8 @@
         changes: snapshot.version === previous?.version + 1 && snapshot.changes?.length ? snapshot.changes
           : [{ rangeOffset: 0, rangeLength: previous?.text.length || 0, text: snapshot.text }]
       });
-      else if (JSON.stringify(previous?.selections) !== JSON.stringify(snapshot.selections))
-        this.emit("onDidChangeCursorSelection", { source: "keyboard" });
+      else if (userSelection || JSON.stringify(previous?.selections) !== JSON.stringify(snapshot.selections))
+        this.emit("onDidChangeCursorSelection", { source: "keyboard", userSelection });
     }
     positionAt(offset) {
       const text = this.getValue(); offset = Math.max(0, Math.min(text.length, offset));

@@ -1155,13 +1155,13 @@ test('ME08-366 normal OCR fonts remove HTML styles before whole-document indexin
       const results = [['<b>', '</b>'], ['<i>', '</i>'], ['<b><i>', '</i></b>']].map(([opening, closing]) => {
         const html = `<p>${body}</p><p style="text-indent: 0;">${opening}${footer}${closing}</p>`;
         const index = new window.PdfSelectionDiff.PdfConnections(locator, html);
-        index?.update([target]);
-        const connections = [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []), items = index.formatDifferences([], ['italic', 'bold'], true, connections);
+        index?.connect([target]);
+        const connections = [target].filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []), items = window.PdfReviewProvider.locator.cacheReview({ index: index, items: [] }, { fonts: ['italic', 'bold'], edits: true, connections: connections }).items;
         const documentModel = new window.MewEditorCore.DocumentModel({ model: { getPositionAt: offset => ({ lineNumber: 1, column: offset + 1 }) } }), model = documentModel.model;
-        return { html, raw: target.raw, texts: index.candidates(null, false, true, true, [target]).length,
+        return { html, raw: target.raw, texts: window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: [target] }).items.length,
           items: items.map(item => item.text),
           patched: PdfSelectionDiff.applyTextEdits(html, items.flatMap(item => item.options[0].edits)),
-          marks: window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], connections), true, true, undefined, documentModel).filter(mark => mark.options.inlineClassName.includes('mew-font-diff-text'))
+          marks: window.PdfReviewProvider.sourceDecorations(index, window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: true, edits: false, text: true, targets: [], connections: connections }).items, true, true, undefined, documentModel).filter(mark => mark.options.inlineClassName.includes('mew-font-diff-text'))
             .map(mark => html.slice(mark.range.startColumn - 1, mark.range.endColumn - 1)) };
       });
       PdfSelection.stop();

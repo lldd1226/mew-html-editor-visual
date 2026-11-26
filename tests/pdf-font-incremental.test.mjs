@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -20,19 +21,20 @@ for (const scope of ['shared', 'copied']) for (const [name, edit, reuse, pdfUpda
     const api = engine(), pdf = {};
     let source = '<p>Lead.</p><p><i>Alpha</i> beta <a href="#F1">1</a> gamma.</p><p>Tail.</p>', version = 1;
     const documentModel = new FixtureDocument({ model: { getValue: () => source, getVersionId: () => version } }), model = documentModel.model;
-    const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getPdf: () => pdf });
+    const targets = [];
+    const locator = new api.PdfLocator({}, { document: { createElement: () => ({}) }, getPdf: () => pdf, getTargets: () => targets });
     locator.getDocumentIndex = () => null;
     const previous = locator.editorSourceIndex(documentModel), start = previous.raw.indexOf('Alpha'), end = previous.raw.indexOf('\n', start);
     const target = new api.PdfConnections(locator, { raw: previous.raw, fontVersion: 0, parts: [
       { start: 0, end: start + 5, font: { bold: true, italic: false } },
       { start: start + 5, end: previous.raw.length, font: { bold: false, italic: false } }
     ] });
-    previous.targets = [target];
+    targets.push(target);
     const connection = previous.remember(start, end, target, { start, end });
     previous.compare(connection);
     const state = previous.connections.get(target), original = state.ranges, snapshot = JSON.stringify(connection.editorDiff);
     Object.assign(state, { prepared: true, scope: { start, end },
-      preparedRanges: scope === 'shared' ? original : [Object.defineProperty({ ...connection }, 'target', { value: target })] });
+      preparedRanges: scope === 'shared' ? original : [connection.copy(previous, 0)] });
     let fontReads = 0;
     const fontRuns = target.fontRuns.bind(target);
     target.fontRuns = (...args) => { fontReads++; return fontRuns(...args); };
@@ -41,7 +43,7 @@ for (const scope of ['shared', 'copied']) for (const [name, edit, reuse, pdfUpda
     source = edit(source); version++; documentModel.update(documentModel.content);
     const current = locator.editorSourceIndex(documentModel), pairs = [target].filter(Boolean).flatMap(target => current.connections.get(target)?.preparedRanges || current.connections.get(target)?.ranges || []);
     assert.ok(pairs.length, 'the confirmed connection survives the edit');
-    const summarize = (index, pairs) => JSON.stringify(index.candidates(null, true, true, true, [], pairs).map(item => ({
+    const summarize = (index, pairs) => JSON.stringify(reviewCandidates(index, { fonts: true, edits: true, text: true, targets: [], connections: pairs }).map(item => ({
       start: item.sourceStart, end: item.sourceEnd, text: item.text, comparison: item.comparison,
       font: item.font && { bold: item.font.bold, italic: item.font.italic }, options: item.options
     })));
@@ -49,8 +51,9 @@ for (const scope of ['shared', 'copied']) for (const [name, edit, reuse, pdfUpda
     assert.equal(fontReads === 0, reuse, 'only unchanged connections reuse font comparisons');
     if (reuse) {
       assert.equal(JSON.stringify(connection.editorDiff), snapshot, 'reuse does not mutate the old snapshot');
-      for (const kept of pairs) for (const item of kept.editorDiff.fontItems)
-        assert.equal(item.htmlFont, current.formats[item.sourceStart], 'cached fonts reference the current HTML tags');
+      for (const kept of pairs) assert.equal(kept.fontItems, connection.fontItems, 'relative font spans survive edits outside the connection');
+      for (const item of reviewCandidates(current, { items: [], fonts: true, edits: false, connections: pairs }))
+        assert.equal(item.htmlFont, current.formats[item.sourceStart], 'candidates reference the current HTML tags');
     }
     const fresh = new api.PdfConnections(locator, source);
     const freshPairs = pairs.map(kept => Object.defineProperty({ ...kept, editorDiff: undefined }, 'target', { value: target }));

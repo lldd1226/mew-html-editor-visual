@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { PdfConnections as FixtureConnections } from './support/pdf-harness.mjs';
 // Manual real-page benchmark: node tests/pdf-highlight-performance.mjs [--cold] [--baseline=path] [--report=path]
 // HTML snapshots: MEW_BRIEF; PDF text: original mew_band08/23.pdf, PyMuPDF sorted extraction.
@@ -69,15 +70,15 @@ try {
         let marks, candidates;
         for (let round = 0; round < 31; round++) {
           const start = cold && !round ? opened : performance.now(), index = new window.PdfSelectionDiff.PdfConnections(locator, f.html);
-          index?.update(targets, {});
+          index?.connect(targets, {});
           const prepared = performance.now();
-          highlights.updateSource(editor, [index], () => marks = window.PdfReviewProvider.sourceDecorations(index, index.candidates(null, true, false, true, [], targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || [])), true, true, undefined, editor.getModel()),
+          highlights.updateSource(editor, [index], () => marks = window.PdfReviewProvider.sourceDecorations(index, reviewCandidates(index, { fonts: true, edits: false, text: true, targets: [], connections: targets.filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }), true, true, undefined, editor.getModel()),
             '.mew-ocr-diff-text{background:rgba(255,166,40,.3);border-bottom:1px solid #d58b24}.mew-ocr-diff-line{border-left:3px solid #d58b24}.mew-ocr-diff-insert{border-left:2px solid #d58b24}');
           editor.render(true);
           const end = performance.now();
           times.push(end-start); renderTimes.push(end-prepared);
           if (collection.length !== marks.length) throw new Error('Not all decorations were applied');
-          candidates = index.candidates(null, false, true, true, targets);
+          candidates = reviewCandidates(index, { fonts: false, edits: true, text: true, targets: targets });
           for (const candidate of candidates) {
             const segments = index.sourceSegments(candidate.sourceStart, candidate.sourceEnd);
             if (!segments.length) {

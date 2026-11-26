@@ -35,7 +35,7 @@ try {
       const index = locator.editorSourceIndex(editor.document), visible = locator.environment.getVisiblePages().find(p => p.index?.layer);
       if (!visible) throw new Error('No rendered page');
       const target = visible.index, div = ReaderUI.getPdfViewer().getPageView(visible.number - 1).div;
-      index?.update([target], ReaderUI.getPdfViewer().pdfDocument);
+      index?.connect([target], ReaderUI.getPdfViewer().pdfDocument);
       const start = index.raw.indexOf(fixture.selection.from), end = index.raw.indexOf(fixture.selection.to, start) + fixture.selection.to.length;
       const hit = index.range(target, start, end, false, undefined, true);
       if (!hit) throw new Error('No forward selection alignment');

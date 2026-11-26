@@ -1,3 +1,4 @@
+import { reviewCandidates } from './support/pdf-harness.mjs';
 import { DocumentModel as FixtureDocument } from './support/pdf-harness.mjs';
 import { sourceDecorations } from './support/pdf-harness.mjs';
 import assert from 'node:assert/strict';
@@ -14,7 +15,7 @@ test('Monaco highlights locatable differences and missing additions as text', ()
   const target = new api.PdfConnections(locator, { raw: 'A wrong reading here.', parts: [] });
   source.remember(0, source.raw.length, target, { start: 0, end: target.raw.length });
   const documentModel = new FixtureDocument({ model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
-  const marks = sourceDecorations(source, source.candidates(null, false, false, true, [], [target].filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || [])), false, true, undefined, documentModel);
+  const marks = sourceDecorations(source, reviewCandidates(source, { fonts: false, edits: false, text: true, targets: [], connections: [target].filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || []) }), false, true, undefined, documentModel);
   assert.ok(marks.length);
   for (const mark of marks) {
     assert.equal(mark.options.inlineClassName, 'mew-ocr-diff-text');
@@ -22,11 +23,11 @@ test('Monaco highlights locatable differences and missing additions as text', ()
     assert.ok(mark.range.endColumn > mark.range.startColumn);
   }
   const absent = new api.PdfConnections(locator, { raw: '', sourcePages: [1] });
-  const missing = sourceDecorations(source, source.candidates(null, false, false, true, [absent], []), false, true, undefined, documentModel);
+  const missing = sourceDecorations(source, reviewCandidates(source, { fonts: false, edits: false, text: true, targets: [absent], connections: [] }), false, true, undefined, documentModel);
   assert.equal(missing.length, 0, 'unprepared OCR cannot establish missing text');
   const partial = new api.PdfConnections(locator, { raw: 'A wrong', sourcePages: [1] });
   source.remember(0, source.raw.indexOf(' passage'), partial, { start: 0, end: partial.raw.length });
-  const mixed = sourceDecorations(source, source.candidates(null, false, false, true, [], [partial].filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || [])), false, true, undefined, documentModel);
+  const mixed = sourceDecorations(source, reviewCandidates(source, { fonts: false, edits: false, text: true, targets: [], connections: [partial].filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || []) }), false, true, undefined, documentModel);
   assert.ok(mixed.some(mark => mark.options.inlineClassName === 'mew-ocr-diff-text'), 'the locatable part keeps normal highlights');
   assert.equal(mixed.filter(mark => mark.options.before).length, 0, 'missing HTML uses text highlights');
 });
@@ -41,13 +42,13 @@ test('rendered OCR recovers a word between damaged runs before selection and kee
   const rendered = new api.PdfConnections(locator, { raw: first + 'x'.repeat(150) + ' same patchab1e ' + 'y'.repeat(150) + last, layer: {}, parts: [] });
   targets.push(rendered, new api.PdfConnections(locator, { raw: '', sourcePages: [1] }));
   visible.push({ number: 1, index: rendered });
-  source?.update(targets);
-  const items = source.candidates(null, false, true, true, targets), gaps = items.filter(item => item.missing);
+  source?.connect(targets);
+  const items = reviewCandidates(source, { fonts: false, edits: true, text: true, targets: targets }), gaps = items.filter(item => item.missing);
   const patch = items.find(item => item.comparison.html === 'l' && item.comparison.pdf === '1');
   assert.ok(patch, 'the locatable word uses rendered OCR as its replacement source');
   assert.equal(gaps.length, 2);
   const documentModel = new FixtureDocument({ model: { getPositionAt: at => ({ lineNumber: 1, column: at + 1 }) } }), model = documentModel.model;
-  const marks = () => sourceDecorations(source, source.candidates(null, false, false, true, targets, targets.filter(Boolean).flatMap(target => source.connections.get(target)?.preparedRanges || source.connections.get(target)?.ranges || [])), false, true, undefined, documentModel);
+  const marks = () => sourceDecorations(source, reviewCandidates(source, { fonts: false, edits: false, text: true, targets: targets, connections: targets.filter(Boolean).flatMap(target => source.connections.get(target)?.preparedRanges || source.connections.get(target)?.ranges || []) }), false, true, undefined, documentModel);
   const initial = JSON.stringify(marks());
   assert.ok(marks().some(mark => mark.options.inlineClassName === 'mew-ocr-diff-text'));
   assert.equal(marks().filter(mark => mark.options.before).length, 0);
@@ -65,7 +66,7 @@ test('rendered OCR recovers a word between damaged runs before selection and kee
   }
   for (let end = 2; end < first.length; end++) source.remember(0, end, rendered, { start: 0, end });
   assert.equal(JSON.stringify(marks()), initial, 'transient selection mappings cannot evict the prepared HTML highlights');
-  assert.equal(sourceDecorations(source, source.candidates(null, false, false, false, targets, targets.filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || [])), false, false, undefined, documentModel).length, 0);
+  assert.equal(sourceDecorations(source, reviewCandidates(source, { fonts: false, edits: false, text: false, targets: targets, connections: targets.filter(Boolean).flatMap(target => source.connections.get(target)?.ranges || []) }), false, false, undefined, documentModel).length, 0);
   assert.ok(api.applyTextEdits(source.source, patch.options[0].edits).includes('same patchab1e'));
 });
 
@@ -76,7 +77,7 @@ test('normalized exact selections compare the actual OCR text', () => {
   const source = new api.PdfConnections(locator, '<p>A known Word in a confirmed passage.</p>');
   const target = new api.PdfConnections(locator, { raw: 'A known word in a confirmed passage.', layer: {}, parts: [] });
   visible.push({ number: 1, index: target });
-  source?.update([target]);
+  source?.connect([target]);
   const start = source.raw.indexOf('Word');
   const location = locator.findLocations({}, [{ index: source, start, end: start + 4, text: 'Word' }], true)[0];
   assert.equal(location.targets[0].difference.html, 'Word');
@@ -91,7 +92,7 @@ test('ME08-385 corrupted selections highlight remaining OCR ranges without inven
   const rendered = new api.PdfConnections(locator, { raw: fixture.layerRaw, layer: {}, parts: [] });
   visible.push({ number: 408, index: rendered });
   locator.getDocumentIndex = () => extracted;
-  source?.update([rendered, extracted]);
+  source?.connect([rendered, extracted]);
   const start = source.raw.indexOf('Das einzige'), end = source.raw.indexOf('unter-', start) + 6;
   const connections = source.byTarget.get(rendered);
   for (const from of [start, source.raw.indexOf('Rivalität', start)]) {
@@ -114,7 +115,7 @@ test('missing OCR ranges exclude text confirmed in a rendered layer', () => {
   source.remember(0, 14, extracted, { start: 0, end: 14 });
   source.remember(0, 28, rendered, { start: 0, end: 28 });
   source.byTarget.get(extracted)[0].recovered = true;
-  const items = source.candidates(null, false, true, true, [rendered, extracted]).filter(item => item.missing);
+  const items = reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [rendered, extracted] }).filter(item => item.missing);
   assert.equal(items.length, 1);
   assert.equal(items[0].sourceStart, 28);
   assert.equal(source.remember(28, 14, rendered, { start: 0, end: 14 }), null);
@@ -124,8 +125,8 @@ test('ME08-385 recovered patches preserve shared words throughout the damaged fo
   const api = engine(), locator = new api.PdfLocator({}, { document: { createElement: () => ({}) } });
   const source = new api.PdfConnections(locator, fixture.source);
   const target = new api.PdfConnections(locator, { raw: fixture.raw, sourcePages: [408] });
-  source?.update([target]);
-  const items = source.candidates(null, false, true, true, [target]);
+  source?.connect([target]);
+  const items = reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [target] });
   for (const phrase of ['Art, wie man sie 1835 gegen', 'schlagen“, und zwar wegen', 'Schrecken vor der Leere', 'siehe vorl', 'Band, S. 176', '193']) {
     const start = source.raw.indexOf(phrase);
     assert.ok(start >= 0);
@@ -152,7 +153,7 @@ test('normal mapped selections skip missing-text lookup and normal diffs skip wo
   const target = new api.PdfConnections(locator, { raw: 'Normal text has a corrected word here.', sourcePages: [1], parts: [] });
   visible.push({ number: 1, index: target });
   source.remember(0, source.raw.length, target, { start: 0, end: target.raw.length });
-  source?.update([target]);
+  source?.connect([target]);
   source.candidates = () => { throw new Error('normal selection entered missing-text fallback'); };
   const start = source.raw.indexOf('changed');
   let initial;
@@ -166,7 +167,7 @@ test('normal mapped selections skip missing-text lookup and normal diffs skip wo
   assert.equal(window.recoveryCalls || 0, 0);
   assert.equal(window.wordRecoveries || 0, 0);
   delete source.candidates;
-  assert.equal(source.candidates(null, false, true, true, [target]).filter(item => item.missing).length, 0);
+  assert.equal(reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing).length, 0);
 });
 
 test('bounded missing-text recovery preserves shared words after the normal diff fails', () => {
@@ -187,7 +188,7 @@ test('an unreliable whole-range comparison cannot bypass the missing-text fallba
   const source = new api.PdfConnections(locator, { raw: 'a'.repeat(180) });
   const target = new api.PdfConnections(locator, { raw: 'b'.repeat(180), sourcePages: [1] });
   source.byTarget.set(target, [{ start: 0, end: 180, targetStart: 0, targetEnd: 180,
-    recovered: true, editorDiff: { distance: 180, parts: [{ html: source.raw, pdf: target.raw, changed: true }] } }]);
-  assert.equal(source.candidates(null, false, true, true, [target]).filter(item => item.missing).length, 1);
-  assert.equal(source.candidates(null, false, true, true, [target]).filter(item => item.missing).length, 1);
+    recovered: true, editorDiff: { distance: 180, parts: [new api.diffIndex(source.raw, target.raw)] } }]);
+  assert.equal(reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing).length, 1);
+  assert.equal(reviewCandidates(source, { fonts: false, edits: true, text: true, targets: [target] }).filter(item => item.missing).length, 1);
 });
