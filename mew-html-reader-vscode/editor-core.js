@@ -257,11 +257,10 @@
         finally { window.ReplacementReview?.refreshPresentation(); }
       }
     }
-    bindReviewSuggestions(provide, getSession) {
-      this.suggestionProvider = provide || this.suggestionProvider;
-      this.reviewSession = getSession || this.reviewSession;
-      const active = this.reviewSession?.();
-      const plans = this.suggestionProvider?.(this.getModel()) || (active ? active.items.flatMap(item => item.options) : []);
+    bindReviewSuggestions(provide, getSession, prepared) {
+      if (provide) this.suggestionProvider = provide;
+      const plans = prepared ?? this.suggestionProvider?.(this.getModel())
+        ?? getSession?.()?.items.flatMap(item => item.options) ?? [];
       if (this.plans === plans && this.plansVersion === this.snapshot?.version) return;
       this.plans = plans; this.plansVersion = this.snapshot?.version;
       this.send("reviewPlans", { plans });

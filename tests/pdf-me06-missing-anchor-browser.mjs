@@ -24,7 +24,7 @@ try {
       const visible = locator.environment.getVisiblePages().find(({ index }) => source.missingRange(index, item.sourceStart, item.sourceEnd));
       const hit = source.missingRange(visible.index, item.sourceStart, item.sourceEnd);
       item.pdfSource = source.entry(item.sourceStart, item.sourceEnd, true);
-      const anchor = locator.reviewAnchor(item, source), bounds = visible.index.layer.getBoundingClientRect();
+      const anchor = locator.reviewAnchors([item.pdfSource]).get(item.pdfSource), bounds = visible.index.layer.getBoundingClientRect();
       const part = visible.index.fontRuns(hit.start - 1, hit.start - 1, true)[0];
       const range = document.createRange(); range.setStart(part.node, hit.start - part.start); range.collapse(true);
       const expected = range.getBoundingClientRect();

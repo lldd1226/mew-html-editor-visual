@@ -107,7 +107,7 @@ try {
     const item = window.PdfReviewProvider.locator.cacheReview({ index: index, items: [] }, { fonts: ['italic', 'bold'], edits: true, connections: PdfSelection.locator.environment.getTargets().filter(Boolean).flatMap(target => index.connections.get(target)?.ranges || []) }).items[0];
     item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
     return { visible: getComputedStyle(overlay).visibility, actual: [actual.left, actual.right], expected: [expected.left, expected.right],
-      anchor: PdfSelection.locator.reviewAnchor(item, index), popup: document.querySelector('.replacement-review').getBoundingClientRect().toJSON() };
+      anchor: PdfSelection.locator.reviewAnchors([item.pdfSource]).get(item.pdfSource), popup: document.querySelector('.replacement-review').getBoundingClientRect().toJSON() };
   });
   assert.equal(geometry.visible, 'visible', 'a font pointer must keep the complete passage visible');
   geometry.actual.forEach((value, at) => assert.ok(Math.abs(value - geometry.expected[at]) < 1));

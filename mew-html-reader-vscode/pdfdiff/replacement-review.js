@@ -356,8 +356,8 @@ if (typeof module === 'object' && module.exports) {
     return session.content?.[all ? 'allEdits' : 'edits'] || (all ? session.items : session.provider.matchingItems?.(current(), session.context, session.items) || [current()])
       .flatMap(item => item?.options.find(value => value.id === session.choices.get(item.id))?.edits || []);
   }
-  function bindSuggestions(editor, provide) {
-    editor.bindReviewSuggestions(provide, () => session?.context.editor === editor && valid() ? session : null);
+  function bindSuggestions(editor, provide, plans) {
+    editor.bindReviewSuggestions(provide, () => session?.context.editor === editor && valid() ? session : null, plans);
   }
   function paintRevision(editor, model, key, edits, decorations = []) {
     const documentModel = editor.document, diff = window.PdfSelectionDiff;

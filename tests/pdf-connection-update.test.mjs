@@ -115,7 +115,7 @@ test('a font publication refreshes candidates while retaining text comparison', 
   assert.notEqual(current, data);
   assert.equal(source.pairs[0], connection);
   assert.equal(connection.editorDiff, diff);
-  assert.ok(connection.fontItems.length > 0);
+  assert.ok(connection.editorDiff.fontItems.length > 0);
   assert.ok(locator.cacheReview({ index: source, items: current.items }, { fonts: true }).items.some(item => item.font?.italic === true));
 });
 

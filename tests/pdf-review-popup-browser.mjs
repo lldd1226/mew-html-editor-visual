@@ -178,7 +178,7 @@ try {
   });
   await page.waitForSelector('.mew-pdf-review-pointer .mew-pdf-selection-caret', { timeout: 4000 });
   await page.waitForFunction(() => {
-    const anchor = PdfSelection.locator.reviewAnchor(emptyTargetItem);
+    const anchor = PdfSelection.locator.reviewAnchors([emptyTargetItem.pdfSource]).get(emptyTargetItem.pdfSource);
     const mark = document.querySelector('.mew-pdf-review-pointer .mew-pdf-selection-caret')?.getBoundingClientRect();
     return anchor && mark && Math.abs(anchor.left - mark.left) < 1 && Math.abs(anchor.top - mark.top) < 1;
   }, null, { timeout: 4000 });

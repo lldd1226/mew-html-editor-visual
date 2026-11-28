@@ -27,7 +27,7 @@ test('missing popup and highlight share the paired edge despite intervening OCR 
       ] });
       const hit = source.missingRange(target, 5, 12), navigation = source.missingRange(full, 5, 12);
       const item = { missing: true, pdfSource: { index: source, start: 5, end: 12 } };
-      const anchor = locator.reviewAnchor(item, source);
+      const anchor = locator.reviewAnchors([item.pdfSource]).get(item.pdfSource);
       const measured = ReviewHighlights.create({ document }).measureHighlights(layer, target, [hit], hit);
       const range = document.createRange(); range.setStart(nodes[0], 4); range.collapse(true);
       const edge = range.getBoundingClientRect(), bounds = layer.getBoundingClientRect();

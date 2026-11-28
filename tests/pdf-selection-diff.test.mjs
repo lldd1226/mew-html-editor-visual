@@ -59,8 +59,8 @@ test('indexed missing ranges preserve pairwise font overlap decisions at every b
   source.formats = source.formats.map(style => ({ ...style, tags: [] }));
   const fontItems = Array.from({ length: 120 }, (_, i) => ({ start: i * 3 + 1, end: i * 3 + 2, font: { italic: true, bold: false } }));
   const connection = new api.diffIndex(source.raw, source.raw);
-  connection.fontItems = fontItems;
-  source.compare = () => ({});
+  connection.editorDiff = { fontItems };
+  source.compare = () => connection.editorDiff;
   let seed = 731;
   const next = () => seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
   for (let round = 0; round < 100; round++) {
@@ -969,24 +969,24 @@ test('popup anchor reuses mappings and text geometry while following scrolling a
   visible.parts = [{ start: 0, end: visible.raw.length, node: { length: visible.raw.length } }];
   source.remember(0, source.raw.length, visible, { start: 0, end: visible.raw.length });
   const item = { sourceStart: 6, sourceEnd: 10, pdfSource: { index: source, start: 6, end: 10 } };
-  assert.equal(locator.reviewAnchor(item, source).top, 20);
-  assert.equal(locator.reviewAnchor(item, source).left, 10, 'a collapsed next-line rect must not pull a text anchor to the left');
-  assert.equal(locator.reviewAnchor(item, source).bottom, 32, 'a collapsed next-line rect must not extend a text anchor downwards');
+  assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource).top, 20);
+  assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource).left, 10, 'a collapsed next-line rect must not pull a text anchor to the left');
+  assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource).bottom, 32, 'a collapsed next-line rect must not extend a text anchor downwards');
   const initial = window.mappingCalls;
   top = 50;
-  assert.equal(locator.reviewAnchor(item, source).top, 50, 'scrolling follows the current layer position');
+  assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource).top, 50, 'scrolling follows the current layer position');
   assert.equal(measurements, 1, 'scrolling does not remeasure selected text');
   assert.equal(window.mappingCalls, initial, 'scrolling reuses the confirmed mapping');
   scale = 2;
-  assert.equal(locator.reviewAnchor(item, source).bottom, 94, 'cached coordinates follow the layer scale');
+  assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource).bottom, 94, 'cached coordinates follow the layer scale');
   assert.equal(measurements, 1, 'scaling existing geometry needs no text measurement');
   scale = 1;
   source.byTarget.set(visible, [...source.byTarget.get(visible)]);
-  locator.reviewAnchor(item, source);
+  locator.reviewAnchors([item.pdfSource]).get(item.pdfSource);
   assert.ok(window.mappingCalls > initial, 'changed connections invalidate the mapping');
   assert.equal(measurements, 2, 'changed connections invalidate text geometry');
   visible.layer.isConnected = false;
-  assert.equal(locator.reviewAnchor(item, source), null, 'detached layers never anchor a popup');
+  assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource), undefined, 'detached layers never anchor a popup');
 });
 
 test('PDF newline differences use a caret without highlighting adjacent letters', () => {
@@ -2659,7 +2659,7 @@ test('edge differences without OCR words are missing and anchor to the nearest w
         assert.equal(anchor.start, anchor.end, 'confirmed edge words are marked with a collapsed caret');
         assert.equal(anchor.start, item.sourceStart === 0 ? first : last, 'caret uses the nearest word edge');
         item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
-        assert.equal(locator.reviewAnchor(item, index)?.top, 20, 'popup receives actual anchor coordinates');
+        assert.equal(locator.reviewAnchors([item.pdfSource]).get(item.pdfSource)?.top, 20, 'popup receives actual anchor coordinates');
       } else assert.ok(item.options[0].edits.length, 'real OCR differences remain replaceable');
     }
   }

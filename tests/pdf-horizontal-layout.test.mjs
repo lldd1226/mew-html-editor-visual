@@ -2,21 +2,22 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { engine } from './support/pdf-harness.mjs';
 
-for (const rows of [1, 2]) test(`${rows}-line horizontal passages align to HTML in a different order without table markup`, async () => {
+for (const lengths of [[1, 1, 1, 1], [2, 2, 2, 2], [2, 1]]) test(`horizontal passages with ${lengths.join('/')} lines align to HTML in a different order without table markup`, async () => {
   const api = engine();
   const passages = [
     ['Links steht der erste Absatz.', 'Er setzt sich auf dieser Zeile fort.'],
     ['Die zweite Spalte beginnt hier.', 'Sie enthält eine eigene Erläuterung.'],
     ['Der dritte Abschnitt beschreibt das Beispiel.', 'Hier endet die dritte Erläuterung.'],
     ['Ganz rechts steht die letzte Bemerkung.', 'Sie ergänzt den vorherigen Abschnitt.']
-  ].map(lines => lines.slice(0, rows));
+  ].slice(0, lengths.length).map((lines, column) => lines.slice(0, lengths[column]));
   const header = 'Die Einleitung steht über der gesamten Breite.';
   const footer = 'Nach den nebeneinanderstehenden Absätzen folgt der Schluss.';
   const item = (str, x, y, width = str.length * 3) => ({
     str, width, height: 8, hasEOL: true, transform: [8, 0, 0, 8, x, y]
   });
   const items = [item(header, 10, 124, 755),
-    ...passages[0].flatMap((_, i) => passages.map((lines, column) => item(lines[i], 10 + column * 200, 102 - i * 12))),
+    ...passages[0].flatMap((_, i) => passages.flatMap((lines, column) =>
+      lines[i] ? [item(lines[i], 10 + column * 200, 102 - i * 12)] : [])),
     item(footer, 10, 65, 755)];
   const page = { getTextContent: async () => ({ items }) };
   const pdf = { getPage: async () => page }, numbers = [1];
@@ -24,7 +25,7 @@ for (const rows of [1, 2]) test(`${rows}-line horizontal passages align to HTML 
     document: { createElement: () => ({}) }, getPdf: () => pdf, getSourcePages: () => numbers,
     isCurrent: () => true, waitForIdle: async () => {}
   });
-  const source = new api.PdfConnections(locator, [header, ...[2, 0, 3, 1].map(i => passages[i].join(' ')), footer]
+  const source = new api.PdfConnections(locator, [header, ...[2, 0, 3, 1].filter(i => i < passages.length).map(i => passages[i].join(' ')), footer]
     .map(text => `<section><p>${text}</p></section>`).join(''));
   const ordinary = await api.readPageText(page);
   assert.equal(ordinary.horizontal, false);
@@ -36,6 +37,10 @@ for (const rows of [1, 2]) test(`${rows}-line horizontal passages align to HTML 
   const full = await locator.indexDocument(pdf, numbers, source);
   const content = locator.columnText(pdf, 1);
   assert.equal(content?.horizontal, true);
+  const otherLocator = new api.PdfLocator({}, locator.environment);
+  const otherSource = new api.PdfConnections(otherLocator, { raw: source.raw });
+  const otherIndex = await otherLocator.indexDocument(pdf, numbers, otherSource);
+  assert.equal(otherIndex.pages[0].columnText, content);
   const layer = new api.PdfConnections(locator, { ...content, layer: { closest: () => ({ dataset: { pageNumber: 1 } }) } });
   const verify = target => {
     for (const text of [header, ...passages.map(lines => lines.join(' ')), footer]) {

@@ -9,8 +9,8 @@ function section(source, start, end) {
   assert.ok(a >= 0 && b > a, `PDF test adapter needs updated boundaries: ${start}`);
   return source.slice(a, b);
 }
-const preparationEntry = section(reviewFile, '  prepareReview(context = {}) {', '  reviewItems(context = {}) {').trim();
-const reviewEntry = section(reviewFile, '  reviewItems(context = {}) {', '  get currentReview() {').trim();
+const preparationEntry = section(reviewFile, '  prepareReview(context = {}) {', '  reviewItems(').trim();
+const reviewEntry = section(reviewFile, '  reviewItems(', '  get currentReview() {').trim();
 const mappingSection = section(reviewFile, '// Source/PDF mapping and candidate generation.',
   '// Shared popup and session initialization.').replace(preparationEntry, '').replace(reviewEntry, '');
 const selectionFile = await readFile(new URL('../../public/pdfdiff/pdf-selection.js', import.meta.url), 'utf8');

@@ -51,7 +51,7 @@ for (const scope of ['shared', 'copied']) for (const [name, edit, reuse, pdfUpda
     assert.equal(fontReads === 0, reuse, 'only unchanged connections reuse font comparisons');
     if (reuse) {
       assert.equal(JSON.stringify(connection.editorDiff), snapshot, 'reuse does not mutate the old snapshot');
-      for (const kept of pairs) assert.equal(kept.fontItems, connection.fontItems, 'relative font spans survive edits outside the connection');
+      for (const kept of pairs) assert.equal(kept.editorDiff.fontItems, connection.editorDiff.fontItems, 'relative font spans survive edits outside the connection');
       for (const item of reviewCandidates(current, { items: [], fonts: true, edits: false, connections: pairs }))
         assert.equal(item.htmlFont, current.formats[item.sourceStart], 'candidates reference the current HTML tags');
     }

@@ -25,7 +25,7 @@ test('mapped first and last PDF words show edge carets and anchor at the same ed
         const item = window.PdfReviewProvider.locator.cacheReview({ index: index }, { fonts: false, edits: true, text: true, targets: [target] }).items.find(item => item.missing);
         const hit = index.missingRange(target, item.sourceStart, item.sourceEnd);
         item.pdfSource = { index, start: item.sourceStart, end: item.sourceEnd };
-        const anchor = locator.reviewAnchor(item, index);
+        const anchor = locator.reviewAnchors([item.pdfSource]).get(item.pdfSource);
         const div = { clientLeft: 0, clientTop: 0, clientWidth: 100, clientHeight: 100,
           offsetWidth: 100, offsetHeight: 100, getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
         const measured = highlights.measureHighlights(div, target, [hit], hit);

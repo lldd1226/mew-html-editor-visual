@@ -35,7 +35,7 @@ try {
         const span = part ? part.node.parentElement.closest('span[role="presentation"]') : spans.findLast(span=>span.textContent.trim().length>15);
         const item = items.find(item=>item.str===span.textContent);
         if(missing) missing.pdfSource ||= source.entry(missing.sourceStart,missing.sourceEnd,true);
-        const anchor = missing && locator.reviewAnchor(missing);
+        const anchor = missing && locator.reviewAnchors([missing.pdfSource]).get(missing.pdfSource);
         const painted = PdfReviewProvider.highlights.getHighlight(view.div,true);
         const current = hit && PdfReviewProvider.highlights.measureHighlights(view.div,visible.index,[hit],hit);
         const overlays = painted?.notices?.filter(n=>n.missing).map(n=>n.box);
